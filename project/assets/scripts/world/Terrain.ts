@@ -1,6 +1,11 @@
 /**
  * Terrain generation — fully procedural, deterministic per seed.
  * The battlefield is 64x64 tiles, point-symmetric so both sides are fair.
+ *
+ * Heights follow the reference model: a tile has an integer level, and the
+ * renderer lifts its four corners independently.  Because neighbouring tiles
+ * share corners, a 1-level step turns into a smooth ramp for free — that is the
+ * job `rampType` does in the retail engine (ObjectPosition.ts + rampHeights.ts).
  */
 import { MAP_TILES, makeRng, TILE, HALF } from '../core/Core';
 
@@ -10,6 +15,9 @@ export enum TileKind {
     Rock = 2,
     Crystal = 3,
 }
+
+/** a tile's step cost for connectivity, mirroring |Δz| <= 1 in the reference */
+export const MAX_STEP_LEVEL = 1;
 
 export interface CrystalNode {
     id: number;
@@ -28,6 +36,11 @@ export class TerrainMap {
     kind = new Uint8Array(MAP_TILES * MAP_TILES);
     /** static blocking (rocks) */
     solid = new Uint8Array(MAP_TILES * MAP_TILES);
+    /** integer height level per tile (0 = ground, 1 = dune, 2 = rock) */
+    level = new Uint8Array(MAP_TILES * MAP_TILES);
+    /** vertex height field in levels, (N+1)^2 — shared corners make ramps */
+    vh = new Float32Array((MAP_TILES + 1) * (MAP_TILES + 1));
+    maxLevel = 1;
     /** fine height-ish noise for tinting the ground */
     tint = new Float32Array(MAP_TILES * MAP_TILES);
     /** movement multiplier per tile (sand 1.0, dune slower, crystal slowest) */
@@ -45,6 +58,89 @@ export class TerrainMap {
     isSolid(tx: number, ty: number) {
         if (!this.inside(tx, ty)) return true;
         return this.solid[this.idx(tx, ty)] === 1;
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* HEIGHT                                                            */
+    /* ---------------------------------------------------------------- */
+
+    levelAt(tx: number, ty: number) {
+        if (!this.inside(tx, ty)) return 0;
+        return this.level[this.idx(tx, ty)];
+    }
+
+    /** corner height in levels, clamped to the field */
+    vhAt(vx: number, vy: number) {
+        const s = this.size + 1;
+        const x = vx < 0 ? 0 : vx > this.size ? this.size : vx;
+        const y = vy < 0 ? 0 : vy > this.size ? this.size : vy;
+        return this.vh[y * s + x];
+    }
+
+    /**
+     * Bilinear terrain height (in levels) at a world position.
+     * This is what lifts units, projectiles, decals and shadows onto the ground.
+     */
+    heightAt(wx: number, wy: number) {
+        const n = this.size;
+        const gx = wx / TILE + n / 2;
+        const gy = wy / TILE + n / 2;
+        const tx = Math.floor(gx), ty = Math.floor(gy);
+        if (tx < 0 || ty < 0 || tx >= n || ty >= n) return 0;
+        const fx = gx - tx, fy = gy - ty;
+        const h00 = this.vhAt(tx, ty), h10 = this.vhAt(tx + 1, ty);
+        const h01 = this.vhAt(tx, ty + 1), h11 = this.vhAt(tx + 1, ty + 1);
+        return (h00 * (1 - fx) + h10 * fx) * (1 - fy) + (h01 * (1 - fx) + h11 * fx) * fy;
+    }
+
+    /** can a ground unit step between two tiles? (reference: |Δz| <= 1) */
+    canStep(ax: number, ay: number, bx: number, by: number) {
+        return Math.abs(this.levelAt(ax, ay) - this.levelAt(bx, by)) <= MAX_STEP_LEVEL;
+    }
+
+    private claimLevel(tx: number, ty: number, r: number, lv: number) {
+        for (let y = ty - r; y <= ty + r; y++) {
+            for (let x = tx - r; x <= tx + r; x++) {
+                if (this.inside(x, y)) this.level[this.idx(x, y)] = lv;
+            }
+        }
+    }
+
+    /** rebuilds integer levels + the shared-corner height field */
+    rebuildHeight() {
+        const n = this.size;
+        for (let i = 0; i < this.kind.length; i++) {
+            const k = this.kind[i];
+            this.level[i] = k === TileKind.Rock ? 2 : k === TileKind.Dune ? 1 : 0;
+        }
+        // starting bowls and the mid lane are levelled so bases sit flat
+        const bases = [{ tx: 7, ty: 32 }, { tx: n - 8, ty: n - 33 }];
+        for (const b of bases) this.claimLevel(b.tx, b.ty, 9, 0);
+        for (let x = 0; x < n; x++) {
+            const y = Math.round(n / 2 + Math.sin(x * 0.22) * 4);
+            for (let d = -2; d <= 2; d++) if (this.inside(x, y + d)) this.level[this.idx(x, y + d)] = 0;
+        }
+        for (const node of this.nodes) this.claimLevel(node.tx, node.ty, 2, 0);
+
+        // every vertex takes the mean of the (up to) four tiles touching it, so
+        // a 1-level cliff becomes a one-tile ramp instead of a wall
+        let mx = 0;
+        for (let vy = 0; vy <= n; vy++) {
+            for (let vx = 0; vx <= n; vx++) {
+                let sum = 0, cnt = 0;
+                for (let dy = -1; dy <= 0; dy++) {
+                    for (let dx = -1; dx <= 0; dx++) {
+                        const tx = vx + dx, ty = vy + dy;
+                        if (tx < 0 || ty < 0 || tx >= n || ty >= n) continue;
+                        sum += this.level[ty * n + tx];
+                        cnt++;
+                    }
+                }
+                this.vh[vy * (n + 1) + vx] = cnt ? sum / cnt : 0;
+            }
+        }
+        for (let i = 0; i < this.level.length; i++) if (this.level[i] > mx) mx = this.level[i];
+        this.maxLevel = Math.max(1, mx);
     }
 
     isCrystal(tx: number, ty: number) {
@@ -172,9 +268,9 @@ export class TerrainMap {
             this.addNode(N - 1 - tx, N - 1 - ty, amount, nid++, rng);
         }
         this.rebuildSpeed();
+        this.rebuildHeight();
     }
 
-    /** (re)computes per-tile movement multipliers from the tile kind */
     rebuildSpeed() {
         for (let i = 0; i < this.kind.length; i++) {
             const k = this.kind[i];

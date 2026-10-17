@@ -3,15 +3,16 @@
  * Supports drag-pan, pinch zoom, keyboard pan and edge clamping.
  */
 import { Node } from 'cc';
-import { HALF, clamp } from '../core/Core';
+import { clamp } from '../core/Core';
+import { PROJ_HALF_X, PROJ_HALF_Y } from '../world/Iso';
 
 export class CameraRig {
     x = 0;
     y = 0;
-    zoom = 0.86;
-    targetZoom = 0.86;
-    minZoom = 0.5;
-    maxZoom = 1.7;
+    zoom = 1.25;
+    targetZoom = 1.25;
+    minZoom = 0.62;
+    maxZoom = 2.1;
     /** impact shake, decays in a few frames */
     private shakeAmt = 0;
     private shakeT = 0;
@@ -107,8 +108,10 @@ export class CameraRig {
         this.zoom = this.targetZoom;
         const halfW = this.screenW / 2 / this.zoom;
         const halfH = this.screenH / 2 / this.zoom;
-        const limX = Math.max(0, HALF + 120 - halfW);
-        const limY = Math.max(0, HALF + 120 - halfH);
+        // the camera lives in projected (isometric) space, so clamp against the
+        // diamond's half extents rather than the cartesian map size
+        const limX = Math.max(0, PROJ_HALF_X + 120 - halfW);
+        const limY = Math.max(0, PROJ_HALF_Y + 160 - halfH);
         this.tx = clamp(this.tx, -limX, limX);
         this.ty = clamp(this.ty, -limY, limY);
     }

@@ -581,8 +581,13 @@ export class Game {
      * Box select. Combat units win over harvesters so a sloppy drag around the
      * base does not drag the economy along.
      */
-    selectInRect(minX: number, minY: number, maxX: number, maxY: number, additive = false): number {
-        const inBox = (e: Unit) => e.x >= minX && e.x <= maxX && e.y >= minY && e.y <= maxY;
+    selectInRect(
+        minX: number, minY: number, maxX: number, maxY: number,
+        additive = false, hit?: (u: Unit) => boolean,
+    ): number {
+        // in an isometric view a screen-space rectangle is not an axis-aligned
+        // world box, so the caller may supply its own projected hit test
+        const inBox = (e: Unit) => (hit ? hit(e) : (e.x >= minX && e.x <= maxX && e.y >= minY && e.y <= maxY));
         const army: Unit[] = [];
         const eco: Unit[] = [];
         for (const u of this.units) {
@@ -1339,6 +1344,14 @@ export class Game {
             u.cloakT += dt;
             u.calm += dt;
             if (u.scan > 0) u.scan -= dt;
+            // turret keeps tracking whatever this unit is shooting at, then drifts
+            // back to the hull heading (reference: MoveTrait idle turret return)
+            if (u.turretHold > 0) {
+                u.turretHold -= dt;
+                u.aimTurret(dt, u.turretAim);
+            } else {
+                u.aimTurret(dt);
+            }
 
             // cloak state: stealth units re-cloak shortly after firing
             const fieldCloak = this.time < u.mirageUntil;
@@ -1701,10 +1714,13 @@ export class Game {
         if (u) {
             u.cloakT = 0;
             u.recoil = w.proj === 'bullet' ? 0.06 : 0.18;
-            // turretless units must point at the target before shooting
-            if (w.proj !== 'bullet' || u.def.kind === 'infantry') {
-                u.face = Math.atan2(target.y - u.y, target.x - u.x);
-            }
+            // The turret swings onto the target (reference: AttackTask writes
+            // turretTrait.desiredFacing). The hull does NOT snap around — only
+            // turretless infantry pivot in place.
+            const ang = Math.atan2(target.y - u.y, target.x - u.x);
+            u.turretAim = ang;
+            u.turretHold = 2.2;
+            if (u.def.kind === 'infantry') u.face = ang;
             this.events.onSfx?.(w.proj === 'bullet' ? 'gun' : w.proj === 'shell' ? 'cannon' : 'rocket', ox, oy);
         } else {
             this.events.onSfx?.('cannon', ox, oy);

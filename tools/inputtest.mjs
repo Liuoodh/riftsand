@@ -124,10 +124,13 @@ const probe = () => page.evaluate(() => {
     const app = canvas.getChildByName('App').getComponent('RiftApp');
     const g = app.game;
     const cam = app.cam;
-    const toScreen = (wx, wy) => ({
-        x: (wx - cam.x) * cam.zoom + 640,
-        y: 360 - (wy - cam.y) * cam.zoom,
-    });
+    const TILE_W = 32, ISO_HW = 28, ISO_HH = 14, HEIGHT_PX = 16;
+    const toScreen = (wx, wy) => {
+        const rx = wx / TILE_W, ry = wy / TILE_W;
+        const px = (rx - ry) * ISO_HW;
+        const py = (rx + ry) * ISO_HH - g.terrain.heightAt(wx, wy) * HEIGHT_PX;
+        return { x: (px - cam.x) * cam.zoom + 640, y: 360 - (py - cam.y) * cam.zoom };
+    };
     return {
         mode: app.ui.mode,
         camX: cam.x,
@@ -319,7 +322,12 @@ if (harv && fresh.crystals.length) {
         const cam = app.cam;
         const pts = app.game.terrain.nodes
             .filter((m) => m.amount > 0)
-            .map((n) => ({ x: (n.x - cam.x) * cam.zoom + 640, y: 360 - (n.y - cam.y) * cam.zoom }));
+            .map((n) => {
+                const rx = n.x / 32, ry = n.y / 32;
+                const px = (rx - ry) * 28;
+                const py = (rx + ry) * 14 - app.game.terrain.heightAt(n.x, n.y) * 16;
+                return { x: (px - cam.x) * cam.zoom + 640, y: 360 - (py - cam.y) * cam.zoom };
+            });
         // pick the crystal closest to the screen centre so the tap lands on screen
         pts.sort((a, b) => Math.hypot(a.x - 640, a.y - 360) - Math.hypot(b.x - 640, b.y - 360));
         return pts[0] || null;

@@ -15,7 +15,7 @@ import {
     EventTouch, EventMouse, EventKeyboard, KeyCode, Vec2, Layers, Graphics, Color, profiler,
 } from 'cc';
 import {
-    BUILDINGS, Faction, HALF, TILE, clamp, dist,
+    BUILDINGS, UNITS, Faction, HALF, TILE, clamp, dist,
     TAP_MAX_MS, TAP_SLOP, LONG_PRESS_MS, BOX_MIN_PX, SNAP_PX,
     ProdCat, SuperWeaponId, SUPER_WEAPONS,
 } from './core/Core';
@@ -24,6 +24,7 @@ import { Building, Unit, Entity } from './game/Entities';
 import { CrystalNode } from './world/Terrain';
 import { WorldRenderer, gfxNode } from './render/Views';
 import { CameraRig } from './render/CameraRig';
+import { worldToProj, projToWorld } from './world/Iso';
 import { UI, mkNode } from './ui/UI';
 import { RadialItem } from './ui/Overlay';
 import { sfx } from './audio/Sfx';
@@ -481,7 +482,7 @@ export class RiftApp extends Component {
         if (this.ui.onTap(x, y)) return;
         if (this.ui.mode !== 'game' || !this.game || !this.cam) return;
         const g = this.game;
-        const w = this.cam.screenToWorld(x, y);
+        const w = this.toWorld(x, y);
 
         /* ---- super weapon targeting ---- */
         if (g.swTargeting) {
@@ -611,7 +612,7 @@ export class RiftApp extends Component {
 
     private pushOrderFx(sx: number, sy: number, attack: boolean) {
         if (!this.cam || !this.game) return;
-        const w = this.cam.screenToWorld(sx, sy);
+        const w = this.toWorld(sx, sy);
         this.game.pushFx(w.x, w.y, attack ? 'boom' : 'spark', attack ? 0.35 : 0.4, attack ? 0.6 : 0.9);
     }
 
@@ -675,12 +676,21 @@ export class RiftApp extends Component {
         this.ui.overlay.hideBox();
         const g = this.game;
         if (!g || !this.cam) return;
-        const a = this.cam.screenToWorld(t.sx, t.sy);
-        const b = this.cam.screenToWorld(t.lx, t.ly);
-        const n = g.selectInRect(
-            Math.min(a.x, b.x), Math.min(a.y, b.y),
-            Math.max(a.x, b.x), Math.max(a.y, b.y),
-        );
+        const x0 = Math.min(t.sx, t.lx), x1 = Math.max(t.sx, t.lx);
+        const y0 = Math.min(t.sy, t.ly), y1 = Math.max(t.sy, t.ly);
+        const cam = this.cam;
+        const T = g.terrain;
+        // project every unit and test against the screen rectangle: the correct
+        // test in an isometric view, where a screen box maps to a world diamond
+        // pointer coords live in screen-centre space (see Pointer.sx), so compare
+        // against the projected point in that same space
+        const hit = (u: Unit) => {
+            const p = worldToProj(u.x, u.y, T.heightAt(u.x, u.y));
+            const sx = (p.x - cam.x) * cam.zoom;
+            const sy = (p.y - cam.y) * cam.zoom;
+            return sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1;
+        };
+        const n = g.selectInRect(x0, y0, x1, y1, false, hit);
         this.ui.activeGroup = -1;
         if (n === 0) g.clearSelection();
         else this.ui.toast(`框选 ${n} 个单位`, 'info');
@@ -753,7 +763,10 @@ export class RiftApp extends Component {
         app.hideModal();
 
         const core = game.buildings.find(b => b.owner === 0 && b.def.isCore);
-        if (core) this.cam.focus(core.x + 90, core.y - 80, true);
+        if (core) {
+            const fp = worldToProj(core.x + 90, core.y - 80, 0);
+            this.cam.focus(fp.x, fp.y, true);
+        }
         (globalThis as any).__riftsandGame = game;
         this.ui.refresh(0);
         this.ui.toast('战斗开始 · 摧毁敌方指挥核心', 'good');
@@ -888,10 +901,28 @@ export class RiftApp extends Component {
         gr.stroke();
     }
 
+    /**
+     * Screen -> world. The camera works in projected (isometric) space, so undo
+     * the projection here, then compensate for terrain lift: a point on a dune
+     * sits higher on screen than the same ground point on flat sand.
+     */
+    private toWorld(sx: number, sy: number) {
+        const p = this.cam!.screenToWorld(sx, sy);
+        let z = 0;
+        let w = projToWorld(p.x, p.y, 0);
+        if (this.game) {
+            for (let i = 0; i < 2; i++) {
+                z = this.game.terrain.heightAt(w.x, w.y);
+                w = projToWorld(p.x, p.y, z);
+            }
+        }
+        return w;
+    }
+
     private lastPointerWorld() {
         const p = this.touches.size > 0 ? Array.from(this.touches.values())[0] : this.mousePointer;
         if (p && this.cam) {
-            const w = this.cam.screenToWorld(p.lx, p.ly);
+            const w = this.toWorld(p.lx, p.ly);
             this.lastBuildWorld.x = w.x;
             this.lastBuildWorld.y = w.y;
             return w;
@@ -900,7 +931,8 @@ export class RiftApp extends Component {
         if (this.lastBuildWorld.x !== null && this.lastBuildWorld.y !== null) {
             return { x: this.lastBuildWorld.x, y: this.lastBuildWorld.y };
         }
-        return this.cam ? { x: this.cam.x, y: this.cam.y } : { x: 0, y: 0 };
+        if (!this.cam) return { x: 0, y: 0 };
+        return projToWorld(this.cam.x, this.cam.y, 0);
     }
 }
 
@@ -919,6 +951,8 @@ function tryBoot(): boolean {
     const canvas = findCanvas();
     if (!canvas) return false;
     anyObj.__RIFTSAND_BOOTED__ = true;
+    // exposed for the headless test / showcase tooling
+    anyObj.__riftsandDefs = { UNITS, BUILDINGS };
     let appNode = canvas.getChildByName('App');
     if (!appNode) {
         appNode = new Node('App');

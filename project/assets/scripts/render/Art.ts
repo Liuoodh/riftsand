@@ -8,6 +8,7 @@
  *   warm sand ground · dark slate machinery · cyan neon strips · amber accents
  */
 import { Color, Graphics } from 'cc';
+import { facingDeg } from './Frames';
 import { PAL, HEX, Faction, UnitDef, BuildingDef, TILE, makeRng } from '../core/Core';
 
 const C = {
@@ -20,6 +21,10 @@ const C = {
     slate: HEX(PAL.slate),
     slateLight: HEX(PAL.slateLight),
     slateDark: HEX(PAL.slateDark),
+    /** three-step hull shading: lit top, edge highlight, shaded side wall */
+    hullTop: HEX('#4b5461'),
+    hullEdge: HEX('#6b7688'),
+    hullSide: HEX('#252a33'),
     ink: HEX(PAL.ink),
     cyan: HEX(PAL.cyan),
     cyanDim: HEX(PAL.cyanDim),
@@ -82,13 +87,23 @@ function shadowEllipse(g: Graphics, rx: number, ry: number, ox = 3, oy = -4, alp
 /* ================================================================== */
 /* UNITS                                                              */
 /* ================================================================== */
-export function drawUnit(g: Graphics, def: UnitDef, faction: Faction) {
+/**
+ * Paint one unit image.
+ * `dir8` / `turretDir8` are sprite facing indices (see Frames.ts), `frame` is
+ * the index inside the current sequence.  The hull is drawn in a fixed 3/4 iso
+ * view — rotating a painted 2D hull looks wrong in an isometric world, which is
+ * exactly why the original ships discrete facing images instead.
+ */
+export function drawUnit(
+    g: Graphics, def: UnitDef, faction: Faction,
+    dir8 = 0, frame = 0, turretDir8 = dir8,
+) {
     g.clear();
     const tc = team(faction);
     const gc = glow(faction);
 
     if (def.kind === 'infantry') {
-        drawInfantry(g, def, faction, tc, gc);
+        drawInfantry(g, def, faction, tc, gc, dir8, frame);
         return;
     }
     if (def.kind === 'air') {
@@ -96,24 +111,33 @@ export function drawUnit(g: Graphics, def: UnitDef, faction: Faction) {
         return;
     }
     if (def.kind === 'harvester') {
-        drawHarvester(g, def, faction, tc, gc);
+        drawHarvester(g, def, faction, tc, gc, dir8, frame);
         return;
     }
     if (def.kind === 'mcv') {
-        drawMcv(g, def, faction, tc, gc);
+        drawMcv(g, def, faction, tc, gc, dir8, frame);
         return;
     }
-    drawVehicle(g, def, faction, tc, gc);
+    drawVehicle(g, def, faction, tc, gc, dir8, frame, turretDir8);
 }
 
-function drawInfantry(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Color) {
+function drawInfantry(
+    g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Color,
+    dir8: number, frame: number,
+) {
     const isRocket = def.id === 'breaker' || def.id === 'stinger';
     const isEngineer = !!def.engineer;
     const isStealth = !!def.cloak;
+    const ta = (facingDeg(dir8) * Math.PI) / 180;
+    // > 0 means walking away from the camera, so the visor is hidden
+    const away = Math.sin(ta) > 0.35;
     shadowEllipse(g, isStealth ? 9 : 10, 4.5, 1, -1, 46);
-    // legs
-    rr(g, -4, -2, 4, 7, 1.5, C.slateDark);
-    rr(g, 1, -2, 4, 7, 1.5, C.slateDark);
+    // legs swing out of phase across the 4 walk frames
+    const ph = (frame / 4) * Math.PI * 2;
+    const l1 = Math.max(0, Math.sin(ph)) * 1.9;
+    const l2 = Math.max(0, Math.sin(ph + Math.PI)) * 1.9;
+    rr(g, -4, -2 + l1, 4, 7 - l1 * 0.35, 1.5, C.slateDark);
+    rr(g, 1, -2 + l2, 4, 7 - l2 * 0.35, 1.5, C.slateDark);
 
     if (isEngineer) {
         // hi-vis vest and a tool pack instead of a rifle
@@ -132,8 +156,8 @@ function drawInfantry(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc
     rr(g, -7, 8, 5, 4, 1.5, tc);
     // helmet
     circle(g, 1, 14, isStealth ? 3.6 : 4.2, isStealth ? C.slateDark : C.slateLight, C.slateDark, 1);
-    // visor
-    line(g, 2, 15, 5, 15, isStealth ? HEX(PAL.violet, 220) : gc, 1.8);
+    // visor only reads from the front
+    if (!away) line(g, 2, 15, 5, 15, isStealth ? HEX(PAL.violet, 220) : gc, 1.8);
     if (isStealth) {
         // folded cloak silhouette
         g.moveTo(-8, 6);
@@ -153,7 +177,7 @@ function drawInfantry(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc
 }
 
 /** mobile construction vehicle: a tracked hull carrying a folded command core */
-function drawMcv(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Color) {
+function drawMcv(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Color, dir8: number, frame: number) {
     const w = 40, h = 26;
     shadowEllipse(g, w * 0.6, h * 0.5, 3, -4, 60);
     rr(g, -w / 2, -h / 2 - 2, w, 6, 2.4, C.slateDark);
@@ -175,45 +199,153 @@ function drawMcv(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Col
     rr(g, w / 2 - 12, -3, 8, 5, 1.2, tc);
 }
 
-function drawVehicle(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Color) {
-    const heavy = def.armor === 'heavy';
-    const w = heavy ? 30 : 26;
-    const h = heavy ? 19 : 16;
-    shadowEllipse(g, w * 0.62, h * 0.55, 3, -4, 56);
+/** iso scale factors: world units -> projected pixels (28/32, 14/32) */
+const ISO_SX = 28 / 32;
+const ISO_SY = 14 / 32;
 
-    // treads
-    rr(g, -w / 2, -h / 2 - 2.5, w, 5, 2.2, C.slateDark);
-    rr(g, -w / 2, h / 2 - 2.5, w, 5, 2.2, C.slateDark);
-    for (let i = -2; i <= 2; i++) {
-        line(g, i * 5.4, -h / 2 - 2.2, i * 5.4, -h / 2 + 2.2, C.ink, 1.2);
-        line(g, i * 5.4, h / 2 - 2.2, i * 5.4, h / 2 + 2.2, C.ink, 1.2);
+/**
+ * Draw a rotated box as an isometric solid: two visible side walls plus a top
+ * face. This is the cheap equivalent of the reference's 8-facing voxel/sprite
+ * hull — a flat painted footprint simply does not read as a vehicle in an
+ * isometric world.
+ */
+function isoBody(
+    g: Graphics, L: number, W: number, H: number, dirDeg: number,
+    topFill: Color, topLine: Color, sideFill: Color,
+) {
+    const a = (dirDeg * Math.PI) / 180;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    const local: number[][] = [[-L / 2, -W / 2], [L / 2, -W / 2], [L / 2, W / 2], [-L / 2, W / 2]];
+    const proj = (lx: number, ly: number, lift: number) => {
+        const dx = lx * ca - ly * sa;
+        const dy = lx * sa + ly * ca;
+        return { x: (dx - dy) * ISO_SX, y: (dx + dy) * ISO_SY - lift };
+    };
+    const top = local.map(([x, y]) => proj(x, y, H));
+    const bot = local.map(([x, y]) => proj(x, y, 0));
+    for (let i = 0; i < 4; i++) {
+        const j = (i + 1) % 4;
+        g.moveTo(top[i].x, top[i].y);
+        g.lineTo(top[j].x, top[j].y);
+        g.lineTo(bot[j].x, bot[j].y);
+        g.lineTo(bot[i].x, bot[i].y);
+        g.close();
+        g.fillColor = sideFill;
+        g.fill();
     }
-
-    // hull
-    rr(g, -w / 2 + 1, -h / 2, w - 2, h, 3, C.slate, C.slateLight, 1.2);
-    // front wedge
-    poly(g, [[w / 2 - 4, -h / 2 + 1], [w / 2 + 2, 0], [w / 2 - 4, h / 2 - 1]], C.slateLight, null);
-    // team stripe
-    rr(g, -w / 2 + 3, -2, w * 0.42, 4, 1.5, teamDim(faction));
-    rr(g, -w / 2 + 3, -1, w * 0.3, 2, 1, tc);
-    // turret
-    if (def.id === 'mortar' || def.id === 'squall') {
-        rr(g, -4, -5, 12, 10, 2, C.slateLight, C.slateDark, 1);
-        for (let i = 0; i < 3; i++) {
-            line(g, 6, -3 + i * 3, 16, -3 + i * 3, C.slateDark, 2.2);
-        }
-        neon(g, 12, -4, 12, 4, gc, 1.2);
-    } else {
-        circle(g, 0, 0, heavy ? 7 : 5.6, C.slateLight, C.slateDark, 1.2);
-        rr(g, 2, -1.6, w * 0.5, 3.2, 1.2, C.slateDark, C.slateLight, 0.8);
-        line(g, w * 0.32, 0, w * 0.55, 0, C.slateLight, 2.4);
-        circle(g, 0, 0, 2, gc);
-    }
-    // side lights
-    circle(g, -w / 2 + 5, h / 2 - 3, 1.2, C.amber);
+    g.moveTo(top[0].x, top[0].y);
+    for (let i = 1; i < 4; i++) g.lineTo(top[i].x, top[i].y);
+    g.close();
+    g.fillColor = topFill;
+    g.fill();
+    g.strokeColor = topLine;
+    g.lineWidth = 1.2;
+    g.stroke();
+    return { top, proj };
 }
 
-function drawHarvester(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Color) {
+function drawVehicle(
+    g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Color,
+    dir8: number, frame: number, turretDir8: number,
+) {
+    const heavy = def.armor === 'heavy';
+    const L = heavy ? 33 : 28;
+    const W = heavy ? 21 : 18;
+    const H = heavy ? 12 : 9.5;
+
+    // contact shadow on the ground plane
+    g.ellipse(3, -4, L * 0.58, W * 0.5);
+    g.fillColor = new Color(0, 0, 0, 58);
+    g.fill();
+
+    // hull reads as a lit top face over two darker side walls
+    const body = isoBody(g, L, W, H, facingDeg(dir8), C.hullTop, C.hullEdge, C.hullSide);
+    const a = (facingDeg(dir8) * Math.PI) / 180;
+    const ca = Math.cos(a), sa = Math.sin(a);
+
+    // treads run along the hull sides; the link offset scrolls with the frame
+    const sc = (frame / 4) * 4;
+    for (const side of [-1, 1]) {
+        const off = (W / 2 - 2.6) * side;
+        const p0 = body.proj(-L / 2 + 1.5 + sc, off, H + 0.6);
+        const p1 = body.proj(L / 2 - 1.5 + sc, off, H + 0.6);
+        g.moveTo(p0.x, p0.y);
+        g.lineTo(p1.x, p1.y);
+        g.strokeColor = C.ink;
+        g.lineWidth = 3.6;
+        g.stroke();
+        g.moveTo(p0.x, p0.y);
+        g.lineTo(p1.x, p1.y);
+        g.strokeColor = C.slateDark;
+        g.lineWidth = 2;
+        g.stroke();
+    }
+
+    // team stripe down the spine of the hull
+    const s0 = body.proj(-L * 0.3, -W * 0.16, H + 0.5);
+    const s1 = body.proj(L * 0.16, -W * 0.16, H + 0.5);
+    g.moveTo(s0.x, s0.y);
+    g.lineTo(s1.x, s1.y);
+    g.strokeColor = tc;
+    g.lineWidth = 2.6;
+    g.stroke();
+
+    // turret: independent heading, iso-foreshortened barrel
+    const c = body.proj(0, 0, H + 0.6);
+    const ta = (facingDeg(turretDir8) * Math.PI) / 180;
+    const tdx = Math.cos(ta), tdy = Math.sin(ta);
+    const bx = (tdx - tdy) * ISO_SX;
+    const by = (tdx + tdy) * ISO_SY;
+
+    if (def.id === 'mortar' || def.id === 'squall') {
+        g.ellipse(c.x, c.y, 8, 5);
+        g.fillColor = C.slateLight;
+        g.fill();
+        g.strokeColor = C.slateDark;
+        g.lineWidth = 1;
+        g.stroke();
+        for (let i = -1; i <= 1; i++) {
+            const nxp = -by * i * 2.6;
+            const nyp = bx * i * 2.6;
+            g.moveTo(c.x + bx * 3 + nxp, c.y + by * 3 + nyp);
+            g.lineTo(c.x + bx * L * 0.5 + nxp, c.y + by * L * 0.5 + nyp);
+            g.strokeColor = C.slateDark;
+            g.lineWidth = 2;
+            g.stroke();
+        }
+    } else {
+        g.ellipse(c.x, c.y, heavy ? 7.5 : 6, heavy ? 4.8 : 4);
+        g.fillColor = C.slateLight;
+        g.fill();
+        g.strokeColor = C.slateDark;
+        g.lineWidth = 1.1;
+        g.stroke();
+        const len = L * 0.66;
+        g.moveTo(c.x + bx * 2, c.y + by * 2);
+        g.lineTo(c.x + bx * len, c.y + by * len);
+        g.strokeColor = C.slateDark;
+        g.lineWidth = 3.8;
+        g.stroke();
+        g.moveTo(c.x + bx * 3, c.y + by * 3);
+        g.lineTo(c.x + bx * (len - 1.5), c.y + by * (len - 1.5));
+        g.strokeColor = C.slateLight;
+        g.lineWidth = 1.5;
+        g.stroke();
+        // muzzle collar
+        g.circle(c.x + bx * len, c.y + by * len, 1.9);
+        g.fillColor = gc;
+        g.fill();
+    }
+
+    // headlight marks the hull heading
+    const hl = body.proj(L * 0.42, 0, H + 1.2);
+    g.circle(hl.x, hl.y, 1.6);
+    g.fillColor = C.amber;
+    g.fill();
+    void ca; void sa;
+}
+
+function drawHarvester(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Color, dir8: number, frame: number) {
     const w = 34, h = 22;
     shadowEllipse(g, w * 0.6, h * 0.52, 3, -4, 58);
     // wheels

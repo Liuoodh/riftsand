@@ -54,6 +54,11 @@ export class Unit extends Entity {
     orderQueue: Order[] = [];
     path: Array<{ x: number; y: number }> = [];
     face = 0;
+    /** turret heading, decoupled from the hull (reference: TurretTrait) */
+    turretFace = 0;
+    /** where the turret is pointed and for how much longer it stays there */
+    turretAim = 0;
+    turretHold = 0;
     cd = 0;
     vx = 0;
     vy = 0;
@@ -165,12 +170,27 @@ export class Unit extends Entity {
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;
 
-        // heavy hulls pivot slowly and lose speed in sharp turns, which is what
-        // makes a tank column read as vehicles instead of dots
-        const turn = this.turnRate;
-        const applied = Math.max(-turn * dt, Math.min(turn * dt, diff));
-        this.face += applied;
-        this.turnDelta = applied / Math.max(0.001, dt);
+        // Reference behaviour: a hull must face its path before it drives
+        // (DriveLocomotor returns a TurnTask and zero velocity otherwise).
+        // Infantry pivot instantly (FootLocomotor just assigns direction).
+        if (this.def.kind === 'infantry') {
+            this.face = desired;
+            this.turnDelta = 0;
+        } else {
+            const turn = this.turnRate;
+            const applied = Math.max(-turn * dt, Math.min(turn * dt, diff));
+            this.face += applied;
+            this.turnDelta = applied / Math.max(0.001, dt);
+            const remaining = Math.abs(diff - applied);
+            // Only a real about-face stops the hull. Waiting on every waypoint
+            // kink turned harvesters into traffic jams (measured in battletest).
+            if (remaining > 0.85) {
+                this.speedCur = Math.max(0, this.speedCur - this.accel * 2 * dt);
+                this.vx = 0;
+                this.vy = 0;
+                return true;
+            }
+        }
         const align = Math.max(0.15, Math.cos(diff));
 
         let top = this.speed * speedMul * align * this.terrainMul;
@@ -194,6 +214,20 @@ export class Unit extends Entity {
         this.vx = 0;
         this.vy = 0;
         this.speedCur = 0;
+    }
+
+    /**
+     * Turret tracks a target when there is one, otherwise drifts back to the
+     * hull heading. Air units have no turret, so their body simply follows.
+     */
+    aimTurret(dt: number, targetAngle?: number) {
+        if (this.def.kind === 'air') return;
+        const want = targetAngle === undefined ? this.face : targetAngle;
+        let d = want - this.turretFace;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        const rate = (this.def.kind === 'infantry' ? 12 : 3.6) * dt;
+        this.turretFace += Math.max(-rate, Math.min(rate, d));
     }
 
     canShoot() {

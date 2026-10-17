@@ -89,14 +89,21 @@ const state = await page.evaluate(() => {
     const world = canvas && canvas.getChildByName('World');
     const root = world && world.getChildByName('WorldRoot');
     const layer = (key) => (root ? (root.children.find((c) => c.name.indexOf(key) >= 0)?.children.length ?? -1) : -1);
+    const countPrefix = (r, pre) => {
+        if (!r) return -1;
+        const w = r.children.find((c) => c.name.indexOf('World') >= 0);
+        if (!w) return -1;
+        return w.children.filter((c) => c.name.indexOf(pre) === 0).length;
+    };
     const g = window.__riftsandGame;
     return {
         booted: !!window.__RIFTSAND_BOOTED__,
         scene: scene ? scene.name : null,
         hasWorld: !!world,
         worldChildren: world ? world.children.map((c) => c.name) : [],
-        unitNodes: layer('Units'),
-        buildingNodes: layer('Buildings'),
+        worldNodes: layer('World'),
+        unitNodes: countPrefix(root, 'U:'),
+        buildingNodes: countPrefix(root, 'B:'),
         units: g ? g.units.filter((u) => !u.dead).length : -1,
         buildings: g ? g.buildings.filter((b) => !b.dead).length : -1,
         queues: g ? Object.keys(g.human.queues).map((k) => g.human.queues[k].items.length) : null,
@@ -121,10 +128,15 @@ const state2 = await page.evaluate(() => {
     const world = canvas.getChildByName('World');
     const root = world.getChildByName('WorldRoot');
     const layer = (key) => root.children.find((c) => c.name.indexOf(key) >= 0)?.children.length ?? -1;
+    const countPrefix = (pre) => {
+        const w = root.children.find((c) => c.name.indexOf('World') >= 0);
+        if (!w) return -1;
+        return w.children.filter((c) => c.name.indexOf(pre) === 0).length;
+    };
     const g = window.__riftsandGame;
     return {
-        units: layer('Units'),
-        buildings: layer('Buildings'),
+        units: countPrefix('U:'),
+        buildings: countPrefix('B:'),
         gameUnits: g ? g.units.filter((u) => !u.dead).length : -1,
         fps: Math.round(cc.game.frameRate),
     };

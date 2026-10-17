@@ -11,6 +11,8 @@ import {
     BUILDINGS, UNITS, TILE, HALF, MAP_SIZE, MAP_TILES, PAL, HEX, Faction, FACTIONS, makeRng, clamp,
 } from '../core/Core';
 import { TerrainMap, TileKind } from '../world/Terrain';
+import { worldToProj, ISO_HW, ISO_HH, HEIGHT_PX, PROJ_HALF_X, PROJ_HALF_Y } from '../world/Iso';
+import { Anim, Seq, facingIndex, facingDeg } from './Frames';
 import { Game, PlayerState } from '../game/Game';
 import { Unit, Building, Entity, Projectile, Fx, Zone, Crate, Decal } from '../game/Entities';
 import {
@@ -19,6 +21,15 @@ import {
 } from './Art';
 
 const hex = (h: string, a = 255) => HEX(h, a);
+
+/** multiply a palette colour — used for height shading and face darkening */
+function shade(h: string, f: number, a = 255): Color {
+    const s = h.replace('#', '');
+    const r = Math.min(255, (parseInt(s.substring(0, 2), 16) * f) | 0);
+    const g2 = Math.min(255, (parseInt(s.substring(2, 4), 16) * f) | 0);
+    const b = Math.min(255, (parseInt(s.substring(4, 6), 16) * f) | 0);
+    return new Color(r, g2, b, a);
+}
 
 export function gfxNode(parent: Node, name: string): Graphics {
     const n = new Node(name);
@@ -51,7 +62,9 @@ export class TerrainView {
         this.crystalRoot = plainNode(parent, 'Crystals');
         for (const n of terrain.nodes) {
             const g = gfxNode(this.crystalRoot, 'crystal' + n.id);
-            g.node.setPosition(n.x, n.y, 0);
+            const p = worldToProj(n.x, n.y, terrain.heightAt(n.x, n.y));
+            g.node.setPosition(p.x, p.y, 0);
+            (g.node as any).__depth = p.y;
             drawCrystal(g, n.seed, 1);
             (g.node as any).__node = n;
         }
@@ -70,105 +83,96 @@ export class TerrainView {
 
     private paint() {
         const g = gfxNode(this.root, 'ground');
-        const T = TILE;
-        // outside-the-map backdrop (reads as deeper desert)
-        g.rect(-MAP_SIZE, -MAP_SIZE, MAP_SIZE * 2, MAP_SIZE * 2);
+        const rng = makeRng(90210);
+        const N = MAP_TILES;
+
+        // backdrop beyond the map rim (reads as deeper desert)
+        const bx = PROJ_HALF_X + 1600, by = PROJ_HALF_Y + 1600;
+        g.rect(-bx, -by, bx * 2, by * 2);
         g.fillColor = hex(PAL.sandShadow);
         g.fill();
 
-        // main sand plate with a soft vignette-ish gradient of tiles
-        g.rect(-HALF, -HALF, MAP_SIZE, MAP_SIZE);
-        g.fillColor = hex(PAL.sand);
-        g.fill();
-
-        const rng = makeRng(90210);
-        // dune patches
-        for (let ty = 0; ty < MAP_TILES; ty++) {
-            for (let tx = 0; tx < MAP_TILES; tx++) {
-                const kind = this.terrain.kind[ty * MAP_TILES + tx];
-                if (kind !== TileKind.Dune) continue;
-                const x = tx * T + T / 2 - HALF;
-                const y = ty * T + T / 2 - HALF;
-                g.ellipse(x, y, T * (0.55 + rng() * 0.35), T * 0.42);
-                g.fillColor = rng() > 0.5 ? hex(PAL.sandLight, 46) : hex(PAL.sandDark, 38);
-                g.fill();
+        // terrain diamonds, far-to-near so nearer tiles overlap the ones behind
+        for (let s = 0; s <= 2 * (N - 1); s++) {
+            for (let tx = 0; tx < N; tx++) {
+                const ty = s - tx;
+                if (ty >= 0 && ty < N) this.groundTile(g, tx, ty);
             }
         }
 
-        // rock clusters
-        for (let ty = 0; ty < MAP_TILES; ty++) {
-            for (let tx = 0; tx < MAP_TILES; tx++) {
-                const kind = this.terrain.kind[ty * MAP_TILES + tx];
-                if (kind !== TileKind.Rock) continue;
-                const x = tx * T + T / 2 - HALF;
-                const y = ty * T + T / 2 - HALF;
-                this.rockAt(g, x, y, rng);
-            }
-        }
-
-        // fine sand speckles + wind ripples give the ground some tooth
-        for (let i = 0; i < 1100; i++) {
-            const x = -HALF + rng() * MAP_SIZE;
-            const y = -HALF + rng() * MAP_SIZE;
-            const r = 0.8 + rng() * 1.6;
-            g.circle(x, y, r);
-            g.fillColor = rng() > 0.45 ? hex(PAL.sandLight, 34) : hex(PAL.sandShadow, 26);
+        // fine sand speckles give the ground some tooth
+        for (let i = 0; i < 900; i++) {
+            const wx = (rng() - 0.5) * MAP_SIZE;
+            const wy = (rng() - 0.5) * MAP_SIZE;
+            const p = worldToProj(wx, wy, this.terrain.heightAt(wx, wy));
+            const r = 0.8 + rng() * 1.5;
+            g.circle(p.x, p.y, r);
+            g.fillColor = rng() > 0.45 ? hex(PAL.sandLight, 38) : hex(PAL.sandShadow, 30);
             g.fill();
-        }
-        for (let i = 0; i < 130; i++) {
-            const x = -HALF + rng() * MAP_SIZE;
-            const y = -HALF + rng() * MAP_SIZE;
-            const w = 40 + rng() * 90;
-            g.moveTo(x - w / 2, y);
-            g.quadraticCurveTo(x, y + 6 + rng() * 8, x + w / 2, y + (rng() - 0.5) * 6);
-            g.strokeColor = rng() > 0.5 ? hex(PAL.sandLight, 30) : hex(PAL.sandShadow, 26);
-            g.lineWidth = 1.4;
-            g.stroke();
         }
 
         // scatter props on open sand
-        for (let i = 0; i < 420; i++) {
-            const tx = Math.floor(rng() * MAP_TILES);
-            const ty = Math.floor(rng() * MAP_TILES);
-            const idx = ty * MAP_TILES + tx;
-            if (this.terrain.kind[idx] !== TileKind.Sand) continue;
-            const x = tx * T + rng() * T - HALF;
-            const y = ty * T + rng() * T - HALF;
+        for (let i = 0; i < 340; i++) {
+            const tx = Math.floor(rng() * N);
+            const ty = Math.floor(rng() * N);
+            if (this.terrain.kind[ty * N + tx] !== TileKind.Sand) continue;
+            const wx = tx * TILE + rng() * TILE - HALF;
+            const wy = ty * TILE + rng() * TILE - HALF;
+            const p = worldToProj(wx, wy, this.terrain.heightAt(wx, wy));
             const roll = rng();
-            if (roll < 0.34) {
-                this.bushAt(g, x, y, 0.8 + rng() * 0.5, rng);
-            } else if (roll < 0.52) {
-                this.crateAt(g, x, y, rng);
-            } else if (roll < 0.78) {
-                g.ellipse(x, y, 4 + rng() * 3, 2 + rng() * 2);
+            if (roll < 0.42) {
+                this.bushAt(g, p.x, p.y, 0.8 + rng() * 0.5, rng);
+            } else if (roll < 0.62) {
+                this.crateAt(g, p.x, p.y, rng);
+            } else if (roll < 0.84) {
+                g.ellipse(p.x, p.y, 4 + rng() * 3, 2 + rng() * 1.6);
                 g.fillColor = hex(PAL.sandDark, 70);
                 g.fill();
             } else {
-                this.rockAt(g, x, y, rng);
+                this.rockAt(g, p.x, p.y, rng);
             }
         }
+    }
 
-        // tyre tracks across the map (nods to the reference sheet)
-        for (let i = 0; i < 6; i++) {
-            const y0 = -HALF + rng() * MAP_SIZE;
-            const y1 = -HALF + rng() * MAP_SIZE;
-            g.moveTo(-HALF + 80, y0);
-            g.bezierCurveTo(-400, y0 + (rng() - 0.5) * 500, 200, y1 + (rng() - 0.5) * 500, HALF - 80, y1);
-            g.strokeColor = hex(PAL.sandShadow, 55);
-            g.lineWidth = 9;
-            g.stroke();
-            g.moveTo(-HALF + 80, y0 + 7);
-            g.bezierCurveTo(-400, y0 + 7 + (rng() - 0.5) * 500, 200, y1 + 7 + (rng() - 0.5) * 500, HALF - 80, y1 + 7);
-            g.strokeColor = hex(PAL.sandShadow, 40);
-            g.lineWidth = 9;
-            g.stroke();
+    /** one isometric ground diamond, lifted by its four shared corner heights */
+    private groundTile(g: Graphics, tx: number, ty: number) {
+        const T = TILE, H = HALF, N = MAP_TILES;
+        const kind = this.terrain.kind[ty * N + tx];
+        const wx = tx * T - H, wy = ty * T - H;
+        const p00 = worldToProj(wx, wy, this.terrain.vhAt(tx, ty));
+        const p10 = worldToProj(wx + T, wy, this.terrain.vhAt(tx + 1, ty));
+        const p11 = worldToProj(wx + T, wy + T, this.terrain.vhAt(tx + 1, ty + 1));
+        const p01 = worldToProj(wx, wy + T, this.terrain.vhAt(tx, ty + 1));
+
+        const lv = this.terrain.levelAt(tx, ty);
+        let base = PAL.sand;
+        if (kind === TileKind.Dune) base = PAL.sandLight;
+        else if (kind === TileKind.Crystal) base = '#8a9459';
+        else if (kind === TileKind.Rock) base = PAL.rock;
+
+        const jitter = 0.94 + (this.terrain.tint[ty * N + tx] || 0) * 0.14;
+        const lift = 1 + lv * 0.05;
+
+        // raised tiles show a bit of side wall, which sells the height
+        if (lv > 0) {
+            const drop = HEIGHT_PX * 0.55;
+            g.moveTo(p01.x, p01.y); g.lineTo(p11.x, p11.y);
+            g.lineTo(p11.x, p11.y + drop); g.lineTo(p01.x, p01.y + drop); g.close();
+            g.fillColor = shade(base, jitter * 0.72);
+            g.fill();
+            g.moveTo(p10.x, p10.y); g.lineTo(p11.x, p11.y);
+            g.lineTo(p11.x, p11.y + drop); g.lineTo(p10.x, p10.y + drop); g.close();
+            g.fillColor = shade(base, jitter * 0.6);
+            g.fill();
         }
 
-        // map border
-        g.rect(-HALF, -HALF, MAP_SIZE, MAP_SIZE);
-        g.strokeColor = new Color(0, 0, 0, 90);
-        g.lineWidth = 10;
-        g.stroke();
+        g.moveTo(p00.x, p00.y);
+        g.lineTo(p10.x, p10.y);
+        g.lineTo(p11.x, p11.y);
+        g.lineTo(p01.x, p01.y);
+        g.close();
+        g.fillColor = shade(base, jitter * lift);
+        g.fill();
     }
 
     private rockAt(g: Graphics, x: number, y: number, rng: () => number) {
@@ -241,117 +245,109 @@ export class TerrainView {
 /* ================================================================== */
 export class FogView {
     node: Node;
-    private data: Uint8Array;
-    private tex: Texture2D;
-    private texSize = MAP_TILES * 2;
-    private sprite: Sprite;
+    private g: Graphics;
     private timer = 0;
-    /** texture rows are uploaded bottom-up */
-    private flipY = true;
+    private lastSig = 0;
 
     constructor(parent: Node) {
-        // opaque void outside the playable map so the desert never leaks through
-        const voidG = gfxNode(parent, 'void');
-        const M = MAP_SIZE * 2;
-        voidG.rect(-M, -M, M * 2, HALF);
-        voidG.rect(-M, HALF, M * 2, M);
-        voidG.rect(-M, -HALF, M - HALF, MAP_SIZE);
-        voidG.rect(HALF, -HALF, M, MAP_SIZE);
-        voidG.fillColor = new Color(9, 12, 15, 255);
-        voidG.fill();
-        // map rim
-        voidG.rect(-HALF, -HALF, MAP_SIZE, MAP_SIZE);
-        voidG.strokeColor = new Color(63, 217, 236, 26);
-        voidG.lineWidth = 3;
-        voidG.stroke();
-
+        // colour the whole diamond-outside region near-black so the desert never
+        // leaks; the four corner triangles fill the gaps around the map diamond
+        const W = PROJ_HALF_X, H = PROJ_HALF_Y, BIG = 3000;
         this.node = plainNode(parent, 'Fog');
-        const n = this.texSize;
-        this.data = new Uint8Array(n * n * 4);
-        this.tex = new Texture2D();
-        this.tex.reset({ width: n, height: n, format: Texture2D.PixelFormat.RGBA8888, mipmapLevel: 0 });
-        this.tex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
-        this.tex.setWrapMode(Texture2D.WrapMode.CLAMP_TO_EDGE, Texture2D.WrapMode.CLAMP_TO_EDGE);
-        this.tex.uploadData(this.data);
-        const sf = new SpriteFrame();
-        sf.texture = this.tex;
-        sf.rect = new Rect(0, 0, n, n);
-        sf.packable = false;
-        const sp = this.node.addComponent(Sprite);
-        sp.sizeMode = Sprite.SizeMode.CUSTOM;
-        sp.type = Sprite.Type.SIMPLE;
-        sp.spriteFrame = sf;
-        this.sprite = sp;
-        const t = this.node.getComponent(UITransform)!;
-        t.setContentSize(MAP_SIZE, MAP_SIZE);
-        t.setAnchorPoint(0.5, 0.5);
-        this.node.setPosition(0, 0, 0);
-    }
+        const vg = gfxNode(this.node, 'void');
+        vg.fillColor = new Color(9, 12, 15, 255);
+        vg.rect(-BIG, H, BIG * 2, BIG);
+        vg.fill();
+        vg.rect(-BIG, -H - BIG, BIG * 2, BIG);
+        vg.fill();
+        vg.rect(-BIG, -H, BIG - W, H * 2);
+        vg.fill();
+        vg.rect(W, -H, BIG - W, H * 2);
+        vg.fill();
+        // Graphics.fill() consumes the current path, so each corner needs its own
+        const tri = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) => {
+            vg.moveTo(ax, ay); vg.lineTo(bx, by); vg.lineTo(cx, cy); vg.close();
+            vg.fill();
+        };
+        tri(-W, -H, 0, -H, -W, 0);
+        tri(0, -H, W, -H, W, 0);
+        tri(W, 0, W, H, 0, H);
+        tri(-W, 0, -W, H, 0, H);
+        vg.moveTo(0, -H); vg.lineTo(W, 0); vg.lineTo(0, H); vg.lineTo(-W, 0); vg.close();
+        vg.strokeColor = new Color(63, 217, 236, 26);
+        vg.lineWidth = 3;
+        vg.stroke();
 
-    private field = new Float32Array(0);
+        this.g = gfxNode(this.node, 'shroud');
+    }
 
     update(p: PlayerState, dt = 1) {
         this.timer -= dt;
         if (this.timer > 0) return;
-        this.timer = 0.16;
-        const n = this.texSize;
-        if (this.field.length !== n * n) this.field = new Float32Array(n * n);
-        const f = this.field;
-
-        // 1) per-texel visibility strength: 0 unexplored / 0.5 explored / 1 visible
-        for (let y = 0; y < n; y++) {
-            const ty = y >> 1;
-            for (let x = 0; x < n; x++) {
-                const i = ty * MAP_TILES + (x >> 1);
-                f[y * n + x] = p.visible[i] ? 1 : p.explored[i] ? 0.5 : 0;
-            }
+        this.timer = 0.18;
+        // cheap signature: skip the rebuild when visibility did not change
+        let sig = 0;
+        for (let i = 0; i < p.visible.length; i += 5) {
+            sig = (sig * 33 + (p.visible[i] ? 3 : p.explored[i] ? 1 : 0)) | 0;
         }
-
-        // 2) separable box blur (radius 2) so the shroud edge stays soft
-        const tmp = this.blurTmp.length === n * n ? this.blurTmp : (this.blurTmp = new Float32Array(n * n));
-        const R = 2;
-        for (let y = 0; y < n; y++) {
-            for (let x = 0; x < n; x++) {
-                let sum = 0, cnt = 0;
-                for (let k = -R; k <= R; k++) {
-                    const xx = x + k;
-                    if (xx < 0 || xx >= n) continue;
-                    sum += f[y * n + xx]; cnt++;
-                }
-                tmp[y * n + x] = sum / cnt;
-            }
-        }
-        for (let x = 0; x < n; x++) {
-            for (let y = 0; y < n; y++) {
-                let sum = 0, cnt = 0;
-                for (let k = -R; k <= R; k++) {
-                    const yy = y + k;
-                    if (yy < 0 || yy >= n) continue;
-                    sum += tmp[yy * n + x]; cnt++;
-                }
-                f[y * n + x] = sum / cnt;
-            }
-        }
-
-        // 3) pack RGBA (texture rows go bottom-up)
-        const d = this.data;
-        for (let y = 0; y < n; y++) {
-            const srcY = this.flipY ? n - 1 - y : y;
-            for (let x = 0; x < n; x++) {
-                const s0 = f[srcY * n + x];
-                const o = (y * n + x) * 4;
-                d[o] = 8; d[o + 1] = 11; d[o + 2] = 14;
-                d[o + 3] = Math.max(0, Math.min(255, Math.round(238 * (1 - s0))));
-            }
-        }
-        this.tex.uploadData(d);
+        if (sig === this.lastSig) return;
+        this.lastSig = sig;
+        this.rebuild(p);
     }
-    private blurTmp = new Float32Array(0);
+
+    /**
+     * One parallelogram per run of same-state tiles in a row.  Runs keep the
+     * rebuild down to a few hundred polys instead of 4096 diamonds, and hard
+     * edges are what the retail shroud sprite looks like anyway.
+     */
+    private rebuild(p: PlayerState) {
+        const g = this.g;
+        g.clear();
+        const N = MAP_TILES, T = TILE, H = HALF;
+        const dark = new Color(8, 11, 14, 236);
+        const dim = new Color(8, 11, 14, 138);
+        for (let ty = 0; ty < N; ty++) {
+            let tx = 0;
+            while (tx < N) {
+                const i0 = ty * N + tx;
+                const st = p.visible[i0] ? 0 : p.explored[i0] ? 1 : 2;
+                let tx2 = tx + 1;
+                if (st !== 0) {
+                    while (tx2 < N) {
+                        const j = ty * N + tx2;
+                        const s2 = p.visible[j] ? 0 : p.explored[j] ? 1 : 2;
+                        if (s2 !== st) break;
+                        tx2++;
+                    }
+                    const p0 = worldToProj(tx * T - H, ty * T - H, 0);
+                    const p1 = worldToProj(tx2 * T - H, ty * T - H, 0);
+                    const p2 = worldToProj(tx2 * T - H, (ty + 1) * T - H, 0);
+                    const p3 = worldToProj(tx * T - H, (ty + 1) * T - H, 0);
+                    g.moveTo(p0.x, p0.y);
+                    g.lineTo(p1.x, p1.y);
+                    g.lineTo(p2.x, p2.y);
+                    g.lineTo(p3.x, p3.y);
+                    g.close();
+                    g.fillColor = st === 2 ? dark : dim;
+                    g.fill();
+                }
+                tx = tx2;
+            }
+        }
+    }
 }
 
 /* ================================================================== */
 /* ENTITY VIEWS                                                       */
 /* ================================================================== */
+/** map a logic-space facing (radians, cartesian) to a screen angle in an iso world */
+export function isoAngle(face: number) {
+    const dx = Math.cos(face), dy = Math.sin(face);
+    const px = (dx - dy) * ISO_HW;
+    const py = (dx + dy) * ISO_HH;
+    return (-Math.atan2(py, px) * 180) / Math.PI;
+}
+
 export class EntityView {
     node: Node;
     body: Graphics;
@@ -368,10 +364,17 @@ export class EntityView {
     private lastPrimary = false;
     private wasSelected = false;
     private hpTimer = 0;
+    /** sprite facing / frame cache: only repaint when one of them changes */
+    private anim = new Anim();
+    private dir8 = -1;
+    private tDir8 = -1;
+    private frame = -1;
 
-    constructor(parent: Node, public e: Entity) {
+    constructor(parent: Node, public e: Entity, private terrain: TerrainMap) {
         this.node = plainNode(parent, (e.isBuilding ? 'B:' : 'U:') + e.id);
-        this.node.setPosition(e.x, e.y, 0);
+        const p0 = worldToProj(e.x, e.y, terrain.heightAt(e.x, e.y));
+        this.node.setPosition(p0.x, p0.y, 0);
+        (this.node as any).__depth = p0.y;
         this.ring = gfxNode(this.node, 'ring');
         this.body = gfxNode(this.node, 'body');
         this.hp = gfxNode(this.node, 'hp');
@@ -387,12 +390,14 @@ export class EntityView {
             drawBuilding(this.body, e.def, factionOf(e.owner), e.progress);
         }
         this.lastOwner = e.owner;
-        this.node.setSiblingIndex(0);
     }
 
     redraw(selFaction: Faction) {
-        if (this.e instanceof Unit) drawUnit(this.body, this.e.def, selFaction);
-        else if (this.e instanceof Building) drawBuilding(this.body, this.e.def, selFaction, (this.e as Building).progress);
+        if (this.e instanceof Unit) {
+            const u = this.e;
+            drawUnit(this.body, u.def, selFaction,
+                Math.max(0, this.dir8), Math.max(0, this.frame), Math.max(0, this.tDir8));
+        } else if (this.e instanceof Building) drawBuilding(this.body, this.e.def, selFaction, (this.e as Building).progress);
         this.lastOwner = this.e.owner;
     }
 
@@ -401,20 +406,41 @@ export class EntityView {
         if (e instanceof Unit) {
             const u = e;
             const air = u.isAir;
-            this.node.setPosition(u.x, u.y + (air ? u.altitude + Math.sin(u.bob * 2) * 1.6 : 0), 0);
+            const lift = this.terrain.heightAt(u.x, u.y);
+            const p = worldToProj(u.x, u.y, lift);
+            this.node.setPosition(p.x, p.y + (air ? u.altitude + Math.sin(u.bob * 2) * 1.6 : 0), 0);
+            (this.node as any).__depth = p.y + (e.isBuilding ? 2 : 0);
             if (air) {
-                // bank into turns so aircraft do not slide sideways
+                // aircraft are continuous 3D models in the reference, so a real
+                // rotation (plus bank) is correct for them
                 const bank = Math.max(-18, Math.min(18, u.turnDelta * 7));
-                this.node.angle = (-u.face * 180) / Math.PI + bank;
-            } else if (u.def.kind !== 'infantry') {
-                this.node.angle = (-u.face * 180) / Math.PI;
-                this.body.node.setPosition(-u.recoil * 30, 0, 0);
-            } else if (u.def.kind === 'infantry') {
-                const walk = u.speedCur > 5 ? Math.sin(u.bob * 11) * 0.9 : 0;
-                this.body.node.setPosition(0, walk, 0);
-                const flip = u.face > Math.PI / 2 || u.face < -Math.PI / 2;
-                this.node.setScale(flip ? -1 : 1, u.hitFlash > 0 ? 1.06 : 1, 1);
-                this.hp.node.setScale(flip ? -1 : 1, 1, 1);
+                this.node.angle = isoAngle(u.face) + bank;
+            } else {
+                // ground units use discrete facing images: never spin the node
+                this.node.angle = 0;
+                const deg = (u.face * 180) / Math.PI;
+                const dir8 = facingIndex(deg);
+                const tDir8 = facingIndex((u.turretFace * 180) / Math.PI);
+
+                // sequence clock: moving plays Walk, standing holds Ready
+                this.anim.play(u.speedCur > 4 ? Seq.Walk : Seq.Ready);
+                this.anim.step(dt);
+
+                const flip = Math.cos((facingDeg(dir8) * Math.PI) / 180) < -0.15;
+                const S = 1.28 * (u.hitFlash > 0 ? 1.04 : 1);
+                if (u.def.kind === 'infantry') {
+                    this.body.node.setScale(flip ? -S : S, S, 1);
+                    this.body.node.setPosition(0, 0, 0);
+                } else {
+                    this.body.node.setScale(S, S, 1);
+                    this.body.node.setPosition(-u.recoil * 26, 0, 0);
+                }
+                if (dir8 !== this.dir8 || tDir8 !== this.tDir8 || this.anim.frame !== this.frame) {
+                    this.dir8 = dir8;
+                    this.tDir8 = tDir8;
+                    this.frame = this.anim.frame;
+                    drawUnit(this.body, u.def, factionOf(u.owner), dir8, this.frame, tDir8);
+                }
             }
             // own cloaked units read as a ghost so the player can still command them
             const target = cloaked ? 120 : 255;
@@ -563,6 +589,7 @@ export class WorldRenderer {
     decalLayer: Node;
     rallyLayer: Node;
     crateLayer: Node;
+    worldLayer: Node;
     buildingLayer: Node;
     unitLayer: Node;
     zoneLayer: Node;
@@ -591,8 +618,11 @@ export class WorldRenderer {
         this.decalLayer = plainNode(this.root, 'L0b_Decals');
         this.rallyLayer = plainNode(this.root, 'L1_Rally');
         this.crateLayer = plainNode(this.root, 'L2_Crates');
-        this.buildingLayer = plainNode(this.root, 'L2_Buildings');
-        this.unitLayer = plainNode(this.root, 'L3_Units');
+        // buildings and units share one layer so the isometric painter's sort can
+        // interleave them — a tank behind a refinery must be drawn behind it
+        this.worldLayer = plainNode(this.root, 'L2_World');
+        this.buildingLayer = this.worldLayer;
+        this.unitLayer = this.worldLayer;
         this.zoneLayer = plainNode(this.root, 'L4_Zones');
         this.projLayer = plainNode(this.root, 'L5_Projectiles');
         this.fxLayer = plainNode(this.root, 'L6_Fx');
@@ -616,9 +646,26 @@ export class WorldRenderer {
 
     addEntity(e: Entity) {
         if (this.views.has(e.id)) return;
-        const layer = e.isBuilding ? this.buildingLayer : this.unitLayer;
-        const v = new EntityView(layer, e);
+        const v = new EntityView(this.worldLayer, e, this.game.terrain);
         this.views.set(e.id, v);
+    }
+
+    /**
+     * Painter's algorithm for an isometric scene: sort the shared world layer by
+     * projected depth so nearer sprites cover farther ones. Only touches sibling
+     * indices when the order actually changed, to avoid a per-frame UI rebuild.
+     */
+    private sortWorld() {
+        const kids = this.worldLayer.children;
+        if (kids.length < 2) return;
+        const arr = kids.slice().sort((a, b) =>
+            (((a as any).__depth as number) || 0) - (((b as any).__depth as number) || 0));
+        let dirty = false;
+        for (let i = 0; i < arr.length; i++) {
+            if (arr[i] !== kids[i]) { dirty = true; break; }
+        }
+        if (!dirty) return;
+        for (let i = 0; i < arr.length; i++) arr[i].setSiblingIndex(i);
     }
 
     removeEntity(e: Entity) {
@@ -628,7 +675,8 @@ export class WorldRenderer {
 
     addFx(f: Fx) {
         const g = gfxNode(this.fxLayer, 'fx');
-        g.node.setPosition(f.x, f.y, 0);
+        const p = worldToProj(f.x, f.y, this.game.terrain.heightAt(f.x, f.y));
+        g.node.setPosition(p.x, p.y, 0);
         this.fxViews.set(f, g);
     }
 
@@ -737,40 +785,35 @@ export class WorldRenderer {
         g.clear();
         const b = game.selectedBuilding;
         if (!b || b.dead || !b.rally) return;
-        const tx = b.rally.x;
-        const ty = b.rally.y;
-        // dashed line from the structure edge to the flag
-        const dx = tx - b.x;
-        const dy = ty - b.y;
+        const T = game.terrain;
+        const a0 = worldToProj(b.x, b.y, T.heightAt(b.x, b.y));
+        const a1 = worldToProj(b.rally.x, b.rally.y, T.heightAt(b.rally.x, b.rally.y));
+        const dx = a1.x - a0.x, dy = a1.y - a0.y;
         const len = Math.hypot(dx, dy);
-        if (len < 8) return;
-        const ux = dx / len;
-        const uy = dy / len;
-        const start = b.radius * 0.75;
-        for (let d = start; d < len; d += 14) {
-            const a = d / len;
-            const b2 = Math.min(1, (d + 7) / len);
-            g.moveTo(b.x + ux * (d), b.y + uy * (d));
-            g.lineTo(b.x + ux * (len * b2), b.y + uy * (len * b2));
+        if (len < 10) return;
+        const ux = dx / len, uy = dy / len;
+        const start = Math.min(len * 0.35, b.radius * 0.75);
+        for (let d = start; d < len - 6; d += 14) {
+            const e = Math.min(len, d + 7);
+            g.moveTo(a0.x + ux * d, a0.y + uy * d);
+            g.lineTo(a0.x + ux * e, a0.y + uy * e);
         }
         g.strokeColor = HEX(PAL.cyan, 120);
         g.lineWidth = 1.4;
         g.stroke();
-        g.circle(tx, ty, 9);
+        // flag sits on the projected ground point, mast stays screen-vertical
+        g.ellipse(a1.x, a1.y, 9, 5);
         g.strokeColor = HEX(PAL.cyan, 190);
         g.lineWidth = 1.6;
         g.stroke();
-        g.circle(tx, ty, 2.5);
-        g.fillColor = HEX(PAL.cyan, 220);
-        g.fill();
-        g.moveTo(tx, ty);
-        g.lineTo(tx, ty + 18);
+        g.moveTo(a1.x, a1.y);
+        g.lineTo(a1.x, a1.y + 20);
         g.strokeColor = HEX(PAL.white, 200);
         g.lineWidth = 1.6;
         g.stroke();
-        g.moveTo(tx, ty + 18);
-        g.lineTo(tx + 12, ty + 13);
-        g.lineTo(tx, ty + 8);
+        g.moveTo(a1.x, a1.y + 20);
+        g.lineTo(a1.x + 13, a1.y + 14);
+        g.lineTo(a1.x, a1.y + 9);
         g.close();
         g.fillColor = HEX(PAL.cyan, 210);
         g.fill();
@@ -871,9 +914,11 @@ export class WorldRenderer {
             const vis = g.isVisibleTo(human, e);
             if (v.node.active !== vis) v.node.active = vis;
             if (!vis) continue;
-            // cull far off-screen entities from the update loop
-            const inView = e.x > cameraBounds.x0 - 80 && e.x < cameraBounds.x1 + 80
-                && e.y > cameraBounds.y0 - 80 && e.y < cameraBounds.y1 + 80;
+            // cull far off-screen entities from the update loop (bounds are in
+            // projected screen space now, so compare against the projected point)
+            const cpp = worldToProj(e.x, e.y, 0);
+            const inView = cpp.x > cameraBounds.x0 - 140 && cpp.x < cameraBounds.x1 + 140
+                && cpp.y > cameraBounds.y0 - 140 && cpp.y < cameraBounds.y1 + 140;
             const selected = e.isBuilding
                 ? g.selectedBuilding === e
                 : sel.indexOf(e as Unit) >= 0;
@@ -881,6 +926,8 @@ export class WorldRenderer {
             const cloaked = e instanceof Unit && e.owner === human.id && e.cloaked;
             v.update(dt, selected, human.faction, g.enemy.faction, cloaked, this.primIds.has(e.id));
         }
+
+        this.sortWorld();
 
         // rally marker for the selected structure
         this.drawRally(g);
@@ -892,7 +939,8 @@ export class WorldRenderer {
                 gg = gfxNode(this.decalLayer, 'decal');
                 this.decalViews.set(d, gg);
             }
-            gg.node.setPosition(d.x, d.y, 0);
+            const dp = worldToProj(d.x, d.y, g.terrain.heightAt(d.x, d.y));
+            gg.node.setPosition(dp.x, dp.y, 0);
             this.drawDecal(gg, d);
         }
         for (const [d, gg] of this.decalViews) {
@@ -906,7 +954,8 @@ export class WorldRenderer {
                 gg = gfxNode(this.zoneLayer, 'zone');
                 this.zoneViews.set(z, gg);
             }
-            gg.node.setPosition(z.x, z.y, 0);
+            const zp = worldToProj(z.x, z.y, g.terrain.heightAt(z.x, z.y));
+            gg.node.setPosition(zp.x, zp.y, 0);
             this.drawZone(gg, z);
         }
         for (const [z, gg] of this.zoneViews) {
@@ -920,7 +969,8 @@ export class WorldRenderer {
                 gg = gfxNode(this.crateLayer, 'crate');
                 this.crateViews.set(c, gg);
             }
-            gg.node.setPosition(c.x, c.y, 0);
+            const cp = worldToProj(c.x, c.y, g.terrain.heightAt(c.x, c.y));
+            gg.node.setPosition(cp.x, cp.y, 0);
             drawPickup(gg, c.kind, c.t);
         }
         for (const [c, gg] of this.crateViews) {
@@ -950,8 +1000,9 @@ export class WorldRenderer {
                 n = gg.node;
                 this.projViews.set(pr, n);
             }
-            n.setPosition(pr.x, pr.y + pr.z, 0);
-            n.angle = pr.kind === 'bullet' ? 0 : (-pr.heading * 180) / Math.PI;
+            const pp = worldToProj(pr.x, pr.y, g.terrain.heightAt(pr.x, pr.y));
+            n.setPosition(pp.x, pp.y + pr.z, 0);
+            n.angle = pr.kind === 'bullet' ? 0 : isoAngle(pr.heading);
         }
         for (const [pr, n] of this.projViews) {
             if (pr.dead || g.projectiles.indexOf(pr) < 0) {

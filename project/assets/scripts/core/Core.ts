@@ -592,8 +592,8 @@ export const unitMass = (d: UnitDef) =>
         : d.kind === 'mcv' ? 12 : d.armor === 'heavy' ? 8 : 5;
 
 export const unitTurn = (d: UnitDef) =>
-    d.kind === 'infantry' ? 10 : d.kind === 'air' ? 5 : d.kind === 'harvester' ? 2.6
-        : d.kind === 'mcv' ? 2.2 : d.hover ? 7 : d.armor === 'heavy' ? 2.6 : 3.6;
+    d.kind === 'infantry' ? 10 : d.kind === 'air' ? 5 : d.kind === 'harvester' ? 3.4
+        : d.kind === 'mcv' ? 3.0 : d.hover ? 7 : d.armor === 'heavy' ? 3.4 : 4.6;
 
 export const unitAccel = (d: UnitDef) =>
     d.kind === 'infantry' ? 160 : d.kind === 'air' ? 90 : d.kind === 'harvester' ? 46
