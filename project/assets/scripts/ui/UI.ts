@@ -397,7 +397,7 @@ export class UI {
         this.btnScatter = new UIButton(this.bottom, 74, 30, '散开', 12, () => this.hooks.onScatter());
         this.btnHarvest = new UIButton(this.bottom, 74, 30, '采集', 12, () => this.hooks.onHarvest());
         this.btnRepair = new UIButton(this.bottom, 74, 30, '维修', 12, () => this.hooks.onRepair(), PAL.green);
-        this.btnSell = new UIButton(this.bottom, 74, 30, '拆除', 12, () => this.hooks.onSell(), PAL.red);
+        this.btnSell = new UIButton(this.bottom, 74, 30, '卖出', 12, () => this.hooks.onSell(), PAL.red);
         this.btnDeploy = new UIButton(this.bottom, 74, 30, '部署', 12, () => this.hooks.onDeploy(), PAL.amber);
         this.btnCancelBuild = new UIButton(this.bottom, 88, 30, '取消放置', 12, () => this.hooks.onCancelBuild(), PAL.red);
         for (const b of [this.btnStop, this.btnAttackMove, this.btnStance, this.btnScatter, this.btnHarvest,
@@ -925,13 +925,18 @@ export class UI {
         const motto = mkLabel(n, `「${fd.motto}」`, 12, '#8092a0');
         motto.node.setPosition(-150, -74, 0);
 
-        const hit = new UIButton(n, 344, 224, '', 1, () => {
+        /*
+         * The hit target must be parented to the MENU layer, not the card: UIButton
+         * keeps its own cx/cy for hit-testing (`onTap` compares against them), and
+         * parenting it to the card left every card's hit box at (0,0) — which is
+         * exactly why faction selection appeared to do nothing.
+         */
+        const hit = new UIButton(ov, 344, 224, '', 1, () => {
             this.selFaction = f;
             this.rebuildMenu();
         });
-        hit.setPosition(0, 0);
+        hit.setPosition(x, 40);
         hit.g.clear();
-        hit.node.setSiblingIndex(0);
         this.menuBtns.push(hit);
     }
 
@@ -1172,12 +1177,22 @@ export class UI {
 
     /* ------------------------------------------------------------ */
     /** keep the speed chip in sync with the simulation clock */
+    /** show the exact refund on the sell button, like the retail sidebar */
+    private refreshSellLabel() {
+        const b = this.game?.selectedBuilding;
+        const txt = b && b.status === 'ready' && b.progress >= 1
+            ? `卖出 ${Math.floor(b.def.cost * 0.5 * Math.max(0.15, Math.min(1, b.hp / b.maxHp)))}`
+            : '卖出';
+        if (this.btnSell && this.btnSell.label?.string !== txt) this.btnSell.setText(txt);
+    }
+
     setSpeedLabel(mul: number) {
         if (this.btnSpeed) this.btnSpeed.setText(`${mul.toFixed(1)}x`);
     }
 
     refresh(dt: number) {
         if (this.mode === 'menu' || !this.game) return;
+        this.refreshSellLabel();
         const g = this.game;
         const h = g.human;
         this.creditsL.string = `${Math.floor(h.credits)}`;

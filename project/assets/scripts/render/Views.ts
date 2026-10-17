@@ -17,7 +17,7 @@ import { Game, PlayerState } from '../game/Game';
 import { Unit, Building, Entity, Projectile, Fx, Zone, Crate, Decal } from '../game/Entities';
 import {
     drawUnit, drawBuilding, drawCrystal, drawRock, drawBush, drawCrate,
-    drawChevron, drawPickup, paintTurret, pen,
+    drawChevron, drawPickup, paintTurret, drawRuin, pen,
 } from './Art';
 import { unitBodyFrame, FRAME_W, FRAME_H } from '../assets/Assets';
 
@@ -297,10 +297,10 @@ export class FogView {
         this.timer -= dt;
         if (this.timer > 0) return;
         this.timer = 0.18;
-        // cheap signature: skip the rebuild when visibility did not change
+        // cheap signature: skip the rebuild when the explored map did not change
         let sig = 0;
-        for (let i = 0; i < p.visible.length; i += 3) {
-            sig = (sig * 33 + (p.visible[i] ? 3 : p.explored[i] ? 1 : 0)) | 0;
+        for (let i = 0; i < p.explored.length; i += 3) {
+            sig = (sig * 33 + (p.explored[i] ? 3 : 0)) | 0;
         }
         if (sig === this.lastSig) return;
         this.lastSig = sig;
@@ -310,8 +310,14 @@ export class FogView {
     private depthOf(p: PlayerState) {
         const N = MAP_TILES;
         const st = this.st;
+        /*
+         * Retail shroud has exactly two visual states: Unexplored (black) and
+         * Explored (nothing drawn). There is no "dimmed" middle tier — once the
+         * shroud is lifted, the terrain stays visible for the rest of the match
+         * (reference: game/map/MapShroud.ts:4-8, ShroudType).
+         */
         for (let i = 0; i < st.length; i++) {
-            st[i] = p.visible[i] ? 0 : p.explored[i] ? 1 : 4;
+            st[i] = p.explored[i] ? 0 : 4;
         }
         // ring 1: unknown next to anything known
         for (let pass = 0; pass < 2; pass++) {
@@ -464,6 +470,8 @@ export class EntityView {
     private lastHp = -1;
     private lastProgress = -1;
     private lastDamaged = false;
+    private lastStatus = '';
+    private lastFade = 1;
     private lastOwner = -2;
     private lastLevel = -1;
     private lastRepair = false;
@@ -591,10 +599,19 @@ export class EntityView {
             const b = e as Building;
             if (b.owner !== this.lastOwner) this.redraw(factionOf(b.owner));
             const hurt = b.hp / b.maxHp < 0.5;
-            if (Math.abs(b.progress - this.lastProgress) > 0.02 || hurt !== this.lastDamaged) {
+            if (Math.abs(b.progress - this.lastProgress) > 0.015
+                || hurt !== this.lastDamaged
+                || b.status !== this.lastStatus) {
                 this.lastProgress = b.progress;
                 this.lastDamaged = hurt;
+                this.lastStatus = b.status;
                 drawBuilding(pen(this.body), b.def, factionOf(b.owner), b.progress, hurt);
+            }
+            // selling plays the raise backwards: the structure sinks and fades
+            const fade = b.status === 'builddown' ? Math.max(0.15, b.progress) : 1;
+            if (Math.abs(fade - this.lastFade) > 0.01) {
+                this.lastFade = fade;
+                this.op.opacity = Math.round(255 * fade);
             }
             if (b.repairing !== this.lastRepair) {
                 this.lastRepair = b.repairing;
@@ -724,6 +741,8 @@ export class WorldRenderer {
     root: Node;
     terrainLayer: Node;
     decalLayer: Node;
+    ruinLayer: Node;
+    private ruinCount = -1;
     rallyLayer: Node;
     crateLayer: Node;
     worldLayer: Node;
@@ -753,6 +772,8 @@ export class WorldRenderer {
         this.root = plainNode(canvas, 'WorldRoot');
         this.terrainLayer = plainNode(this.root, 'L0_Terrain');
         this.decalLayer = plainNode(this.root, 'L0b_Decals');
+        // rubble sits on the ground, under every entity
+        this.ruinLayer = plainNode(this.root, 'L0c_Ruins');
         this.rallyLayer = plainNode(this.root, 'L1_Rally');
         this.crateLayer = plainNode(this.root, 'L2_Crates');
         // buildings and units share one layer so the isometric painter's sort can
@@ -1029,7 +1050,23 @@ export class WorldRenderer {
         }
     }
 
+    /** rubble never moves, so it is rebuilt only when the list changes */
+    private syncRuins() {
+        const ruins = this.game.ruins;
+        if (ruins.length === this.ruinCount) return;
+        this.ruinCount = ruins.length;
+        for (const c of this.ruinLayer.children.slice()) c.destroy();
+        for (const r of ruins) {
+            const n = gfxNode(this.ruinLayer, 'ruin');
+            const p = worldToProj(r.x, r.y, this.game.terrain.heightAt(r.x, r.y));
+            n.node.setPosition(p.x, p.y, 0);
+            (n.node as any).__depth = p.y;
+            drawRuin(pen(n), r.size, r.seed);
+        }
+    }
+
     sync(dt: number, cameraBounds: { x0: number; y0: number; x1: number; y1: number }) {
+        this.syncRuins();
         const g = this.game;
         const human = g.human;
         const sel = g.selection;

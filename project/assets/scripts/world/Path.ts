@@ -133,7 +133,21 @@ export class PathFinder {
                 }
                 const nid = ny * N + nx;
                 if (this.stamp[nid] === run && this.closed[nid]) continue;
-                const ng = this.g[cur] + DIRS[i][2] * this.cost(nx, ny);
+                /*
+                 * Turn penalty. The reference adds 0.2 to the heuristic whenever
+                 * the direction of travel changes (game/map/Terrain.ts:93-96),
+                 * which makes columns prefer straight lines. Without it units
+                 * zig-zag across open sand because diagonals and cardinals cost
+                 * almost the same.
+                 */
+                let turnPenalty = 0;
+                const prevId = this.came[cur];
+                if (prevId >= 0 && this.stamp[prevId] === run) {
+                    const pdx = cx - (prevId % N);
+                    const pdy = cy - ((prevId / N) | 0);
+                    if (pdx !== dx || pdy !== dy) turnPenalty = 0.2;
+                }
+                const ng = this.g[cur] + DIRS[i][2] * this.cost(nx, ny) + turnPenalty;
                 if (this.stamp[nid] !== run) {
                     this.stamp[nid] = run;
                     this.g[nid] = ng;

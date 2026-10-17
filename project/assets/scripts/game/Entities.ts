@@ -87,6 +87,9 @@ export class Unit extends Entity {
     waitT = 0;
     /** per-frame budget of separation shoves, so a crowd cannot pop a unit */
     pushAcc = 0;
+    /** cell this unit is registered on in the occupation table */
+    cellX = -1;
+    cellY = -1;
     /** cached "engaged" target for attack-move */
     engage: Entity | null = null;
     bob = Math.random() * Math.PI * 2;
@@ -287,6 +290,27 @@ export class Unit extends Entity {
      * Turret tracks a target when there is one, otherwise drifts back to the
      * hull heading. Air units have no turret, so their body simply follows.
      */
+    /**
+     * Is the turret pointed close enough to fire?
+     *
+     * The reference's AttackTask blocks on the turret finishing its rotation; we
+     * approximate with an angular tolerance. Without it a tank fires sideways the
+     * instant it acquires a target, while the barrel is still swinging.
+     */
+    aimReady(tolerance = 0.22) {
+        if (this.def.kind === 'infantry' || this.def.kind === 'air') return true;
+        let d = this.turretAim - this.turretFace;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        return Math.abs(d) <= tolerance;
+    }
+
+    /** called when a target is acquired: swing the turret onto it, never snap */
+    aimAt(x: number, y: number) {
+        this.turretAim = Math.atan2(y - this.y, x - this.x);
+        this.turretHold = 2.2;
+    }
+
     aimTurret(dt: number, targetAngle?: number) {
         if (this.def.kind === 'air') return;
         const want = targetAngle === undefined ? this.face : targetAngle;
@@ -302,6 +326,9 @@ export class Unit extends Entity {
     }
 }
 
+/** BuildStatus, mirroring redalert2/src/game/gameobject/Building.ts:32-36 */
+export type BuildStatus = 'buildup' | 'ready' | 'builddown';
+
 export class Building extends Entity {
     isBuilding = true;
     def: BuildingDef;
@@ -310,6 +337,16 @@ export class Building extends Entity {
     size: number;
     /** 0..1 construction progress, 1 = finished */
     progress = 1;
+    /**
+     * Retail raises a structure over `BuildupTime` and then plays the same art
+     * backwards when it is sold. Both phases are driven by this clock.
+     */
+    status: BuildStatus = 'ready';
+    /** seconds left in the current buildup / builddown */
+    buildT = 0;
+    buildDur = 1.2;
+    /** credits owed when the builddown completes (retail: refund on unspawn) */
+    refund = 0;
     rally: { x: number; y: number } | null = null;
     cd = 0;
     pulse = 0;
@@ -333,7 +370,7 @@ export class Building extends Entity {
         this.y = ty * TILE + (def.size * TILE) / 2 - HALF;
     }
 
-    get done() { return this.progress >= 1; }
+    get done() { return this.progress >= 1 && this.status === 'ready'; }
     get centerTile() {
         return { tx: this.tx + this.size / 2, ty: this.ty + this.size / 2 };
     }

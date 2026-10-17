@@ -18,6 +18,7 @@ import {
 } from '../core/Core';
 import { TerrainMap, CrystalNode } from '../world/Terrain';
 import { PathFinder } from '../world/Path';
+import { TileOccupation } from '../world/TileOccupation';
 import { Unit, Building, Projectile, Fx, Entity, SpatialGrid, PlayerId, Zone, Crate, Decal, setWorldBlocked } from './Entities';
 import { AIController } from './AI';
 
@@ -95,6 +96,10 @@ const REPAIR_SECONDS = 24;
 export class Game {
     terrain: TerrainMap;
     finder: PathFinder;
+    /** who stands on which cell — see world/TileOccupation.ts */
+    occupancy: TileOccupation;
+    /** non-blocking rubble left behind by destroyed structures */
+    ruins: Array<{ x: number; y: number; size: number; seed: number }> = [];
     /**
      * Ore fields that recently proved unreachable, with the time they may be
      * reconsidered. Prevents a truck from re-running A* into the same wall every
@@ -147,6 +152,7 @@ export class Game {
         this.terrain = new TerrainMap();
         this.terrain.generate(seed);
         this.finder = new PathFinder((tx, ty) => this.isBlocked(tx, ty), (tx, ty) => this.terrain.costAt(tx, ty));
+        this.occupancy = new TileOccupation(MAP_TILES);
         // movement asks the world directly (see Entities.setWorldBlocked): a unit
         // must never step into a cell it does not fit in
         setWorldBlocked((x, y, r) => this.worldBlockedAt(x, y, r));
@@ -248,6 +254,9 @@ export class Game {
 
     place(def: BuildingDef, owner: PlayerId, tx: number, ty: number, instant = true): Building {
         const b = new Building(def, owner, tx, ty, instant ? 1 : 0.03);
+        // A freshly placed structure plays its raise animation for BuildupTime,
+        // exactly like BuildStatus.BuildUp in the reference engine.
+        b.status = instant ? 'ready' : 'buildup';
         this.buildings.push(b);
         this.events.onSpawn?.(b);
         return b;
@@ -267,6 +276,9 @@ export class Game {
         }
         const u = new Unit(def, owner, px, py);
         u.owner = owner;
+        u.cellX = Math.floor((px + HALF) / TILE);
+        u.cellY = Math.floor((py + HALF) / TILE);
+        this.occupancy.add(u, u.cellX, u.cellY);
         this.units.push(u);
         this.players[owner].built++;
         this.events.onSpawn?.(u);
@@ -404,8 +416,14 @@ export class Game {
         const ty = Math.floor((e.y + HALF) / TILE);
         if (tx < 0 || ty < 0 || tx >= MAP_TILES || ty >= MAP_TILES) return false;
         const i = ty * MAP_TILES + tx;
-        if (e.isBuilding) return p.explored[i] === 1;
-        return p.visible[i] === 1;
+        /*
+         * Retail visibility is "has this cell ever been explored": the shroud is
+         * permanent, so an enemy that walks through cleared ground is visible
+         * without a friendly unit nearby (MapShroud.isShrouded() only tests
+         * ShroudType.Unexplored). `visible` is still maintained for targeting and
+         * cloak detection, but it no longer gates rendering.
+         */
+        return p.explored[i] === 1;
     }
 
     /** a detector of `pid` covers this spot */
@@ -609,17 +627,68 @@ export class Game {
     /* ------------------------------------------------------------ */
     /* structure management                                          */
     /* ------------------------------------------------------------ */
+    /**
+     * Sell a structure.
+     *
+     * Reference: game/action/factories/SellObjectActionFactory.ts +
+     * game/trait/SellTrait.ts — a ready building enters `BuildStatus.BuildDown`
+     * (PackBuildingTask, `general.buildupTime`), plays its art in reverse, and the
+     * refund (purchaseValue * RefundPercent, default 50%) is credited when the
+     * builddown completes. Selling is refused while the building is still rising.
+     */
     sellSelectedBuilding() {
         const b = this.selectedBuilding;
-        if (!b || b.dead || !b.done) return;
+        if (!b || b.dead) return;
+        if (b.status !== 'ready' || b.progress < 1) {
+            this.events.onMessage?.('建筑还没建好，不能卖出', 'warn');
+            return;
+        }
+        // refund scales with damage, so selling a burning husk is not free money
         const ratio = clamp(b.hp / b.maxHp, 0.15, 1);
-        const refund = Math.floor(b.def.cost * 0.5 * ratio);
-        this.human.credits = Math.min(MAX_CREDITS, this.human.credits + refund);
-        b.dead = true;
-        this.events.onDeath?.(b);
+        b.refund = Math.floor(b.def.cost * 0.5 * ratio);
+        b.status = 'builddown';
+        b.buildDur = 1.0;
+        b.buildT = b.buildDur;
         this.selectedBuilding = null;
-        this.events.onMessage?.(`拆除 ${b.def.name}，回收 ${refund} 晶体`, 'info');
+        this.events.onMessage?.(`拆除 ${b.def.name}…`, 'info');
         this.events.onSfx?.('sell');
+        this.events.onShake?.(1.2);
+    }
+
+    /** called when the builddown timer ends */
+    private finishSell(b: Building) {
+        const p = this.players[b.owner];
+        p.credits = Math.min(MAX_CREDITS, p.credits + b.refund);
+        this.events.onMessage?.(`${b.def.name} 已回收 ${b.refund} 晶体`, 'good');
+        this.pushFx(b.x, b.y, 'dust', 0.8, b.size * 1.1);
+        this.spawnDebris(b.x, b.y, 5 + b.size * 2, 1);
+        this.removeBuilding(b, true);
+    }
+
+    /**
+     * Drop a structure from the world.
+     *
+     * `leaveRuin` keeps a non-blocking rubble marker, which is what the retail
+     * engine does for anything bigger than a wall: the footprint is freed (units
+     * can drive over it) but the ground is visibly scarred.
+     */
+    private removeBuilding(b: Building, leaveRuin: boolean) {
+        b.dead = true;
+        if (leaveRuin) {
+            this.ruins.push({
+                x: b.x, y: b.y, size: b.size,
+                seed: Math.floor(this.rng() * 100000),
+            });
+            if (this.ruins.length > 48) this.ruins.shift();
+        }
+        // free anything standing inside the footprint so nothing is embedded
+        for (const u of this.units) {
+            if (u.dead || u.isAir) continue;
+            if (!b.occupies(u.cellX, u.cellY)) continue;
+            const spot = this.nearestStandable(u.cellX, u.cellY, u.radius, 4);
+            if (spot) { u.x = spot.x; u.y = spot.y; this.syncCell(u); }
+        }
+        this.events.onDeath?.(b);
     }
 
     toggleRepair() {
@@ -1493,10 +1562,22 @@ export class Game {
             const p = this.players[b.owner];
             b.pulse += dt;
 
+            if (b.status === 'builddown') {
+                b.buildT -= dt;
+                b.progress = Math.max(0.02, Math.min(1, b.buildT / Math.max(0.01, b.buildDur)));
+                if (b.buildT <= 0) {
+                    b.progress = 0;
+                    b.status = 'ready';
+                    this.finishSell(b);
+                }
+                continue;
+            }
+
             if (!b.done) {
                 b.progress += dt / Math.max(1, b.def.time);
                 if (b.progress >= 1) {
                     b.progress = 1;
+                    b.status = 'ready';
                     b.hp = b.def.hp;
                     this.pushFx(b.x, b.y, 'spawn', 0.6, b.size);
                     if (p.isHuman) {
@@ -1677,7 +1758,8 @@ export class Game {
                 u.moveStep(dt, 1);
             } else {
                 u.stop();
-                if (w && u.cd <= 0) { this.fire(u, w, t); u.cd = w.cd * u.rofMul; }
+                u.aimAt(t.x, t.y);
+                if (w && u.cd <= 0 && u.aimReady()) { this.fire(u, w, t); u.cd = w.cd * u.rofMul; }
             }
             return;
         }
@@ -2116,10 +2198,19 @@ export class Game {
     kill(e: Entity, killer: PlayerId, source: Unit | null = null) {
         if (e.dead) return;
         e.dead = true;
+        if (e instanceof Unit) this.occupancy.remove(e, e.cellX, e.cellY);
         e.hp = 0;
         this.players[e.owner].lost++;
         if (killer !== e.owner) this.players[killer].kills++;
         const big = e.isBuilding;
+        if (big) {
+            if (this.selectedBuilding === (e as Building)) this.selectedBuilding = null;
+            this.ruins.push({
+                x: e.x, y: e.y, size: (e as Building).size,
+                seed: Math.floor(this.rng() * 100000),
+            });
+            if (this.ruins.length > 48) this.ruins.shift();
+        }
         this.pushFx(e.x, e.y, 'boom', big ? 0.95 : 0.5, big ? (e as Building).size * 0.9 : 1.3);
         this.spawnDebris(e.x, e.y, big ? 12 : 5, big ? 1.8 : 1);
         if (big) this.addCrater(e.x, e.y, (e as Building).radius * 0.7);
@@ -2208,11 +2299,8 @@ export class Game {
                 const rr = (a.radius + b.radius) * (a.def.kind === 'infantry' && b.def.kind === 'infantry' ? 0.72 : 0.97);
                 if (d2 >= rr * rr || d2 < 0.0001) continue;
 
-                // heavy hulls run over hostile infantry
-                const crushA = a.canCrush && b.def.kind === 'infantry' && a.owner !== b.owner && a.speedCur > 24;
-                const crushB = b.canCrush && a.def.kind === 'infantry' && b.owner !== a.owner && b.speedCur > 24;
-                if (crushA) { this.crush(b, a); continue; }
-                if (crushB) { this.crush(a, b); continue; }
+                // crush is handled by cell transition in syncCell(), not here:
+                // the reference checks the tile a crusher ENTERS (MoveTrait.ts:240)
 
                 const d = Math.sqrt(d2);
                 const overlap = rr - d;
@@ -2261,24 +2349,48 @@ export class Game {
             }
         }
         for (const u of list) {
-            if (u.dead || u.isAir) continue;
-            this.resolveWorldCollision(u, dt);
+            if (u.dead) continue;
+            if (!u.isAir) this.resolveWorldCollision(u, dt);
             u.x = clamp(u.x, -HALF + 12, HALF - 12);
             u.y = clamp(u.y, -HALF + 12, HALF - 12);
+            this.syncCell(u);
+        }
+    }
+
+    /**
+     * Register the unit on its new cell and run the crush check.
+     *
+     * Reference: game/gameobject/trait/MoveTrait.ts:240 — when a crusher enters a
+     * tile it destroys every crushable enemy on it. There is no speed test: a
+     * tank crawling forward still flattens infantry. Our old rule (speed > 24)
+     * meant a tank stuck in traffic stopped crushing, which looked wrong.
+     */
+    private syncCell(u: Unit) {
+        const tx = Math.floor((u.x + HALF) / TILE);
+        const ty = Math.floor((u.y + HALF) / TILE);
+        if (tx === u.cellX && ty === u.cellY) return;
+        this.occupancy.move(u, u.cellX, u.cellY, tx, ty);
+        u.cellX = tx;
+        u.cellY = ty;
+        if (!u.canCrush) return;
+        const here = this.occupancy.at(tx, ty);
+        if (!here || here.size === 0) return;
+        for (const other of here) {
+            if (other === u || other.dead) continue;
+            if (other.owner === u.owner) continue;
+            if (other.def.kind !== 'infantry') continue;
+            this.crush(other, u);
         }
     }
 
     private crush(victim: Unit, by: Unit) {
         if (victim.dead) return;
-        victim.dead = true;
         victim.hp = 0;
-        this.players[victim.owner].lost++;
-        if (by.owner !== victim.owner) this.players[by.owner].kills++;
+        this.occupancy.remove(victim, victim.cellX, victim.cellY);
+        this.kill(victim, by.owner, by);
         this.pushFx(victim.x, victim.y, 'dust', 0.55, 1.1);
         this.events.onSfx?.('scatter', victim.x, victim.y);
         if (this.players[by.owner].isHuman) this.events.onMessage?.(`${by.def.name} 碾过 ${victim.def.name}`, 'info');
-        if (by.owner !== victim.owner) this.gainXp(by, victim);
-        this.events.onDeath?.(victim);
     }
 
     /** push a unit out of a solid tile or a building footprint */

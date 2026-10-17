@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "note": "由 tools/arttemplate.mjs 生成的示例：模板图已就位，画完替换即可",
+  "units": {
+    "anvil": {
+      "image": "art/templates/unit_anvil.png",
+      "frame": {
+        "w": 72,
+        "h": 72
+      },
+      "anchor": {
+        "x": 36,
+        "y": 36
+      },
+      "facings": 8,
+      "sequences": {
+        "ready": {
+          "start": 0,
+          "frames": 1,
+          "rate": 0
+        },
+        "walk": {
+          "start": 8,
+          "frames": 32,
+          "rate": 9
+        }
+      },
+      "turret": {
+        "image": "art/templates/unit_anvil_turret.png",
+        "frame": {
+          "w": 72,
+          "h": 72
+        },
+        "start": 0,
+        "frames": 8
+      }
+    },
+    "pebble": {
+      "image": "art/templates/unit_pebble.png",
+      "frame": {
+        "w": 72,
+        "h": 72
+      },
+      "anchor": {
+        "x": 36,
+        "y": 36
+      },
+      "facings": 8,
+      "sequences": {
+        "ready": {
+          "start": 0,
+          "frames": 1,
+          "rate": 0
+        },
+        "walk": {
+          "start": 8,
+          "frames": 32,
+          "rate": 9
+        }
+      }
+    }
+  },
+  "buildings": {
+    "core": {
+      "image": "art/templates/building_core.png",
+      "frame": {
+        "w": 160,
+        "h": 160
+      },
+      "anchor": {
+        "x": 80,
+        "y": 80
+      },
+      "states": {
+        "normal": 0,
+        "damaged": 1,
+        "ruined": 2,
+        "buildup": 3
+      }
+    },
+    "furnace": {
+      "image": "art/templates/building_furnace.png",
+      "frame": {
+        "w": 96,
+        "h": 96
+      },
+      "anchor": {
+        "x": 48,
+        "y": 48
+      },
+      "states": {
+        "normal": 0,
+        "damaged": 1,
+        "ruined": 2,
+        "buildup": 3
+      }
+    }
+  },
+  "tiles": {
+    "image": "art/templates/terrain_tiles.png",
+    "frame": {
+      "w": 56,
+      "h": 28
+    },
+    "variants": {
+      "sand": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "dune": [
+        4,
+        5
+      ],
+      "rock": [
+        6,
+        7
+      ]
+    }
+  }
+}

@@ -469,8 +469,8 @@ export function drawBuilding(
         g.fillColor = shade;
         g.fill();
     };
-    wall(-hw, damaged ? new Color(44, 41, 38, 255) : new Color(58, 66, 80, 255));
-    wall(hw, damaged ? new Color(24, 22, 21, 255) : new Color(31, 36, 44, 255));
+    wall(-hw, damaged ? new Color(48, 44, 40, 255) : new Color(66, 75, 90, 255));
+    wall(hw, damaged ? new Color(26, 24, 22, 255) : new Color(36, 42, 51, 255));
 
     // roof diamond
     g.moveTo(0, hh + H);
@@ -478,9 +478,9 @@ export function drawBuilding(
     g.lineTo(0, -hh + H);
     g.lineTo(-hw, H);
     g.close();
-    g.fillColor = damaged ? new Color(56, 54, 52, 255) : new Color(76, 85, 99, 255);
+    g.fillColor = damaged ? new Color(62, 58, 54, 255) : new Color(96, 107, 124, 255);
     g.fill();
-    g.strokeColor = damaged ? new Color(84, 78, 72, 255) : new Color(112, 124, 145, 255);
+    g.strokeColor = damaged ? new Color(96, 88, 80, 255) : new Color(150, 163, 184, 255);
     g.lineWidth = 1.5;
     g.stroke();
 
@@ -696,14 +696,43 @@ export function drawBuilding(
     g.stroke();
 
     if (progress < 1) {
-        // scaffolding while under construction
-        g.strokeColor = new Color(C.amber.r, C.amber.g, C.amber.b, 180);
-        g.lineWidth = 1.4;
-        for (let i = -1; i <= 1; i++) {
-            g.moveTo(i * rx * 0.5, -hh);
-            g.lineTo(i * rx * 0.5, hh + H * 0.4);
+        /*
+         * Construction staging. Retail plays a dedicated buildup animation; we
+         * build the same read out of three cues: a rising silhouette (called by
+         * `progress`), corner scaffolding that outlives the roof, and a lit
+         * material pile at the base.
+         */
+        const topH = hh + fullH;            // where the finished roof would be
+        g.strokeColor = new Color(C.amber.r, C.amber.g, C.amber.b, 190);
+        g.lineWidth = 1.5;
+        for (const sgn of [-1, 1]) {
+            // corner posts
+            g.moveTo(sgn * rx * 0.92, -hh * 0.1);
+            g.lineTo(sgn * rx * 0.92, topH);
+            g.stroke();
+            // rails
+            for (let i = 1; i <= 3; i++) {
+                const y = -hh * 0.1 + (topH + hh * 0.1) * (i / 4);
+                g.moveTo(sgn * rx * 0.92, y);
+                g.lineTo(sgn * rx * 0.42, y + ry * 0.22);
+                g.stroke();
+            }
         }
+        // cross brace
+        g.moveTo(-rx * 0.92, -hh * 0.1);
+        g.lineTo(rx * 0.92, topH * 0.55);
+        g.moveTo(rx * 0.92, -hh * 0.1);
+        g.lineTo(-rx * 0.92, topH * 0.55);
+        g.strokeColor = new Color(C.amber.r, C.amber.g, C.amber.b, 90);
         g.stroke();
+
+        // material pile in front of the pad
+        g.ellipse(0, -hh * 1.05, rx * 0.42, ry * 0.3);
+        g.fillColor = new Color(28, 32, 38, 220);
+        g.fill();
+        g.ellipse(-rx * 0.1, -hh * 1.0, rx * 0.16, ry * 0.16);
+        g.fillColor = new Color(C.amber.r, C.amber.g, C.amber.b, 150);
+        g.fill();
     }
 }
 
@@ -1153,4 +1182,54 @@ export function paintUnit(g: Pen, def: UnitDef, faction: Faction, dir8: number, 
 /** turret overlay with palette colours resolved internally */
 export function paintTurret(g: Pen, def: UnitDef, faction: Faction, turretDir8: number) {
     drawTurret(g, def, faction, team(faction), glow(faction), turretDir8);
+}
+
+
+/**
+ * Rubble left by a destroyed structure.
+ *
+ * Retail frees the footprint (units can drive over the wreck) but keeps a scar on
+ * the ground: a scorched pad plus a handful of chunks. It is drawn once and never
+ * animated, so it costs nothing per frame.
+ */
+export function drawRuin(g: Pen, size: number, seed: number) {
+    g.clear();
+    const hw = size * 13;
+    const hh = hw * 0.5;
+    // scorched pad
+    g.ellipse(0, -hh * 0.15, hw * 0.95, hh * 0.95);
+    g.fillColor = new Color(24, 20, 16, 205);
+    g.fill();
+    g.ellipse(0, -hh * 0.1, hw * 0.62, hh * 0.6);
+    g.fillColor = new Color(12, 10, 9, 190);
+    g.fill();
+
+    let s = seed || 1;
+    const rnd = () => {
+        s = (s * 1664525 + 1013904223) >>> 0;
+        return s / 4294967296;
+    };
+    const chunks = 4 + Math.round(size * 2);
+    for (let i = 0; i < chunks; i++) {
+        const cx = (rnd() - 0.5) * hw * 1.5;
+        const cy = (rnd() - 0.5) * hh * 1.4;
+        const r = 4 + rnd() * (5 + size * 2);
+        g.moveTo(cx - r, cy);
+        g.lineTo(cx - r * 0.35, cy + r * 0.85);
+        g.lineTo(cx + r * 0.6, cy + r * 0.6);
+        g.lineTo(cx + r, cy - r * 0.15);
+        g.close();
+        g.fillColor = new Color(52, 50, 47, 255);
+        g.fill();
+        g.strokeColor = new Color(24, 22, 20, 220);
+        g.lineWidth = 1;
+        g.stroke();
+        // lit top facet
+        g.moveTo(cx - r * 0.35, cy + r * 0.85);
+        g.lineTo(cx + r * 0.6, cy + r * 0.6);
+        g.lineTo(cx + r * 0.15, cy + r * 0.3);
+        g.close();
+        g.fillColor = new Color(96, 90, 80, 220);
+        g.fill();
+    }
 }

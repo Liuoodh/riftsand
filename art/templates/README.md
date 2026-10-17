@@ -1,0 +1,52 @@
+# 素材模板说明
+
+这些 PNG 只有格线与脚底菱形，用来对齐尺寸和帧位。画完把同名文件放进 `art/` 对应目录。
+
+- `unit_pebble.png` 576×360｜infantry｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_breaker.png` 576×360｜infantry｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_sapper.png` 576×360｜infantry｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_veil.png` 576×360｜infantry｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_anvil.png` 576×360｜vehicle｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_rampart.png` 576×360｜vehicle｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_mortar.png` 576×360｜vehicle｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_warden.png` 576×360｜air｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_hammer.png` 576×360｜air｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_hourglass.png` 576×360｜harvester｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_rig.png` 576×360｜mcv｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_sandfly.png` 576×360｜infantry｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_stinger.png` 576×360｜infantry｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_wire.png` 576×360｜infantry｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_shade.png` 576×360｜infantry｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_dart.png` 576×360｜vehicle｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_lizard.png` 576×360｜vehicle｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_squall.png` 576×360｜vehicle｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_gnat.png` 576×360｜air｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_shrike.png` 576×360｜air｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_scav.png` 576×360｜harvester｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `unit_crawler.png` 576×360｜mcv｜行 0 = Ready，行 1–4 = Walk 1–4；列 = 方向 0..7
+- `building_core.png` 160×640｜4×4 格｜4 行 = normal / damaged / ruined / buildup
+- `building_furnace.png` 96×384｜2×2 格｜4 行 = normal / damaged / ruined / buildup
+- `building_sluice.png` 128×512｜3×3 格｜4 行 = normal / damaged / ruined / buildup
+- `building_barracks.png` 96×384｜2×2 格｜4 行 = normal / damaged / ruined / buildup
+- `building_foundry.png` 128×512｜3×3 格｜4 行 = normal / damaged / ruined / buildup
+- `building_airpad.png` 128×512｜3×3 格｜4 行 = normal / damaged / ruined / buildup
+- `building_turret.png` 64×256｜1×1 格｜4 行 = normal / damaged / ruined / buildup
+- `building_archive.png` 128×512｜3×3 格｜4 行 = normal / damaged / ruined / buildup
+- `building_orbital.png` 128×512｜3×3 格｜4 行 = normal / damaged / ruined / buildup
+- `building_aegis.png` 96×384｜2×2 格｜4 行 = normal / damaged / ruined / buildup
+- `building_nest.png` 160×640｜4×4 格｜4 行 = normal / damaged / ruined / buildup
+- `building_sunwell.png` 96×384｜2×2 格｜4 行 = normal / damaged / ruined / buildup
+- `building_market.png` 128×512｜3×3 格｜4 行 = normal / damaged / ruined / buildup
+- `building_tent.png` 96×384｜2×2 格｜4 行 = normal / damaged / ruined / buildup
+- `building_workshop.png` 128×512｜3×3 格｜4 行 = normal / damaged / ruined / buildup
+- `building_strip.png` 128×512｜3×3 格｜4 行 = normal / damaged / ruined / buildup
+- `building_spike.png` 64×256｜1×1 格｜4 行 = normal / damaged / ruined / buildup
+- `building_vault.png` 128×512｜3×3 格｜4 行 = normal / damaged / ruined / buildup
+- `building_storm.png` 128×512｜3×3 格｜4 行 = normal / damaged / ruined / buildup
+- `building_mirage.png` 96×384｜2×2 格｜4 行 = normal / damaged / ruined / buildup
+- `terrain_tiles.png` 448×28｜瓦片 56×28 ×8（沙地 0-3 / 沙丘 4-5 / 岩石 6-7）
+- `fx_explosion.png` 1024×128｜8 帧 × 128×128
+- `fx_small_explosion.png` 384×64｜6 帧 × 64×64
+- `fx_smoke.png` 384×64｜6 帧 × 64×64
+- `fx_debris.png` 64×16｜4 帧 × 16×16
+- `fx_muzzle.png` 72×24｜3 帧 × 24×24

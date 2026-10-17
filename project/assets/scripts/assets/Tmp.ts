@@ -141,3 +141,103 @@ export const TERRAIN_TYPE_LAND: Record<number, 'clear' | 'road' | 'rock' | 'roug
     14: 'rough',  // Rough
     15: 'cliff',  // Cliff
 };
+
+
+/* ------------------------------------------------------------------ */
+/* pixel unpacking                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Width of one scanline of the 2:1 diamond.
+ *
+ * The retail blitter (engine/gfx/drawable/TmpDrawable.ts:14-45) walks the tile
+ * row by row: the run grows by 4 pixels per row for the top half, then shrinks by
+ * 4. That is a 60x30 diamond with a 2:1 slope, stored WITHOUT the transparent
+ * corners — 900 indices for a 60x30 cell, not 1800.
+ */
+export function tmpRowWidth(row: number, width: number, height: number) {
+    const half = height >> 1;
+    // rows 0..14 grow 4..60, rows 15..28 shrink 56..4, the last row holds nothing.
+    // That asymmetry is in the retail blitter (it pre-increments before the first
+    // half and pre-decrements before the second), and the byte count only adds up
+    // if it is reproduced exactly: 480 + 420 = 900 indices.
+    const r = row < half ? row + 1 : height - 1 - row;
+    return Math.max(0, Math.min(width, r * 4));
+}
+
+/**
+ * Expand one TMP tile to RGBA using a palette.
+ * Index 0 stays transparent, exactly like the retail blitter's `pixel !== 0`.
+ */
+export function tmpTileToRgba(
+    tile: TmpTile,
+    pal: Uint8Array,
+    width = 60,
+    height = 30,
+): Uint8Array {
+    const out = new Uint8Array(width * height * 4);
+    let src = 0;
+    for (let y = 0; y < height; y++) {
+        const rw = tmpRowWidth(y, width, height);
+        const x0 = (width - rw) >> 1;
+        for (let i = 0; i < rw; i++) {
+            const idx = tile.px[src++];
+            if (!idx) continue;
+            const o = (y * width + x0 + i) * 4;
+            const pi = idx * 3;
+            out[o] = pal[pi];
+            out[o + 1] = pal[pi + 1];
+            out[o + 2] = pal[pi + 2];
+            out[o + 3] = 255;
+        }
+    }
+    return out;
+}
+
+/**
+ * Minimal TMP writer, used by the asset test to prove the reader is correct.
+ *
+ * We cannot ship retail tiles, so the test builds a file with this, parses it
+ * back and compares pixels byte for byte — the same trick used for SHP.
+ */
+export function encodeTmp(
+    tiles: Array<{ zHeight?: number; terrainType?: number; rampType?: number; px: Uint8Array }>,
+    blockW = 60,
+    blockH = 30,
+): ArrayBuffer {
+    const n = tiles.length;
+    const headerLen = 16 + n * 4;
+    const blockLen = 52 + (blockW * blockH) / 2;
+    const buf = new ArrayBuffer(headerLen + n * blockLen);
+    const view = new DataView(buf);
+    const bytes = new Uint8Array(buf);
+
+    view.setInt32(0, n, true);
+    view.setInt32(4, 1, true);
+    view.setInt32(8, blockW, true);
+    view.setInt32(12, blockH, true);
+
+    let off = headerLen;
+    for (let i = 0; i < n; i++) {
+        const t = tiles[i];
+        view.setInt32(16 + i * 4, off, true);
+        let p = off;
+        view.setInt32(p, 0, true); p += 4;                  // x
+        view.setInt32(p, 0, true); p += 4;                  // y
+        view.setInt32(p, 0, true); p += 4;                  // unused
+        view.setInt32(p, 0, true); p += 4;                  // unused
+        view.setInt32(p, (blockW * blockH) / 2, true); p += 4;
+        view.setInt32(p, 0, true); p += 4;                  // extraX
+        view.setInt32(p, 0, true); p += 4;                  // extraY
+        view.setInt32(p, 0, true); p += 4;                  // extraW
+        view.setInt32(p, 0, true); p += 4;                  // extraH
+        view.setUint32(p, 0, true); p += 4;                 // flags
+        bytes[p++] = t.zHeight ?? 0;
+        bytes[p++] = t.terrainType ?? 0;
+        bytes[p++] = t.rampType ?? 0;
+        p += 9;                                             // radar colours + pad
+        bytes.set(t.px.subarray(0, (blockW * blockH) >> 1), p);
+        off += blockLen;
+    }
+    return buf;
+}

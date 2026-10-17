@@ -26,7 +26,7 @@ import { WorldRenderer, gfxNode } from './render/Views';
 import { CameraRig } from './render/CameraRig';
 import { worldToProj, projToWorld } from './world/Iso';
 import { ShpFile } from './assets/Shp';
-import { TmpFile } from './assets/Tmp';
+import { TmpFile, encodeTmp, tmpTileToRgba, tmpRowWidth } from './assets/Tmp';
 import { encodeShp } from './assets/ShpEncode';
 import { parsePal, remapTeam, syntheticPal } from './assets/Palette';
 import { frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable } from './assets/Assets';
@@ -986,6 +986,7 @@ function tryBoot(): boolean {
     anyObj.__riftsandAssets = {
         ShpFile, TmpFile, encodeShp, parsePal, remapTeam, syntheticPal,
         frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable,
+        encodeTmp, tmpTileToRgba, tmpRowWidth,
     };
     let appNode = canvas.getChildByName('App');
     if (!appNode) {

@@ -139,6 +139,42 @@ const r = await page.evaluate(() => {
         px: t0 ? t0.px.length : null,
     };
 
+    /* ---------- TMP pixels: encode -> parse -> expand ---------- */
+    {
+        const px = new Uint8Array(dataLen);
+        // paint every stored index with 5 so we can verify the scan geometry
+        px.fill(5);
+        const buf = A.encodeTmp([{ zHeight: 1, terrainType: 13, rampType: 0, px }], BW, BH);
+        const back = A.TmpFile.parse(buf);
+        const pal = A.syntheticPal();
+        const rgba = A.tmpTileToRgba(back.tiles[0], pal, BW, BH);
+
+        // alpha coverage must equal the number of stored indices (each index = 1px)
+        let opaque = 0;
+        for (let i = 3; i < rgba.length; i += 4) if (rgba[i]) opaque++;
+
+        // row 0 must be 4 px wide and centred; the middle row the full 60
+        const rowWidths = [];
+        for (let y = 0; y < BH; y++) rowWidths.push(A.tmpRowWidth ? A.tmpRowWidth(y, BW, BH) : -1);
+        const rowAlpha = (y) => {
+            let n = 0;
+            for (let x = 0; x < BW; x++) if (rgba[(y * BW + x) * 4 + 3]) n++;
+            return n;
+        };
+        out.tmpPixels = {
+            opaque,
+            head: rowAlpha(0),
+            mid: rowAlpha(BH / 2 - 1),
+            last: rowAlpha(BH - 2),
+            empty: rowAlpha(BH - 1),
+            left0: rgba[(0 * BW + 28) * 4 + 3],
+            rgb5: [rgba[(0 * BW + 28) * 4], rgba[(0 * BW + 28) * 4 + 1], rgba[(0 * BW + 28) * 4 + 2]],
+            pal5: [pal[5 * 3], pal[5 * 3 + 1], pal[5 * 3 + 2]],
+            z: back.tiles[0].zHeight,
+            terrain: back.tiles[0].terrainType,
+        };
+    }
+
     /* ---------- baking ---------- */
     out.canvas = A.canvasAvailable();
     const D = window.__riftsandDefs;
@@ -166,6 +202,15 @@ check('TMP terrainType / rampType / zHeight',
     r.tmp.terrain === 14 && r.tmp.ramp === 7 && r.tmp.z === 2,
     `terrain=${r.tmp.terrain} ramp=${r.tmp.ramp} z=${r.tmp.z}`);
 check('TMP 主数据长度 = bW*bH/2', r.tmp.px === 900, `px=${r.tmp.px}`);
+check('TMP 菱形扫描线 4/60/4/0',
+    r.tmpPixels.head === 4 && r.tmpPixels.mid === 60 && r.tmpPixels.last === 4 && r.tmpPixels.empty === 0,
+    `${r.tmpPixels.head}/${r.tmpPixels.mid}/${r.tmpPixels.last}/${r.tmpPixels.empty}`);
+check('TMP 展开后不透明像素 = 索引数', r.tmpPixels.opaque === 900, `opaque=${r.tmpPixels.opaque}`);
+check('TMP 调色板查表正确',
+    r.tmpPixels.rgb5.join(',') === r.tmpPixels.pal5.join(','),
+    `${r.tmpPixels.rgb5} vs ${r.tmpPixels.pal5}`);
+check('TMP 写回后元数据保持不变', r.tmpPixels.z === 1 && r.tmpPixels.terrain === 13,
+    `z=${r.tmpPixels.z} terrain=${r.tmpPixels.terrain}`);
 check('烘焙可用（离屏 canvas）', r.canvas === true);
 check('烘焙帧有像素', !!r.bake && r.bake.opaque > 300, `opaque=${r.bake && r.bake.opaque}`);
 check('帧缓存生效', !!r.bake && r.bake.cached >= 1);
