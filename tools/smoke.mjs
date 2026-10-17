@@ -54,6 +54,16 @@ page.on('pageerror', (e) => {
     console.log('[pageerror]', e.message);
 });
 
+// silence the browser's automatic /favicon.ico 404 so the error log stays meaningful
+await page.evaluateOnNewDocument(() => {
+    document.addEventListener('DOMContentLoaded', () => {
+        const l = document.createElement('link');
+        l.rel = 'icon';
+        l.href = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+        document.head.appendChild(l);
+    });
+});
+
 await page.goto(URL, { waitUntil: 'load', timeout: 60000 });
 
 // wait for the game to self-bootstrap
@@ -91,11 +101,11 @@ console.log('STATE', JSON.stringify(state));
 await shot('03-early.png', 6000);
 await shot('04-mid.png', 12000);
 
-// pan the camera a bit to check input
+// pan the camera with the right button (a left drag is box-select now)
 await page.mouse.move(700, 400);
-await page.mouse.down();
+await page.mouse.down({ button: 'right' });
 await page.mouse.move(500, 400, { steps: 12 });
-await page.mouse.up();
+await page.mouse.up({ button: 'right' });
 await shot('05-pan.png', 800);
 
 const state2 = await page.evaluate(() => {

@@ -56,6 +56,27 @@ export class CameraRig {
         this.targetZoom = clamp(z, this.minZoom, this.maxZoom);
     }
 
+    /**
+     * Two-finger gesture in one step: keep the world point that sat under the
+     * previous midpoint glued to the new midpoint while the span changes.
+     * Doing pan and zoom separately made them fight over `tx`, which ate the pan.
+     */
+    pinch(prevDist: number, dist: number, pmx: number, pmy: number, mx: number, my: number) {
+        const z0 = this.targetZoom;
+        const worldX = pmx / z0 + this.tx;
+        const worldY = pmy / z0 + this.ty;
+        if (prevDist > 4 && dist > 4) {
+            const f = dist / prevDist;
+            if (Math.abs(f - 1) > 0.001) {
+                this.targetZoom = clamp(this.targetZoom * f, this.minZoom, this.maxZoom);
+            }
+        }
+        const z = this.targetZoom;
+        this.tx = worldX - mx / z;
+        this.ty = worldY - my / z;
+        this.clampCam();
+    }
+
     screenToWorld(sx: number, sy: number) {
         return {
             x: sx / this.zoom + this.x,

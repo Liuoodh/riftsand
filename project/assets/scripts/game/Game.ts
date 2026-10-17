@@ -6,7 +6,7 @@
 import {
     BUILDINGS, UNITS, Faction, BuildingDef, UnitDef, START_CREDITS, TILE, HALF, MAP_TILES,
     DMG_TABLE, TECH_BUILDING, QUEUE_MAX, UNLOAD_TIME, MAX_CREDITS, FactionDef, FACTIONS,
-    tileToWorld, dist, clamp,
+    tileToWorld, dist, clamp, GROUP_COUNT,
 } from '../core/Core';
 import { TerrainMap, CrystalNode } from '../world/Terrain';
 import { PathFinder } from '../world/Path';
@@ -63,6 +63,13 @@ export class Game {
     selectedBuilding: Building | null = null;
     buildMode: string | null = null;
     buildTile = { tx: 0, ty: 0 };
+
+    /* ---- mobile command layer ---- */
+    /** control groups, stored as unit ids so deaths cannot leak references */
+    groupIds: number[][] = Array.from({ length: GROUP_COUNT }, () => []);
+    /** optional assists — never take strategic decisions away from the player */
+    autoAcquire = true;      // idle units return fire / engage inside their range
+    holdFormation = true;    // group moves march at the slowest member's speed
 
     private revealTimer = 0;
     private tmp: Entity[] = [];
@@ -300,15 +307,79 @@ export class Game {
         }
     }
 
-    selectSameType(u: Unit) {
+    /** double-tap: every unit of the same type that is currently on screen */
+    selectSameType(u: Unit, bounds?: { x0: number; y0: number; x1: number; y1: number }) {
         this.selectedBuilding = null;
-        const keep = this.selection.filter(s => s.def.id === u.def.id);
-        if (keep.length === 0) {
-            this.selection.length = 0;
-            for (const o of this.units) if (!o.dead && o.owner === 0 && o.def.id === u.def.id) this.selection.push(o);
-        } else {
-            this.selection.length = 0;
-            for (const o of this.units) if (!o.dead && o.owner === 0 && o.def.id === u.def.id) this.selection.push(o);
+        this.selection.length = 0;
+        for (const o of this.units) {
+            if (o.dead || o.owner !== 0 || o.def.id !== u.def.id) continue;
+            if (bounds && (o.x < bounds.x0 || o.x > bounds.x1 || o.y < bounds.y0 || o.y > bounds.y1)) continue;
+            this.selection.push(o);
+        }
+        // never leave the double-tapped unit behind, even if it sat on the edge
+        if (this.selection.indexOf(u) < 0) this.selection.push(u);
+    }
+
+    /**
+     * Box select. Combat units win over harvesters so a sloppy drag around the
+     * base does not drag the economy along.
+     */
+    selectInRect(minX: number, minY: number, maxX: number, maxY: number, additive = false): number {
+        const inBox = (e: Unit) => e.x >= minX && e.x <= maxX && e.y >= minY && e.y <= maxY;
+        const army: Unit[] = [];
+        const eco: Unit[] = [];
+        for (const u of this.units) {
+            if (u.dead || u.owner !== 0) continue;
+            if (!inBox(u)) continue;
+            (u.isHarvester ? eco : army).push(u);
+        }
+        const picked = army.length > 0 ? army : eco;
+        if (!additive) { this.selection.length = 0; this.selectedBuilding = null; }
+        for (const u of picked) if (this.selection.indexOf(u) < 0) this.selection.push(u);
+        return picked.length;
+    }
+
+    /* ---- control groups ---- */
+    setGroup(n: number) {
+        if (n < 0 || n >= this.groupIds.length) return;
+        const alive = this.selection.filter(u => !u.dead);
+        if (alive.length === 0) { this.groupIds[n].length = 0; return; }
+        this.groupIds[n] = alive.map(u => u.id);
+        this.events.onMessage?.(`第 ${n + 1} 编队 · ${alive.length} 个单位`, 'info');
+    }
+
+    groupUnits(n: number): Unit[] {
+        if (n < 0 || n >= this.groupIds.length) return [];
+        const ids = this.groupIds[n];
+        if (ids.length === 0) return [];
+        const out: Unit[] = [];
+        for (const u of this.units) if (!u.dead && ids.indexOf(u.id) >= 0) out.push(u);
+        return out;
+    }
+
+    selectGroup(n: number): boolean {
+        const list = this.groupUnits(n);
+        if (list.length === 0) return false;
+        this.selectedBuilding = null;
+        this.selection.length = 0;
+        for (const u of list) this.selection.push(u);
+        return true;
+    }
+
+    /** average position of a group, used to jump the camera on a second tap */
+    groupCenter(n: number): { x: number; y: number } | null {
+        const list = this.groupUnits(n);
+        if (list.length === 0) return null;
+        let x = 0, y = 0;
+        for (const u of list) { x += u.x; y += u.y; }
+        return { x: x / list.length, y: y / list.length };
+    }
+
+    private pruneGroups() {
+        for (const ids of this.groupIds) {
+            for (let i = ids.length - 1; i >= 0; i--) {
+                if (!this.units.some(u => u.id === ids[i] && !u.dead)) ids.splice(i, 1);
+            }
         }
     }
 
@@ -317,6 +388,11 @@ export class Game {
         const n = this.selection.length;
         const cols = Math.ceil(Math.sqrt(n));
         const gap = 30;
+        // formation: everyone marches at the slowest member's pace so the
+        // squad arrives as a block instead of trickling in one by one
+        const cap = this.holdFormation && n > 1
+            ? Math.min(...this.selection.filter(u => !u.dead).map(u => u.def.speed))
+            : 0;
         let i = 0;
         for (const u of this.selection) {
             if (u.dead) continue;
@@ -324,6 +400,7 @@ export class Game {
             const gy = -Math.floor(i / cols) + (Math.ceil(n / cols) - 1) / 2;
             const tx = x + gx * gap;
             const ty = y + gy * gap;
+            u.speedCap = cap;
             this.moveUnitTo(u, tx, ty, false);
             i++;
         }
@@ -334,6 +411,7 @@ export class Game {
         if (this.selection.length === 0) return;
         for (const u of this.selection) {
             if (u.dead) continue;
+            u.speedCap = 0;
             u.order = { k: 'attack', target };
             u.stop();
         }
@@ -370,6 +448,7 @@ export class Game {
         for (const u of this.selection) {
             if (u.dead) continue;
             u.order = { k: 'idle' };
+            u.speedCap = 0;
             u.stop();
         }
     }
@@ -441,24 +520,31 @@ export class Game {
         return out;
     }
 
-    enqueue(b: Building, defId: string) {
-        if (b.dead || !b.done) return;
+    /**
+     * Queue a unit. `times` lets the HUD fill the whole queue from one long
+     * press; it stops as soon as credits or queue slots run out.
+     */
+    enqueue(b: Building, defId: string, times = 1) {
+        if (b.dead || !b.done) return 0;
         const p = this.players[b.owner];
         const def = UNITS[defId];
-        if (!def) return;
-        if (b.queue.length >= QUEUE_MAX) {
-            if (p.isHuman) this.events.onMessage?.('生产队列已满', 'warn');
-            return;
+        if (!def) return 0;
+        let queued = 0;
+        for (let i = 0; i < times; i++) {
+            if (b.queue.length >= QUEUE_MAX) {
+                if (p.isHuman) this.events.onMessage?.('生产队列已满', 'warn');
+                break;
+            }
+            if (p.credits < def.cost) {
+                if (p.isHuman) this.events.onMessage?.('晶体不足', 'warn');
+                break;
+            }
+            p.credits -= def.cost;
+            b.queue.push({ defId, t: 0, total: def.time });
+            queued++;
         }
-        if (p.credits < def.cost) {
-            if (p.isHuman) this.events.onMessage?.('晶体不足', 'warn');
-            return;
-        }
-        if (def.kind === 'harvester' && b.def.isCore) {
-            // core can always build harvesters
-        }
-        p.credits -= def.cost;
-        b.queue.push({ defId, t: 0, total: def.time });
+        if (queued > 1 && p.isHuman) this.events.onMessage?.(`${def.name} × ${queued} 已排队`, 'good');
+        return queued;
     }
 
     cancelQueue(b: Building, index: number) {
@@ -509,6 +595,7 @@ export class Game {
                 if (this.units[i].dead) this.units.splice(i, 1);
             }
             this.selection = this.selection.filter(u => !u.dead);
+            this.pruneGroups();
         }
         if (this.buildings.some(b => b.dead)) {
             for (let i = this.buildings.length - 1; i >= 0; i--) {
@@ -583,6 +670,9 @@ export class Game {
             // weapon cooldown
             if (u.cd > 0) u.cd -= dt * (this.prodFactor(this.players[u.owner]) < 1 ? 0.65 : 1);
 
+            // the march cap only applies while the unit is actually walking
+            if (u.speedCap > 0 && u.path.length === 0) u.speedCap = 0;
+
             // stuck detection for ground units
             if (u.path.length > 0 && u.repath > 0) {
                 u.repath -= dt;
@@ -644,7 +734,7 @@ export class Game {
         }
 
         // idle / guard: engage nearby enemies without chasing far
-        if (w) {
+        if (w && this.autoAcquire) {
             const t = this.findTarget(u.x, u.y, w.range * 0.95, u.owner);
             if (t) {
                 if (u.cd <= 0) { this.fire(u, w, t); u.cd = w.cd; }

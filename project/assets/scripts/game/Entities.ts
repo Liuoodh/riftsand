@@ -58,6 +58,8 @@ export class Unit extends Entity {
     bob = Math.random() * Math.PI * 2;
     /** assigned harvester slot, prevents all harvesters piling on one node */
     mineNode: CrystalNode | null = null;
+    /** 0 = uncapped; otherwise the group march speed (keeps formations together) */
+    speedCap = 0;
 
     constructor(def: UnitDef, owner: PlayerId, x: number, y: number) {
         super();
@@ -85,7 +87,8 @@ export class Unit extends Entity {
             this.path.shift();
             return this.path.length > 0;
         }
-        const sp = this.speed * speedMul;
+        let sp = this.speed * speedMul;
+        if (this.speedCap > 0) sp = Math.min(sp, this.speedCap);
         const step = Math.min(d, sp * dt);
         this.x += (dx / d) * step;
         this.y += (dy / d) * step;

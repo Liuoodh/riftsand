@@ -7,11 +7,12 @@ import {
 } from 'cc';
 import {
     PAL, HEX, BuildingDef, UnitDef, UNITS, BUILDINGS, Faction, FACTIONS,
-    MAP_TILES, MAP_SIZE, HALF, TILE, fmtTime, clamp,
+    MAP_TILES, MAP_SIZE, HALF, TILE, fmtTime, clamp, QUEUE_MAX,
 } from '../core/Core';
 import { Game } from '../game/Game';
 import { Building } from '../game/Entities';
 import { drawBuilding, drawUnit } from '../render/Art';
+import { Overlay } from './Overlay';
 
 const W = 1280;
 const H = 720;
@@ -21,6 +22,7 @@ const HH = H / 2;
 export interface UIHooks {
     onBuild: (defId: string) => void;
     onProduce: (b: Building, defId: string) => void;
+    onProduceBatch: (b: Building, defId: string, times: number) => void;
     onSell: () => void;
     onSelectAll: () => void;
     onStop: () => void;
@@ -254,6 +256,10 @@ export class UI {
     private selFaction: Faction = 'BU';
     private selDiff: 'easy' | 'normal' | 'hard' = 'normal';
     attackMoveMode = false;
+    /** which group strip cell is highlighted, -1 = none */
+    activeGroup = -1;
+    /** touch affordances: group strip, command wheel, box rectangle */
+    overlay: Overlay;
 
     constructor(private canvas: Node, private hooks: UIHooks) {
         this.root = mkNode(canvas, 'UI');
@@ -267,6 +273,8 @@ export class UI {
         this.buildMinimap();
         this.buildToast();
         this.buildMenu();
+        this.overlay = new Overlay(canvas);
+        this.overlay.setGroupsVisible(false);
     }
 
     /* ------------------------------------------------------------ */
@@ -640,7 +648,7 @@ export class UI {
         start.setPosition(0, -238);
         this.menuBtns.push(start);
 
-        const tip = mkLabel(ov, '单指拖动平移 · 双指缩放 · 点击选中与下令 · 底部卡片建造 / 生产', 12, '#8a99a6');
+        const tip = mkLabel(ov, '单击选中 · 拖拽框选 · 双指平移缩放 · 长按呼出指令盘', 12, '#8a99a6');
         tip.node.setPosition(0, -300, 0);
         alignLabel(tip, 'center');
     }
@@ -715,6 +723,9 @@ export class UI {
         this.topBar.active = false;
         this.bottom.active = false;
         this.cardLayer.active = false;
+        this.overlay.setGroupsVisible(false);
+        this.overlay.hideRadial();
+        this.overlay.hideBox();
     }
 
     hideMenu() {
@@ -722,6 +733,7 @@ export class UI {
         this.topBar.active = true;
         this.bottom.active = true;
         this.cardLayer.active = true;
+        this.overlay.setGroupsVisible(true);
         this.mode = 'game';
     }
 
@@ -765,10 +777,29 @@ export class UI {
 
     showPause() {
         this.mode = 'paused';
-        const box = this.modalBase(420, 320, '暂 停', PAL.cyan);
-        this.modalButton(box, 0, 20, 220, '继续战斗', () => this.hooks.onResume());
-        this.modalButton(box, 0, -34, 220, '重新开始', () => this.hooks.onRestart());
-        this.modalButton(box, 0, -88, 220, '返回主菜单', () => this.hooks.onQuit(), PAL.red);
+        const box = this.modalBase(460, 420, '暂 停', PAL.cyan);
+        this.modalButton(box, 0, 96, 236, '继续战斗', () => this.hooks.onResume());
+        this.toggleButton(box, 0, 36, 236, '自动索敌', !!this.game?.autoAcquire, () => {
+            if (!this.game) return;
+            this.game.autoAcquire = !this.game.autoAcquire;
+            this.showPause();
+        });
+        this.toggleButton(box, 0, -8, 236, '保持阵型', !!this.game?.holdFormation, () => {
+            if (!this.game) return;
+            this.game.holdFormation = !this.game.holdFormation;
+            this.showPause();
+        });
+        this.modalButton(box, 0, -70, 236, '重新开始', () => this.hooks.onRestart());
+        this.modalButton(box, 0, -126, 236, '返回主菜单', () => this.hooks.onQuit(), PAL.red);
+    }
+
+    /** on/off switch used by the optional assists inside the pause panel */
+    private toggleButton(parent: Node, x: number, y: number, w: number, text: string, on: boolean, cb: () => void) {
+        const b = new UIButton(parent, w, 40, `${text}   ${on ? '开' : '关'}`, 14, cb, on ? PAL.cyan : PAL.cyanDim);
+        b.setPosition(x, y);
+        b.setActive(on);
+        this.modalBtns.push(b);
+        return b;
     }
 
     showResult(win: boolean, stats: { time: number; kills: number; lost: number; built: number }) {
@@ -801,6 +832,8 @@ export class UI {
 
     hitTest(x: number, y: number): boolean {
         if (this.mode !== 'game') return true;
+        if (this.overlay.radialOpen) return true;
+        if (this.overlay.groupAt(x, y) >= 0) return true;
         for (const b of this.allButtons()) {
             if (b.visible && Math.abs(x - b.cx) <= b.w / 2 && Math.abs(y - b.cy) <= b.h / 2) return true;
         }
@@ -809,6 +842,25 @@ export class UI {
         if (Math.abs(x - this.mmX) <= m && Math.abs(y - this.mmY) <= m) return true;
         if (y > HH - 60) return true;
         if (y < -HH + 228) return true;
+        return false;
+    }
+
+    /** card under the finger, used for long-press = fill the queue */
+    private cardAt(x: number, y: number): Card | null {
+        for (const c of this.cards) if (c.node.active && c.hit(x, y)) return c;
+        return null;
+    }
+
+    /**
+     * Long-press on a production card fills the whole queue (batch build).
+     * Returns true when the gesture was consumed.
+     */
+    handleLongPress(x: number, y: number): boolean {
+        const c = this.cardAt(x, y);
+        if (c && c.kind === 'unit' && this.game && this.game.selectedBuilding) {
+            this.hooks.onProduceBatch(this.game.selectedBuilding, c.id, QUEUE_MAX);
+            return true;
+        }
         return false;
     }
 
@@ -822,6 +874,7 @@ export class UI {
             return true;
         }
         for (const b of this.allButtons()) if (b.hit(x, y)) { b.onClick(); return true; }
+        if (this.overlay.groupAt(x, y) >= 0) return true;
         const mmHalf = this.mmSize / 2;
         if (Math.abs(x - this.mmX) <= mmHalf && Math.abs(y - this.mmY) <= mmHalf) {
             const wx = ((x - this.mmX + mmHalf) / this.mmSize) * MAP_SIZE - HALF;
@@ -870,18 +923,23 @@ export class UI {
         this.btnCancelBuild.setVisible(!!g.buildMode);
 
         if (g.buildMode) {
-            this.hintL.string = `放置 ${BUILDINGS[g.buildMode].name} · 点击地面确认`;
+            this.hintL.string = `放置 ${BUILDINGS[g.buildMode].name} · 点地面连续放置 · 「取消建造」结束`;
         } else if (hasB) {
             const b = g.selectedBuilding;
-            this.hintL.string = `${b.def.name}${b.queue.length ? ` · 队列 ${b.queue.length}` : ''}${b.done ? '' : ` · 建造中 ${Math.round(b.progress * 100)}%`}`;
+            const q = b.queue.length ? ` · 队列 ${b.queue.length}/${QUEUE_MAX}` : '';
+            this.hintL.string = `${b.def.name}${q}${b.done ? '' : ` · 建造中 ${Math.round(b.progress * 100)}%`}`;
         } else if (selCount > 0) {
             const u = g.selection[0];
             this.hintL.string = selCount === 1
                 ? `${u.def.name} · HP ${Math.ceil(u.hp)}/${u.def.hp}${u.isHarvester ? ` · 载货 ${Math.floor(u.cargo)}` : ''}`
-                : `已选中 ${selCount} 个单位${this.attackMoveMode ? ' · 攻击移动' : ''}`;
+                : `已选中 ${selCount} 个单位${this.attackMoveMode ? ' · 攻击移动' : ''} · 长按呼出指令`;
         } else {
-            this.hintL.string = '点击单位或建筑进行指挥，拖动平移视角';
+            this.hintL.string = '拖拽框选 · 点选单位 · 长按指令盘 · 双指平移缩放';
         }
+
+        const counts: number[] = [];
+        for (let i = 0; i < g.groupIds.length; i++) counts.push(g.groupUnits(i).length);
+        this.overlay.refreshGroups(counts, this.activeGroup);
 
         this.refreshCards();
         this.refreshMinimap(dt);

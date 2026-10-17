@@ -113,6 +113,16 @@ export const UNLOAD_TIME = 2.2;
 export const QUEUE_MAX = 5;
 export const POWER_PENALTY_TIME = 1.7;
 
+/* ------------------------------------------------------------------ */
+/* Touch interface tuning (mobile-first)                               */
+/* ------------------------------------------------------------------ */
+export const TAP_MAX_MS = 320;        // press shorter than this = tap
+export const TAP_SLOP = 10;           // px the finger may drift and still count as a tap
+export const LONG_PRESS_MS = 400;     // hold longer than this = advanced command wheel
+export const BOX_MIN_PX = 18;         // drag further than this = box select
+export const SNAP_PX = 28;            // target snap radius in screen pixels
+export const GROUP_COUNT = 5;         // control groups
+
 export const tileToWorld = (tx: number, ty: number) => ({ x: tx * TILE + TILE / 2 - HALF, y: ty * TILE + TILE / 2 - HALF });
 export const worldToTile = (x: number, y: number) => ({ tx: Math.floor((x + HALF) / TILE), ty: Math.floor((y + HALF) / TILE) });
 export const inMap = (tx: number, ty: number) => tx >= 0 && ty >= 0 && tx < MAP_TILES && ty < MAP_TILES;
@@ -228,7 +238,7 @@ export const UNITS: Record<string, UnitDef> = {
     hourglass: U({
         id: 'hourglass', name: '沙漏采集车', faction: 'BU', kind: 'harvester',
         cost: 520, time: 9, hp: 780, armor: 'heavy', speed: 48, sight: 6, radius: 14,
-        from: 'foundry', tech: 1, cargo: 300, mineTime: HARVEST_TICK,
+        from: 'foundry', tech: 0, cargo: 300, mineTime: HARVEST_TICK,
         desc: '前往晶砂矿脉采集，送回淘洗站换取晶体。',
     }),
 
@@ -285,7 +295,7 @@ export const UNITS: Record<string, UnitDef> = {
     scav: U({
         id: 'scav', name: '拾荒采集车', faction: 'DS', kind: 'harvester',
         cost: 440, time: 7.5, hp: 640, armor: 'heavy', speed: 58, sight: 6, radius: 13,
-        from: 'workshop', tech: 1, cargo: 260, mineTime: HARVEST_TICK * 0.9,
+        from: 'workshop', tech: 0, cargo: 260, mineTime: HARVEST_TICK * 0.9,
         desc: '跑得更快的采集车，单趟收益略低但循环更快。',
     }),
 };
