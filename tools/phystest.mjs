@@ -207,9 +207,11 @@ check('沙地比沙丘快，寻路代价更低',
 check('单位踩上沙丘会减速', out.duneMul > 0 && out.duneMul < 1, `terrainMul=${out.duneMul}`);
 check('矿脉可通行且能寻路进入', out.crystalPassable === true && out.orePath === true,
     `passable=${out.crystalPassable} path=${out.orePath}`);
-check('轻单位被重单位挤开（质量差）',
-    out.sep && out.sep.footMoved > out.sep.tankMoved * 2 && out.sep.dist >= out.sep.need * 0.9,
-    out.sep ? `坦克 ${out.sep.tankMoved.toFixed(1)}px / 步兵 ${out.sep.footMoved.toFixed(1)}px` : 'no data');
+// The reference has NO mass-weighted pushing — a parked unit is stepped aside,
+// not bulldozed. So the assertion is simply "they end up separated".
+check('重叠单位会被分离（原版无质量位移）',
+    out.sep && out.sep.dist >= out.sep.need * 0.9,
+    out.sep ? `间距 ${out.sep.dist.toFixed(1)} / 需要 ${out.sep.need.toFixed(1)}` : 'no data');
 check('两辆坦克不会重叠', out.tankDist >= out.tankNeed * 0.9,
     `${out.tankDist.toFixed(1)} >= ${out.tankNeed.toFixed(1)}`);
 check('重坦碾过敌方步兵', out.crush && out.crush.victimDead === true && out.crush.tankAlive === true,

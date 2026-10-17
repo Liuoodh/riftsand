@@ -87,10 +87,12 @@ export class TerrainView {
         const rng = makeRng(90210);
         const N = MAP_TILES;
 
-        // backdrop beyond the map rim (reads as deeper desert)
+        // Backdrop beyond the map rim. It only shows through at the map edge,
+        // where the fog void does not quite line up with the tile diamonds, so
+        // it is kept close to the void colour instead of reading as a bright rim.
         const bx = PROJ_HALF_X + 1600, by = PROJ_HALF_Y + 1600;
         g.rect(-bx, -by, bx * 2, by * 2);
-        g.fillColor = hex(PAL.sandShadow);
+        g.fillColor = hex('#1c1a17');
         g.fill();
 
         // terrain diamonds, far-to-near so nearer tiles overlap the ones behind
@@ -373,6 +375,7 @@ export class EntityView {
     private op: UIOpacity;
     private lastHp = -1;
     private lastProgress = -1;
+    private lastDamaged = false;
     private lastOwner = -2;
     private lastLevel = -1;
     private lastRepair = false;
@@ -409,7 +412,8 @@ export class EntityView {
         } else if (e instanceof Building) {
             this.spriteNode.active = false;
             this.turret.node.active = false;
-            drawBuilding(pen(this.body), e.def, factionOf(e.owner), e.progress);
+            this.lastDamaged = e.hp / e.maxHp < 0.5;
+            drawBuilding(pen(this.body), e.def, factionOf(e.owner), e.progress, this.lastDamaged);
         }
         this.lastOwner = e.owner;
     }
@@ -423,7 +427,10 @@ export class EntityView {
     redraw(selFaction: Faction) {
         if (this.e instanceof Unit) {
             this.applyFrame(this.e, selFaction);
-        } else if (this.e instanceof Building) drawBuilding(pen(this.body), this.e.def, selFaction, (this.e as Building).progress);
+        } else if (this.e instanceof Building) {
+            const b = this.e as Building;
+            drawBuilding(pen(this.body), b.def, selFaction, b.progress, b.hp / b.maxHp < 0.5);
+        }
         this.lastOwner = this.e.owner;
     }
 
@@ -495,9 +502,11 @@ export class EntityView {
         } else if (e instanceof Building) {
             const b = e as Building;
             if (b.owner !== this.lastOwner) this.redraw(factionOf(b.owner));
-            if (Math.abs(b.progress - this.lastProgress) > 0.02) {
+            const hurt = b.hp / b.maxHp < 0.5;
+            if (Math.abs(b.progress - this.lastProgress) > 0.02 || hurt !== this.lastDamaged) {
                 this.lastProgress = b.progress;
-                drawBuilding(pen(this.body), b.def, factionOf(b.owner), b.progress);
+                this.lastDamaged = hurt;
+                drawBuilding(pen(this.body), b.def, factionOf(b.owner), b.progress, hurt);
             }
             if (b.repairing !== this.lastRepair) {
                 this.lastRepair = b.repairing;

@@ -1529,7 +1529,11 @@ export class Game {
                 u.stuck = 0;
             } else if (u.path.length > 0) {
                 const moved = Math.hypot(u.x - u.prevX, u.y - u.prevY);
-                if (moved >= 0.8) {
+                // Absolute thresholds break as soon as the step size changes:
+                // a harvester crawling over ore moves ~0.5px per 1/60s step and
+                // was being declared stuck forever. Judge against expected travel.
+                const expected = Math.max(0.12, u.speedCur * dt * 0.35);
+                if (moved >= expected) {
                     u.stuck = 0;
                     u.retry = 0;
                 } else {
@@ -2052,7 +2056,7 @@ export class Game {
                 const dx = b.x - a.x;
                 const dy = b.y - a.y;
                 const d2 = dx * dx + dy * dy;
-                const rr = (a.radius + b.radius) * 0.94;
+                const rr = (a.radius + b.radius) * (a.def.kind === 'infantry' && b.def.kind === 'infantry' ? 0.72 : 0.97);
                 if (d2 >= rr * rr || d2 < 0.0001) continue;
 
                 // heavy hulls run over hostile infantry
@@ -2066,30 +2070,55 @@ export class Game {
                 const nx = dx / d;
                 const ny = dy / d;
 
-                // head-on traffic: pure symmetric push deadlocks two units on the
-                // same lane, so give one of them a sideways bias and they slide past
-                // positive when the two hulls are driving into each other
-                const closing = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
-                if (closing > 8 && a.speedCur > 4 && b.speedCur > 4) {
-                    const side = a.id < b.id ? 1 : -1;
-                    const s = Math.max(6, Math.min(overlap * 0.8, 11));
-                    a.x += -ny * side * s;
-                    a.y += nx * side * s;
-                    b.x += ny * side * s;
-                    b.y += -nx * side * s;
-                }
+                // Reference collision model (gameobject/task/move/MoveTask.ts):
+                // a blocked unit WAITS or asks the blocker to MOVE ASIDE — nobody
+                // bulldozes anybody. Mass-weighted pushing turned columns into
+                // mush, so the response now depends on who is actually driving.
+                const aMove = a.speedCur > 6;
+                const bMove = b.speedCur > 6;
 
-                // mass-weighted push: infantry yields to a tank, not the other way
-                const invA = 1 / a.mass;
-                const invB = 1 / b.mass;
-                const soft = (a.def.kind === 'infantry' && b.def.kind === 'infantry') ? 0.55 : 0.92;
-                const push = overlap * soft;
-                const ka = push * invA / (invA + invB);
-                const kb = push * invB / (invA + invB);
-                a.x -= nx * ka;
-                a.y -= ny * ka;
-                b.x += nx * kb;
-                b.y += ny * kb;
+                if (aMove && !bMove) {
+                    // b is parked: step it out of a's lane, a barely deviates
+                    const side = (b.id & 1) ? 1 : -1;
+                    const s2 = Math.min(overlap, 9);
+                    b.x += -ny * side * s2;
+                    b.y += nx * side * s2;
+                    a.x -= nx * overlap * 0.18;
+                    a.y -= ny * overlap * 0.18;
+                } else if (bMove && !aMove) {
+                    const side = (a.id & 1) ? 1 : -1;
+                    const s2 = Math.min(overlap, 9);
+                    a.x += -ny * side * s2;
+                    a.y += nx * side * s2;
+                    b.x -= nx * overlap * 0.18;
+                    b.y -= ny * overlap * 0.18;
+                } else if (aMove && bMove) {
+                    // head-on traffic: give them a sideways bias so they slide past
+                    const closing = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
+                    if (closing > 8) {
+                        const side = a.id < b.id ? 1 : -1;
+                        const s2 = Math.max(5, Math.min(overlap * 0.8, 10));
+                        a.x += -ny * side * s2;
+                        a.y += nx * side * s2;
+                        b.x += ny * side * s2;
+                        b.y += -nx * side * s2;
+                    }
+                    // both driving: split the overlap evenly, no mass weighting
+                    const half = overlap * 0.5;
+                    a.x -= nx * half;
+                    a.y -= ny * half;
+                    b.x += nx * half;
+                    b.y += ny * half;
+                } else {
+                    // both idle: separate very slowly. Snapping them apart makes
+                    // parked formations jitter, but leaving them stacked forever
+                    // is worse (spawn points can overlap).
+                    const slow = overlap * 0.08;
+                    a.x -= nx * slow;
+                    a.y -= ny * slow;
+                    b.x += nx * slow;
+                    b.y += ny * slow;
+                }
             }
         }
         for (const u of list) {

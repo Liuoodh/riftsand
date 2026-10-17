@@ -432,7 +432,9 @@ function drawAircraft(g: Pen, def: UnitDef, faction: Faction, tc: Color, gc: Col
  * type-specific silhouette; the two walls facing the camera give it volume.
  * The old flat-plate drawing read as a sticker lying on a sloped floor.
  */
-export function drawBuilding(g: Pen, def: BuildingDef, faction: Faction, progress = 1) {
+export function drawBuilding(
+    g: Pen, def: BuildingDef, faction: Faction, progress = 1, damaged = false,
+) {
     g.clear();
     const tc = team(faction);
     const gc = glow(faction);
@@ -461,8 +463,8 @@ export function drawBuilding(g: Pen, def: BuildingDef, faction: Faction, progres
         g.fillColor = shade;
         g.fill();
     };
-    wall(-hw, new Color(58, 66, 80, 255));
-    wall(hw, new Color(31, 36, 44, 255));
+    wall(-hw, damaged ? new Color(44, 41, 38, 255) : new Color(58, 66, 80, 255));
+    wall(hw, damaged ? new Color(24, 22, 21, 255) : new Color(31, 36, 44, 255));
 
     // roof diamond
     g.moveTo(0, hh + H);
@@ -470,9 +472,9 @@ export function drawBuilding(g: Pen, def: BuildingDef, faction: Faction, progres
     g.lineTo(0, -hh + H);
     g.lineTo(-hw, H);
     g.close();
-    g.fillColor = new Color(76, 85, 99, 255);
+    g.fillColor = damaged ? new Color(56, 54, 52, 255) : new Color(76, 85, 99, 255);
     g.fill();
-    g.strokeColor = new Color(112, 124, 145, 255);
+    g.strokeColor = damaged ? new Color(84, 78, 72, 255) : new Color(112, 124, 145, 255);
     g.lineWidth = 1.5;
     g.stroke();
 
@@ -656,6 +658,28 @@ export function drawBuilding(g: Pen, def: BuildingDef, faction: Faction, progres
             g.stroke();
             break;
         }
+    }
+
+    if (damaged) {
+        // scorched patches and structural cracks: the silhouette has to change,
+        // a health bar alone does not read at this zoom level
+        for (let i = 0; i < 3; i++) {
+            const ox = (i - 1) * rx * 0.32;
+            g.ellipse(cx + ox, cy + ry * (0.05 + (i % 2) * 0.28), rx * 0.19, ry * 0.24);
+            g.fillColor = new Color(18, 16, 14, i === 1 ? 190 : 130);
+            g.fill();
+        }
+        g.moveTo(cx - rx * 0.62, cy + ry * 0.34);
+        g.lineTo(cx - rx * 0.22, cy + ry * 0.02);
+        g.lineTo(cx - rx * 0.3, cy - ry * 0.26);
+        g.lineTo(cx + rx * 0.08, cy - ry * 0.52);
+        g.moveTo(cx - rx * 0.22, cy + ry * 0.02);
+        g.lineTo(cx + rx * 0.24, cy + ry * 0.18);
+        g.moveTo(cx + rx * 0.3, cy + ry * 0.46);
+        g.lineTo(cx + rx * 0.52, cy + ry * 0.1);
+        g.strokeColor = new Color(14, 12, 11, 220);
+        g.lineWidth = 1.7;
+        g.stroke();
     }
 
     // team marking on the roof edge nearest the camera
