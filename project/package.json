@@ -1,0 +1,9 @@
+{
+  "name": "riftsand",
+  "uuid": "4f2b7c1e-8a3d-4e6f-9b2c-1d5e7f9a0b3c",
+  "version": "0.1.0",
+  "description": "RIFTSAND / 裂沙战线 - mobile real-time strategy for WeChat & Douyin mini games",
+  "creator": {
+    "version": "3.8.8"
+  }
+}

@@ -1,0 +1,14 @@
+# 忽略 Cocos Creator 生成物
+library/
+temp/
+local/
+build/
+profiles/
+native/
+node_modules/
+
+# 日志与系统文件
+*.log
+.DS_Store
+Thumbs.db
+build.log
