@@ -124,8 +124,10 @@ export class AIController {
         // vehicles: a balanced mix, weighted towards the best affordable hull
         const vq = this.p.queues.vehicle;
         if (vq.items.length < 1) {
+            // harvesters have their own cap in manageEconomy; never let the
+            // combat queue spam them
             const opts = this.g.availableUnitsFor(this.p, 'vehicle')
-                .filter(d => !d.mcv && !this.g.lockReason(this.p, d));
+                .filter(d => !d.mcv && d.kind !== 'harvester' && !this.g.lockReason(this.p, d));
             if (opts.length) {
                 const wantHeavy = (this.g.time % 20) < 10;
                 const pick = wantHeavy ? opts[opts.length - 1] : opts[Math.min(1, opts.length - 1)];

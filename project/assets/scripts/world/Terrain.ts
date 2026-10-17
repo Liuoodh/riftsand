@@ -30,6 +30,8 @@ export class TerrainMap {
     solid = new Uint8Array(MAP_TILES * MAP_TILES);
     /** fine height-ish noise for tinting the ground */
     tint = new Float32Array(MAP_TILES * MAP_TILES);
+    /** movement multiplier per tile (sand 1.0, dune slower, crystal slowest) */
+    speed = new Float32Array(MAP_TILES * MAP_TILES);
     nodes: CrystalNode[] = [];
 
     idx(tx: number, ty: number) {
@@ -59,7 +61,8 @@ export class TerrainMap {
                 if (d > r) continue;
                 const i = this.idx(x, y);
                 this.kind[i] = TileKind.Crystal;
-                this.solid[i] = 1;
+                // ore is driveable in the classics: slow, but not a wall
+                this.solid[i] = 0;
             }
         }
     }
@@ -74,8 +77,13 @@ export class TerrainMap {
         const G = 17;
         const grid = new Float32Array(G * G);
         for (let i = 0; i < grid.length; i++) grid[i] = rng();
+        // tileable sampling: octaves are fed coordinates above 1, so wrap them
+        // instead of reading past the noise grid (which silently produced NaN
+        // and turned the whole map into flat sand)
         const noise = (u: number, v: number) => {
-            const fx = u * (G - 1), fy = v * (G - 1);
+            const uu = u - Math.floor(u);
+            const vv = v - Math.floor(v);
+            const fx = uu * (G - 1), fy = vv * (G - 1);
             const x0 = Math.floor(fx), y0 = Math.floor(fy);
             const x1 = Math.min(G - 1, x0 + 1), y1 = Math.min(G - 1, y0 + 1);
             const tx = fx - x0, ty = fy - y0;
@@ -92,10 +100,10 @@ export class TerrainMap {
                 const n = noise(u, v) * 0.65 + noise(u * 2.7 + 3.1, v * 2.7 + 1.7) * 0.35;
                 const i = this.idx(x, y);
                 this.tint[i] = n;
-                if (n > 0.68) {
+                if (n > 0.715) {
                     this.kind[i] = TileKind.Rock;
                     this.solid[i] = 1;
-                } else if (n > 0.55) {
+                } else if (n > 0.575) {
                     this.kind[i] = TileKind.Dune;
                 }
             }
@@ -128,6 +136,9 @@ export class TerrainMap {
             }
         }
 
+        // movement cost per tile, filled after the symmetry pass below
+        this.rebuildSpeed();
+
         // Point symmetry so neither side gets an advantage.
         for (let y = 0; y < N / 2; y++) {
             for (let x = 0; x < N; x++) {
@@ -141,8 +152,11 @@ export class TerrainMap {
         }
 
         // crystal fields (money) — mirrored layout, near + far
+        // NOTE: the first spot used to be [12,32]; its point-mirror (51,31)
+        // landed inside the eastern command core, so that side's harvester
+        // could never reach its nearest ore field.
         const spots: Array<[number, number, number]> = [
-            [12, 32, 5600],
+            [14, 34, 5600],
             [17, 24, 4200],
             [17, 40, 4200],
             [24, 32, 3800],
@@ -157,6 +171,38 @@ export class TerrainMap {
             this.addNode(tx, ty, amount, nid++, rng);
             this.addNode(N - 1 - tx, N - 1 - ty, amount, nid++, rng);
         }
+        this.rebuildSpeed();
+    }
+
+    /** (re)computes per-tile movement multipliers from the tile kind */
+    rebuildSpeed() {
+        for (let i = 0; i < this.kind.length; i++) {
+            const k = this.kind[i];
+            this.speed[i] = k === TileKind.Rock ? 0 : k === TileKind.Dune ? 0.84 : k === TileKind.Crystal ? 0.66 : 1;
+        }
+    }
+
+    /**
+     * Movement multiplier for a unit class. Infantry picks its way through dunes
+     * better than wheels; hover skirt over both.
+     */
+    speedAt(tx: number, ty: number, isInfantry: boolean, hover: boolean) {
+        if (!this.inside(tx, ty)) return 0;
+        const i = this.idx(tx, ty);
+        const k = this.kind[i];
+        if (k === TileKind.Rock) return 0;
+        if (k === TileKind.Dune) return hover ? 1 : isInfantry ? 0.95 : 0.84;
+        if (k === TileKind.Crystal) return hover ? 0.85 : isInfantry ? 0.8 : 0.66;
+        return 1;
+    }
+
+    /** A* cost multiplier: slow ground is expensive */
+    costAt(tx: number, ty: number) {
+        if (!this.inside(tx, ty)) return 2;
+        const k = this.kind[this.idx(tx, ty)];
+        if (k === TileKind.Dune) return 1.25;
+        if (k === TileKind.Crystal) return 1.4;
+        return 1;
     }
 
     private addNode(tx: number, ty: number, amount: number, id: number, rng: () => number) {

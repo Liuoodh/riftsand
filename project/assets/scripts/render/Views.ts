@@ -12,7 +12,7 @@ import {
 } from '../core/Core';
 import { TerrainMap, TileKind } from '../world/Terrain';
 import { Game, PlayerState } from '../game/Game';
-import { Unit, Building, Entity, Projectile, Fx, Zone, Crate } from '../game/Entities';
+import { Unit, Building, Entity, Projectile, Fx, Zone, Crate, Decal } from '../game/Entities';
 import {
     drawUnit, drawBuilding, drawCrystal, drawRock, drawBush, drawCrate,
     drawChevron, drawPickup,
@@ -401,10 +401,17 @@ export class EntityView {
         if (e instanceof Unit) {
             const u = e;
             const air = u.isAir;
-            this.node.setPosition(u.x, u.y + (air ? 14 + Math.sin(u.bob * 2) * 2 : 0), 0);
-            if (!air && u.def.kind !== 'infantry') {
+            this.node.setPosition(u.x, u.y + (air ? u.altitude + Math.sin(u.bob * 2) * 1.6 : 0), 0);
+            if (air) {
+                // bank into turns so aircraft do not slide sideways
+                const bank = Math.max(-18, Math.min(18, u.turnDelta * 7));
+                this.node.angle = (-u.face * 180) / Math.PI + bank;
+            } else if (u.def.kind !== 'infantry') {
                 this.node.angle = (-u.face * 180) / Math.PI;
+                this.body.node.setPosition(-u.recoil * 30, 0, 0);
             } else if (u.def.kind === 'infantry') {
+                const walk = u.speedCur > 5 ? Math.sin(u.bob * 11) * 0.9 : 0;
+                this.body.node.setPosition(0, walk, 0);
                 const flip = u.face > Math.PI / 2 || u.face < -Math.PI / 2;
                 this.node.setScale(flip ? -1 : 1, u.hitFlash > 0 ? 1.06 : 1, 1);
                 this.hp.node.setScale(flip ? -1 : 1, 1, 1);
@@ -553,6 +560,7 @@ const factionOf = (owner: number): Faction => (owner === 1 ? otherFaction : game
 export class WorldRenderer {
     root: Node;
     terrainLayer: Node;
+    decalLayer: Node;
     rallyLayer: Node;
     crateLayer: Node;
     buildingLayer: Node;
@@ -571,6 +579,7 @@ export class WorldRenderer {
     fxViews = new Map<Fx, Graphics>();
     zoneViews = new Map<Zone, Graphics>();
     crateViews = new Map<Crate, Graphics>();
+    decalViews = new Map<Decal, Graphics>();
 
     private tmpColor = new Color();
     private primIds = new Set<number>();
@@ -579,6 +588,7 @@ export class WorldRenderer {
     constructor(canvas: Node, public game: Game) {
         this.root = plainNode(canvas, 'WorldRoot');
         this.terrainLayer = plainNode(this.root, 'L0_Terrain');
+        this.decalLayer = plainNode(this.root, 'L0b_Decals');
         this.rallyLayer = plainNode(this.root, 'L1_Rally');
         this.crateLayer = plainNode(this.root, 'L2_Crates');
         this.buildingLayer = plainNode(this.root, 'L2_Buildings');
@@ -624,6 +634,7 @@ export class WorldRenderer {
 
     private drawFx(g: Graphics, f: Fx) {
         g.clear();
+        g.node.angle = 0;
         const k = f.k;
         if (f.kind === 'boom') {
             const r = (10 + k * 34) * f.scale;
@@ -676,6 +687,37 @@ export class WorldRenderer {
             g.strokeColor = new Color(255, 140, 100, Math.floor(220 * (0.5 + 0.5 * k)));
             g.lineWidth = 2;
             g.stroke();
+        } else if (f.kind === 'debris') {
+            // tumbling hull fragments: position is the ground point, z is height
+            g.node.angle = (f.t * f.spin * 57.3) % 360;
+            const s = 2.2 * f.scale;
+            g.rect(-s, -s * 0.5 + f.z, s * 2, s);
+            g.fillColor = new Color(58, 54, 48, Math.floor(240 * (1 - k * 0.7)));
+            g.fill();
+            g.moveTo(-s, f.z);
+            g.lineTo(s, f.z);
+            g.strokeColor = new Color(150, 120, 82, Math.floor(160 * (1 - k)));
+            g.lineWidth = 1;
+            g.stroke();
+        } else if (f.kind === 'smoke') {
+            const r = (5 + k * 16) * f.scale;
+            g.circle(0, f.z, r);
+            g.fillColor = new Color(96, 92, 86, Math.floor(110 * (1 - k)));
+            g.fill();
+        } else if (f.kind === 'fire') {
+            const flick = 0.6 + Math.abs(Math.sin(f.t * 17 + f.scale * 9)) * 0.5;
+            const h = (10 + k * 6) * f.scale * flick;
+            g.moveTo(-5, 0); g.lineTo(-2, h * 0.7); g.lineTo(0, h); g.lineTo(3, h * 0.55); g.lineTo(5, 0); g.close();
+            g.fillColor = new Color(255, 150, 60, Math.floor(220 * (1 - k)));
+            g.fill();
+            g.moveTo(-2.5, 0); g.lineTo(0, h * 0.6); g.lineTo(2.2, 0); g.close();
+            g.fillColor = new Color(255, 230, 140, Math.floor(230 * (1 - k)));
+            g.fill();
+        } else if (f.kind === 'dust') {
+            const r = (8 + k * 22) * f.scale;
+            g.ellipse(0, 0, r, r * 0.5);
+            g.fillColor = new Color(201, 161, 115, Math.floor(75 * (1 - k)));
+            g.fill();
         } else if (f.kind === 'spawn') {
             const r = (8 + k * 26) * f.scale;
             g.ellipse(0, 0, r, r * 0.55);
@@ -732,6 +774,22 @@ export class WorldRenderer {
         g.close();
         g.fillColor = HEX(PAL.cyan, 210);
         g.fill();
+    }
+
+    private drawDecal(g: Graphics, d: Decal) {
+        g.clear();
+        const fade = 1 - Math.max(0, (d.k - 0.6) / 0.4);
+        const a = d.alpha * fade;
+        g.ellipse(0, 0, d.r, d.r * 0.62);
+        g.fillColor = new Color(24, 18, 13, Math.floor(a * 0.7));
+        g.fill();
+        g.ellipse(0, 0, d.r * 0.68, d.r * 0.42);
+        g.fillColor = new Color(12, 9, 7, Math.floor(a * 0.55));
+        g.fill();
+        g.ellipse(0, 0, d.r, d.r * 0.62);
+        g.strokeColor = new Color(128, 100, 68, Math.floor(a * 0.55));
+        g.lineWidth = 1.4;
+        g.stroke();
     }
 
     private drawZone(g: Graphics, z: Zone) {
@@ -827,6 +885,20 @@ export class WorldRenderer {
         // rally marker for the selected structure
         this.drawRally(g);
 
+        // craters left by explosions
+        for (const d of g.decals) {
+            let gg = this.decalViews.get(d);
+            if (!gg) {
+                gg = gfxNode(this.decalLayer, 'decal');
+                this.decalViews.set(d, gg);
+            }
+            gg.node.setPosition(d.x, d.y, 0);
+            this.drawDecal(gg, d);
+        }
+        for (const [d, gg] of this.decalViews) {
+            if (d.dead || g.decals.indexOf(d) < 0) { gg.node.destroy(); this.decalViews.delete(d); }
+        }
+
         // super weapon fields
         for (const z of g.zones) {
             let gg = this.zoneViews.get(z);
@@ -878,7 +950,8 @@ export class WorldRenderer {
                 n = gg.node;
                 this.projViews.set(pr, n);
             }
-            n.setPosition(pr.x, pr.y + pr.height, 0);
+            n.setPosition(pr.x, pr.y + pr.z, 0);
+            n.angle = pr.kind === 'bullet' ? 0 : (-pr.heading * 180) / Math.PI;
         }
         for (const [pr, n] of this.projViews) {
             if (pr.dead || g.projectiles.indexOf(pr) < 0) {

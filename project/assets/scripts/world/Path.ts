@@ -1,6 +1,12 @@
 /**
- * Grid A* path-finding with line-of-sight smoothing.
- * The battle grid is small (64x64) so a plain binary-heap A* is more than enough.
+ * Grid A* path-finding with terrain cost, footprint clearance and best-effort
+ * fallback.
+ *
+ * - terrain cost makes columns prefer sand over dunes and ore fields
+ * - vehicles ask for a footprint radius so they do not thread 1-tile gaps
+ * - if the goal is unreachable the closest reached cell is returned instead of
+ *   freezing the unit (same "best effort" idea as the reference engine)
+ * - line-of-sight smoothing keeps the paths from looking like staircases
  */
 import { MAP_TILES, TILE, HALF } from '../core/Core';
 
@@ -48,6 +54,13 @@ const DIRS = [
     [1, 1, 1.4142], [1, -1, 1.4142], [-1, 1, 1.4142], [-1, -1, 1.4142],
 ];
 
+export interface PathOptions {
+    /** collision radius in world units; values above 10 require a wide corridor */
+    radius?: number;
+    /** hard cap on expanded nodes, keeps a frame from stalling */
+    maxNodes?: number;
+}
+
 export class PathFinder {
     private g = new Float32Array(N * N);
     private came = new Int32Array(N * N);
@@ -56,13 +69,17 @@ export class PathFinder {
     private run = 0;
     private heap = new Heap();
     private blocked: (tx: number, ty: number) => boolean;
+    private cost: (tx: number, ty: number) => number;
 
-    constructor(blocked: (tx: number, ty: number) => boolean) {
+    constructor(blocked: (tx: number, ty: number) => boolean, cost?: (tx: number, ty: number) => number) {
         this.blocked = blocked;
+        this.cost = cost || (() => 1);
     }
 
     /** Returns world-space waypoints (excluding the start), or null. */
-    find(sx: number, sy: number, gx: number, gy: number): Array<{ x: number; y: number }> | null {
+    find(sx: number, sy: number, gx: number, gy: number, opts: PathOptions = {}): Array<{ x: number; y: number }> | null {
+        const radius = opts.radius || 0;
+        const maxNodes = opts.maxNodes || 5200;
         const stx = Math.floor((sx + HALF) / TILE);
         const sty = Math.floor((sy + HALF) / TILE);
         let gtx = Math.floor((gx + HALF) / TILE);
@@ -72,8 +89,8 @@ export class PathFinder {
         gty = Math.max(0, Math.min(N - 1, gty));
 
         // walk out of an occupied cell so units never freeze inside each other
-        if (this.blocked(gtx, gty)) {
-            const alt = this.nearestFree(gtx, gty);
+        if (!this.clear(gtx, gty, radius)) {
+            const alt = this.nearestFree(gtx, gty, radius);
             if (!alt) return null;
             gtx = alt.tx; gty = alt.ty;
         }
@@ -91,11 +108,15 @@ export class PathFinder {
         this.g[startId] = 0;
         this.came[startId] = -1;
         this.closed[startId] = 0;
-        heap.push(startId, 0);
+        heap.push(startId, this.heur(stx, sty, gtx, gty));
 
         let found = false;
-        let guard = 0;
-        while (heap.size > 0 && guard++ < 12000) {
+        let expanded = 0;
+        // best-effort bookkeeping: the reached cell closest to the goal
+        let bestId = startId;
+        let bestH = this.heur(stx, sty, gtx, gty);
+
+        while (heap.size > 0 && expanded++ < maxNodes) {
             const cur = heap.pop();
             if (cur === goalId) { found = true; break; }
             if (this.stamp[cur] === run && this.closed[cur]) continue;
@@ -105,33 +126,38 @@ export class PathFinder {
                 const dx = DIRS[i][0], dy = DIRS[i][1];
                 const nx = cx + dx, ny = cy + dy;
                 if (nx < 0 || ny < 0 || nx >= N || ny >= N) continue;
-                if (this.blocked(nx, ny)) continue;
+                if (!this.clear(nx, ny, radius)) continue;
                 // no corner cutting
                 if (dx !== 0 && dy !== 0) {
                     if (this.blocked(cx + dx, cy) || this.blocked(cx, cy + dy)) continue;
                 }
                 const nid = ny * N + nx;
                 if (this.stamp[nid] === run && this.closed[nid]) continue;
-                const ng = this.g[cur] + DIRS[i][2];
+                const ng = this.g[cur] + DIRS[i][2] * this.cost(nx, ny);
                 if (this.stamp[nid] !== run) {
                     this.stamp[nid] = run;
                     this.g[nid] = ng;
                     this.came[nid] = cur;
                     this.closed[nid] = 0;
-                    heap.push(nid, ng + this.heur(nx, ny, gtx, gty));
+                    const h = this.heur(nx, ny, gtx, gty);
+                    heap.push(nid, ng + h);
+                    if (h < bestH) { bestH = h; bestId = nid; }
                 } else if (ng < this.g[nid]) {
                     this.g[nid] = ng;
                     this.came[nid] = cur;
-                    heap.push(nid, ng + this.heur(nx, ny, gtx, gty));
+                    const h = this.heur(nx, ny, gtx, gty);
+                    heap.push(nid, ng + h);
+                    if (h < bestH) { bestH = h; bestId = nid; }
                 }
             }
         }
 
-        if (!found) return null;
+        // unreachable goal: head for the closest cell we actually reached
+        const endId = found ? goalId : bestId;
+        if (endId === startId) return null;
 
-        // reconstruct
         const cells: number[] = [];
-        let c = goalId;
+        let c = endId;
         while (c !== -1) {
             cells.push(c);
             if (c === startId) break;
@@ -139,16 +165,15 @@ export class PathFinder {
         }
         cells.reverse();
 
-        // world points
         const pts: Array<{ x: number; y: number }> = [];
         for (let i = 1; i < cells.length; i++) {
             const tx = cells[i] % N, ty = (cells[i] / N) | 0;
             pts.push({ x: tx * TILE + TILE / 2 - HALF, y: ty * TILE + TILE / 2 - HALF });
         }
         if (pts.length === 0) pts.push({ x: gx, y: gy });
-        else pts[pts.length - 1] = { x: gx, y: gy };
+        else if (found) pts[pts.length - 1] = { x: gx, y: gy };
 
-        return this.smooth(sx, sy, pts);
+        return this.smooth(sx, sy, pts, radius);
     }
 
     private heur(x: number, y: number, gx: number, gy: number) {
@@ -156,12 +181,22 @@ export class PathFinder {
         return (dx > dy ? dx + 0.4142 * dy : dy + 0.4142 * dx);
     }
 
-    private nearestFree(tx: number, ty: number): { tx: number; ty: number } | null {
-        for (let r = 1; r <= 6; r++) {
+    /** tile is free, and wide enough for the unit footprint */
+    private clear(tx: number, ty: number, radius: number) {
+        if (this.blocked(tx, ty)) return false;
+        // current units all fit inside a single tile; the clearance branch is
+        // kept for future 2x2 hulls and simply stays inert below that size
+        if (radius <= TILE * 0.55) return true;
+        return !this.blocked(tx - 1, ty) && !this.blocked(tx + 1, ty)
+            && !this.blocked(tx, ty - 1) && !this.blocked(tx, ty + 1);
+    }
+
+    private nearestFree(tx: number, ty: number, radius: number): { tx: number; ty: number } | null {
+        for (let r = 1; r <= 8; r++) {
             for (let y = ty - r; y <= ty + r; y++) {
                 for (let x = tx - r; x <= tx + r; x++) {
                     if (x < 0 || y < 0 || x >= N || y >= N) continue;
-                    if (!this.blocked(x, y)) return { tx: x, ty: y };
+                    if (this.clear(x, y, radius)) return { tx: x, ty: y };
                 }
             }
         }
@@ -169,16 +204,15 @@ export class PathFinder {
     }
 
     /** Removes intermediate waypoints that are directly walkable. */
-    private smooth(sx: number, sy: number, pts: Array<{ x: number; y: number }>) {
+    private smooth(sx: number, sy: number, pts: Array<{ x: number; y: number }>, radius: number) {
         if (pts.length <= 2) return pts;
         const out: Array<{ x: number; y: number }> = [];
         let ax = sx, ay = sy;
         let i = 0;
         while (i < pts.length) {
             let j = pts.length - 1;
-            // find furthest visible point
             for (; j > i; j--) {
-                if (this.lineClear(ax, ay, pts[j].x, pts[j].y)) break;
+                if (this.lineClear(ax, ay, pts[j].x, pts[j].y, radius)) break;
             }
             out.push(pts[j]);
             ax = pts[j].x; ay = pts[j].y;
@@ -187,14 +221,14 @@ export class PathFinder {
         return out;
     }
 
-    lineClear(x0: number, y0: number, x1: number, y1: number) {
-        const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / (TILE * 0.5));
+    lineClear(x0: number, y0: number, x1: number, y1: number, radius = 0) {
+        const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / (TILE * 0.4));
         for (let s = 1; s < steps; s++) {
             const t = s / steps;
             const x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
             const tx = Math.floor((x + HALF) / TILE), ty = Math.floor((y + HALF) / TILE);
             if (tx < 0 || ty < 0 || tx >= N || ty >= N) return false;
-            if (this.blocked(tx, ty)) return false;
+            if (!this.clear(tx, ty, radius)) return false;
         }
         return true;
     }

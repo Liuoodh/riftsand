@@ -730,6 +730,7 @@ export class RiftApp extends Component {
                 }
                 sfx.play(name, gain);
             },
+            onShake: (strength) => this.cam?.addShake(strength),
         }, { credits, superWeapons, crates: true });
         const app = this.ui;
 

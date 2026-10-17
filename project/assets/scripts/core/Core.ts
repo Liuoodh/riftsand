@@ -25,6 +25,14 @@ export interface WeaponDef {
     proj: ProjKind;
     turret?: boolean;   // can only shoot in facing arc (visual only here)
     antiAir?: boolean;  // required to shoot at aircraft
+    /** muzzle velocity in world units / second (defaults per projectile kind) */
+    speed?: number;
+    /** follow a gravity arc instead of flying straight (shells, bombs, mortars) */
+    ballistic?: boolean;
+    /** steer toward the target every frame (rockets) */
+    homing?: boolean;
+    /** how much damage remains at the edge of the splash radius (0..1) */
+    falloff?: number;
 }
 
 export interface UnitDef {
@@ -32,6 +40,12 @@ export interface UnitDef {
     name: string;
     faction: Faction;
     kind: 'infantry' | 'vehicle' | 'air' | 'harvester' | 'mcv';
+    /** heavy hulls run over enemy infantry */
+    crush?: boolean;
+    /** rides an air cushion: ignores dune slowdown and can cross rubble */
+    hover?: boolean;
+    /** flight height, used by the renderer and by ground weapons */
+    altitude?: number;
     cost: number;
     time: number;
     hp: number;
@@ -261,7 +275,7 @@ export const UNITS: Record<string, UnitDef> = {
     rampart: U({
         id: 'rampart', name: '城墙主战坦克', faction: 'BU', kind: 'vehicle',
         cost: 950, time: 15, hp: 700, armor: 'heavy', speed: 42, sight: 7, radius: 13,
-        from: 'foundry', tech: 1,
+        from: 'foundry', tech: 1, crush: true,
         weapon: { dmg: 52, type: 'ap', range: 168, cd: 1.9, proj: 'shell' },
         desc: '磐岩联合的战线基石。厚装甲 + 长身管主炮。',
     }),
@@ -269,33 +283,33 @@ export const UNITS: Record<string, UnitDef> = {
         id: 'mortar', name: '雷钵自行炮', faction: 'BU', kind: 'vehicle',
         cost: 1100, time: 17, hp: 380, armor: 'light', speed: 32, sight: 7, radius: 13,
         from: 'foundry', tech: 2,
-        weapon: { dmg: 78, type: 'explosive', range: 330, cd: 3.4, splash: 52, proj: 'shell' },
+        weapon: { dmg: 78, type: 'explosive', range: 330, cd: 3.4, splash: 52, proj: 'shell', ballistic: true },
         desc: '超远射程曲射火力，拆建筑与清兵一流，但非常脆弱。',
     }),
     warden: U({
         id: 'warden', name: '天穹无人机', faction: 'BU', kind: 'air',
         cost: 700, time: 12, hp: 240, armor: 'air', speed: 92, sight: 10, radius: 12,
-        from: 'airpad', tech: 2,
+        from: 'airpad', tech: 2, altitude: 28,
         weapon: { dmg: 20, type: 'small', range: 155, cd: 1.0, proj: 'bullet', antiAir: true },
         desc: '空中侦察与对地骚扰，也能拦截敌方飞行器。',
     }),
     hammer: U({
         id: 'hammer', name: '重锤轰炸机', faction: 'BU', kind: 'air',
         cost: 1450, time: 21, hp: 340, armor: 'air', speed: 112, sight: 9, radius: 14,
-        from: 'airpad', tech: 3,
+        from: 'airpad', tech: 3, altitude: 34,
         weapon: { dmg: 96, type: 'explosive', range: 70, cd: 4.5, splash: 60, proj: 'bomb' },
         desc: '重载投弹，一次抹平一片步兵与建筑群。',
     }),
     hourglass: U({
         id: 'hourglass', name: '沙漏采集车', faction: 'BU', kind: 'harvester',
         cost: 520, time: 9, hp: 780, armor: 'heavy', speed: 48, sight: 6, radius: 14,
-        from: 'foundry', tech: 0, cargo: 300, mineTime: HARVEST_TICK,
+        from: 'foundry', tech: 0, cargo: 300, mineTime: HARVEST_TICK, crush: true,
         desc: '前往晶砂矿脉采集，送回淘洗站换取晶体。',
     }),
     rig: U({
         id: 'rig', name: '磐石基地车', faction: 'BU', kind: 'mcv',
         cost: 3000, time: 24, hp: 900, armor: 'heavy', speed: 36, sight: 8, radius: 15,
-        from: 'foundry', tech: 1, mcv: true,
+        from: 'foundry', tech: 1, mcv: true, crush: true,
         desc: '移动的指挥中枢。抵达新矿区后部署，建立前进基地。',
     }),
 
@@ -330,14 +344,14 @@ export const UNITS: Record<string, UnitDef> = {
     dart: U({
         id: 'dart', name: '疾行悬浮摩托', faction: 'DS', kind: 'vehicle',
         cost: 400, time: 7, hp: 190, armor: 'light', speed: 86, sight: 10, radius: 9,
-        from: 'workshop', tech: 1,
+        from: 'workshop', tech: 1, hover: true,
         weapon: { dmg: 11, type: 'small', range: 122, cd: 0.5, proj: 'bullet' },
         desc: '最快的陆地单位，骚扰矿车与切后排的专业户。',
     }),
     lizard: U({
         id: 'lizard', name: '蜥蜴突击车', faction: 'DS', kind: 'vehicle',
         cost: 800, time: 13, hp: 480, armor: 'heavy', speed: 54, sight: 8, radius: 12,
-        from: 'workshop', tech: 1,
+        from: 'workshop', tech: 1, crush: true,
         weapon: { dmg: 40, type: 'ap', range: 152, cd: 1.5, proj: 'shell' },
         desc: '轻量化的突击平台，靠速度弥补装甲不足。',
     }),
@@ -345,33 +359,33 @@ export const UNITS: Record<string, UnitDef> = {
         id: 'squall', name: '沙暴火箭车', faction: 'DS', kind: 'vehicle',
         cost: 980, time: 16, hp: 300, armor: 'light', speed: 36, sight: 7, radius: 13,
         from: 'workshop', tech: 2,
-        weapon: { dmg: 26, type: 'explosive', range: 340, cd: 3.2, splash: 58, proj: 'rocket' },
+        weapon: { dmg: 26, type: 'explosive', range: 340, cd: 3.2, splash: 58, proj: 'rocket', ballistic: true },
         desc: '多管齐射覆盖战场，对密集阵型极具威胁。',
     }),
     gnat: U({
         id: 'gnat', name: '蚊式侦察机', faction: 'DS', kind: 'air',
         cost: 620, time: 10, hp: 190, armor: 'air', speed: 104, sight: 11, radius: 11,
-        from: 'strip', tech: 2,
+        from: 'strip', tech: 2, altitude: 26,
         weapon: { dmg: 16, type: 'small', range: 140, cd: 0.85, proj: 'bullet', antiAir: true },
         desc: '视野极佳的空中游击单位，也是最好的侦察手段。',
     }),
     shrike: U({
         id: 'shrike', name: '掠影攻击机', faction: 'DS', kind: 'air',
         cost: 1320, time: 19, hp: 290, armor: 'air', speed: 128, sight: 9, radius: 14,
-        from: 'strip', tech: 3,
+        from: 'strip', tech: 3, altitude: 32,
         weapon: { dmg: 74, type: 'explosive', range: 66, cd: 3.8, splash: 48, proj: 'bomb' },
         desc: '低空突防的高速攻击机，打完就跑。',
     }),
     scav: U({
         id: 'scav', name: '拾荒采集车', faction: 'DS', kind: 'harvester',
         cost: 440, time: 7.5, hp: 640, armor: 'heavy', speed: 58, sight: 6, radius: 13,
-        from: 'workshop', tech: 0, cargo: 260, mineTime: HARVEST_TICK * 0.9,
+        from: 'workshop', tech: 0, cargo: 260, mineTime: HARVEST_TICK * 0.9, crush: true,
         desc: '跑得更快的采集车，单趟收益略低但循环更快。',
     }),
     crawler: U({
         id: 'crawler', name: '迁徙基地车', faction: 'DS', kind: 'mcv',
         cost: 2800, time: 22, hp: 820, armor: 'heavy', speed: 42, sight: 8, radius: 14,
-        from: 'workshop', tech: 1, mcv: true,
+        from: 'workshop', tech: 1, mcv: true, crush: true,
         desc: '沙蜥的移动母巢。部署后在新据点展开整套指挥设施。',
     }),
 };
@@ -567,4 +581,32 @@ export const fmtTime = (s: number) => {
     const m = Math.floor(s / 60);
     const sec = Math.floor(s % 60);
     return `${m}:${sec < 10 ? '0' : ''}${sec}`;
+};
+
+
+/* ------------------------------------------------------------------ */
+/* Physics traits derived from unit class                              */
+/* ------------------------------------------------------------------ */
+export const unitMass = (d: UnitDef) =>
+    d.kind === 'infantry' ? 1 : d.kind === 'air' ? 3 : d.kind === 'harvester' ? 10
+        : d.kind === 'mcv' ? 12 : d.armor === 'heavy' ? 8 : 5;
+
+export const unitTurn = (d: UnitDef) =>
+    d.kind === 'infantry' ? 10 : d.kind === 'air' ? 5 : d.kind === 'harvester' ? 2.6
+        : d.kind === 'mcv' ? 2.2 : d.hover ? 7 : d.armor === 'heavy' ? 2.6 : 3.6;
+
+export const unitAccel = (d: UnitDef) =>
+    d.kind === 'infantry' ? 160 : d.kind === 'air' ? 90 : d.kind === 'harvester' ? 46
+        : d.kind === 'mcv' ? 40 : d.hover ? 110 : 58;
+
+/** does this unit run over enemy infantry? */
+export const unitCrushes = (d: UnitDef) =>
+    !!d.crush || d.kind === 'harvester' || d.kind === 'mcv' || (d.kind === 'vehicle' && d.armor === 'heavy');
+
+/** projectile defaults per kind */
+export const PROJ_PHYSICS: Record<ProjKind, { speed: number; ballistic: boolean; homing: boolean; turn: number; accel: number; gravity: number; radius: number; falloff: number }> = {
+    bullet: { speed: 1050, ballistic: false, homing: false, turn: 0, accel: 0, gravity: 0, radius: 5, falloff: 0.25 },
+    shell: { speed: 470, ballistic: true, homing: false, turn: 0, accel: 0, gravity: 520, radius: 9, falloff: 0.4 },
+    rocket: { speed: 300, ballistic: false, homing: true, turn: 2.4, accel: 240, gravity: 0, radius: 9, falloff: 0.45 },
+    bomb: { speed: 240, ballistic: true, homing: false, turn: 0, accel: 0, gravity: 620, radius: 14, falloff: 0.35 },
 };

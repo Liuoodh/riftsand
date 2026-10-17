@@ -4,7 +4,10 @@
  * rendering lives in render/Views.ts. Keeping data and behaviour apart makes
  * the simulation easy to test and cheap to step.
  */
-import { BuildingDef, UnitDef, Stance, TILE, HALF, MAP_TILES } from '../core/Core';
+import {
+    BuildingDef, UnitDef, Stance, TILE, HALF, MAP_TILES,
+    unitMass, unitTurn, unitAccel, PROJ_PHYSICS,
+} from '../core/Core';
 import type { CrystalNode } from '../world/Terrain';
 
 export type PlayerId = number;
@@ -87,6 +90,21 @@ export class Unit extends Entity {
     /** throttles target scanning so 100 idle units do not scan every frame */
     scan = 0;
 
+    /* ---- physics ---- */
+    /** terrain multiplier sampled under the unit each frame */
+    terrainMul = 1;
+    /** last valid position, used to roll back out of walls */
+    prevX = 0;
+    prevY = 0;
+    /** muzzle recoil timer, the view offsets the hull by this */
+    recoil = 0;
+    /** dust kick-up timer */
+    dustT = 0;
+    /** angular velocity of the hull this frame, for banking */
+    turnDelta = 0;
+    /** true when the unit was pushed out of terrain this frame */
+    blockedNow = false;
+
     constructor(def: UnitDef, owner: PlayerId, x: number, y: number) {
         super();
         this.def = def;
@@ -96,10 +114,18 @@ export class Unit extends Entity {
         this.hp = def.hp;
         this.maxHp = def.hp;
         this.armor = def.armor;
+        this.prevX = x;
+        this.prevY = y;
     }
 
     get radius() { return this.def.radius; }
     get speed() { return this.def.speed; }
+    get mass() { return unitMass(this.def); }
+    get turnRate() { return unitTurn(this.def); }
+    get accel() { return unitAccel(this.def); }
+    get altitude() { return this.def.altitude || 0; }
+    get isHover() { return !!this.def.hover; }
+    get canCrush() { return !!this.def.crush || this.def.kind === 'harvester' || this.def.kind === 'mcv'; }
     get isAir() { return this.def.kind === 'air'; }
     get isHarvester() { return this.def.kind === 'harvester'; }
     get isMcv() { return this.def.kind === 'mcv'; }
@@ -118,8 +144,11 @@ export class Unit extends Entity {
     get invulnerable() { return this.invulnUntil > -1; }
 
     moveStep(dt: number, speedMul: number): boolean {
+        this.prevX = this.x;
+        this.prevY = this.y;
         if (this.path.length === 0) {
-            this.speedCur *= Math.max(0, 1 - dt * 6);
+            this.speedCur = Math.max(0, this.speedCur - this.accel * dt);
+            this.vx = 0; this.vy = 0;
             return false;
         }
         const wp = this.path[0];
@@ -136,19 +165,27 @@ export class Unit extends Entity {
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;
 
-        // vehicles pivot smoothly; sharp turns also bleed off speed so heavy
-        // hulls feel like they have mass instead of strafing around corners
-        const turnRate = this.def.kind === 'infantry' ? 9 : 3.6;
-        this.face += Math.max(-turnRate * dt, Math.min(turnRate * dt, diff));
-        const align = Math.max(0.18, Math.cos(diff));
+        // heavy hulls pivot slowly and lose speed in sharp turns, which is what
+        // makes a tank column read as vehicles instead of dots
+        const turn = this.turnRate;
+        const applied = Math.max(-turn * dt, Math.min(turn * dt, diff));
+        this.face += applied;
+        this.turnDelta = applied / Math.max(0.001, dt);
+        const align = Math.max(0.15, Math.cos(diff));
 
-        let top = this.speed * speedMul * align;
+        let top = this.speed * speedMul * align * this.terrainMul;
         if (this.speedCap > 0) top = Math.min(top, this.speedCap);
         if (this.slowed) top *= 0.55;
-        this.speedCur += (top - this.speedCur) * Math.min(1, dt * 5.5);
-        const step = Math.min(d, Math.max(6, this.speedCur) * dt);
+        // accelerate / brake toward the target speed instead of snapping
+        const delta = top - this.speedCur;
+        const maxDelta = this.accel * dt;
+        this.speedCur += Math.max(-maxDelta, Math.min(maxDelta, delta));
+        if (this.speedCur < 0) this.speedCur = 0;
+        const step = Math.min(d, this.speedCur * dt);
         this.x += (dx / d) * step;
         this.y += (dy / d) * step;
+        this.vx = (dx / d) * this.speedCur;
+        this.vy = (dy / d) * this.speedCur;
         return true;
     }
 
@@ -214,64 +251,184 @@ export class Building extends Entity {
 export class Projectile {
     x: number;
     y: number;
+    z = 0;
+    prevX: number;
+    prevY: number;
+    prevZ = 0;
     sx: number;
     sy: number;
-    tx: number;
-    ty: number;
+    sz: number;
+    vx = 0;
+    vy = 0;
+    vz = 0;
     t = 0;
-    dur: number;
+    life = 6;
     kind: 'bullet' | 'shell' | 'rocket' | 'bomb';
     owner: PlayerId;
     dmg: number;
     dmgType: 'small' | 'ap' | 'explosive';
     splash = 0;
+    falloff = 0.4;
+    hitRadius = 8;
+    ballistic = false;
+    homing = false;
+    turnRate = 0;
+    gravity = 0;
+    accel = 0;
+    maxSpeed = 400;
     target: Entity | null;
     /** firing unit, used to award veterancy */
     source: Unit | null = null;
     dead = false;
-    arc = 0;
+    /** smoke trail timer */
+    trailT = 0;
 
     constructor(o: {
-        x: number; y: number; tx: number; ty: number; dur: number; kind: 'bullet' | 'shell' | 'rocket' | 'bomb';
-        owner: PlayerId; dmg: number; dmgType: 'small' | 'ap' | 'explosive'; splash?: number; target: Entity | null;
+        x: number; y: number; z?: number; kind: 'bullet' | 'shell' | 'rocket' | 'bomb';
+        owner: PlayerId; dmg: number; dmgType: 'small' | 'ap' | 'explosive'; splash?: number;
+        target: Entity | null; speed?: number; ballistic?: boolean; homing?: boolean;
+        falloff?: number;
     }) {
-        this.x = o.x; this.y = o.y; this.sx = o.x; this.sy = o.y;
-        this.tx = o.tx; this.ty = o.ty;
-        this.dur = o.dur; this.kind = o.kind;
+        const phys = PROJ_PHYSICS[o.kind];
+        this.x = o.x; this.y = o.y; this.z = o.z || 0;
+        this.prevX = o.x; this.prevY = o.y; this.prevZ = this.z;
+        this.sx = o.x; this.sy = o.y; this.sz = this.z;
+        this.kind = o.kind;
         this.owner = o.owner; this.dmg = o.dmg; this.dmgType = o.dmgType;
         this.splash = o.splash || 0;
         this.target = o.target;
-        this.arc = o.kind === 'shell' || o.kind === 'bomb' ? 26 : 0;
+        this.maxSpeed = o.speed || phys.speed;
+        this.ballistic = o.ballistic ?? phys.ballistic;
+        this.homing = (o.homing ?? phys.homing) && !this.ballistic;
+        this.turnRate = phys.turn;
+        this.accel = phys.accel;
+        this.gravity = this.ballistic ? phys.gravity : 0;
+        this.hitRadius = phys.radius;
+        this.falloff = o.falloff ?? phys.falloff;
+        if (this.homing) {
+            const dx = (o.target ? o.target.x : o.x) - o.x;
+            const dy = (o.target ? o.target.y : o.y) - o.y;
+            const d = Math.hypot(dx, dy) || 1;
+            this.vx = (dx / d) * this.maxSpeed * 0.45;
+            this.vy = (dy / d) * this.maxSpeed * 0.45;
+        }
+    }
+
+    /** ballistic launch: solve the arc for a given flight time */
+    launchArc(aimX: number, aimY: number, aimZ = 0) {
+        const dx = aimX - this.x;
+        const dy = aimY - this.y;
+        const dist = Math.hypot(dx, dy);
+        const T = Math.max(0.12, dist / Math.max(1, this.maxSpeed));
+        this.vx = dx / T;
+        this.vy = dy / T;
+        this.vz = (aimZ - this.z + 0.5 * this.gravity * T * T) / T;
+    }
+
+    /** straight shot: aim point may lead the target */
+    launchStraight(aimX: number, aimY: number) {
+        const dx = aimX - this.x;
+        const dy = aimY - this.y;
+        const d = Math.hypot(dx, dy) || 1;
+        this.vx = (dx / d) * this.maxSpeed;
+        this.vy = (dy / d) * this.maxSpeed;
+    }
+
+    /** homing rockets: rotate the velocity toward the target and accelerate */
+    steer(dt: number) {
+        if (!this.homing) return;
+        const goal = this.target && !this.target.dead ? this.target : null;
+        if (!goal) return;
+        const dx = goal.x - this.x;
+        const dy = goal.y - this.y;
+        const d = Math.hypot(dx, dy) || 1;
+        const want = Math.atan2(dy, dx);
+        let have = Math.atan2(this.vy, this.vx);
+        let diff = want - have;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        have += Math.max(-this.turnRate * dt, Math.min(this.turnRate * dt, diff));
+        this.maxSpeed = Math.min(this.maxSpeed + this.accel * dt, PROJ_PHYSICS[this.kind].speed * 1.5);
+        const sp = this.maxSpeed;
+        this.vx = Math.cos(have) * sp;
+        this.vy = Math.sin(have) * sp;
+        // climb / dive toward the target's altitude so AA actually connects
+        if (goal instanceof Unit && goal.isAir) {
+            const dz = goal.altitude - this.z;
+            this.z += Math.max(-90 * dt, Math.min(90 * dt, dz));
+        }
     }
 
     step(dt: number) {
+        this.prevX = this.x;
+        this.prevY = this.y;
+        this.prevZ = this.z;
         this.t += dt;
-        const k = Math.min(1, this.t / this.dur);
-        if (this.target && !this.target.dead) {
-            this.tx = this.target.x;
-            this.ty = this.target.y;
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        if (this.gravity) {
+            this.vz -= this.gravity * dt;
+            this.z += this.vz * dt;
         }
-        this.x = this.sx + (this.tx - this.sx) * k;
-        this.y = this.sy + (this.ty - this.sy) * k;
-        if (k >= 1) this.dead = true;
+        if (this.t >= this.life) this.dead = true;
     }
 
-    get height() {
-        const k = Math.min(1, this.t / this.dur);
-        return Math.sin(k * Math.PI) * this.arc;
-    }
+    get speed() { return Math.hypot(this.vx, this.vy); }
+    get height() { return this.z; }
+    get heading() { return Math.atan2(this.vy, this.vx); }
+    /** has the projectile come down to ground level (or started there)? */
+    get grounded() { return this.z <= 0.5; }
 }
 
 export class Fx {
     x: number;
     y: number;
+    z = 0;
+    vx = 0;
+    vy = 0;
+    vz = 0;
+    g = 0;
+    spin = 0;
     t = 0;
     life: number;
-    kind: 'boom' | 'muzzle' | 'spark' | 'dust' | 'build' | 'spawn' | 'promote' | 'shield' | 'target';
+    kind: 'boom' | 'muzzle' | 'spark' | 'dust' | 'build' | 'spawn' | 'promote' | 'shield' | 'target' | 'debris' | 'smoke' | 'fire';
     scale: number;
     dead = false;
     constructor(x: number, y: number, kind: Fx['kind'], life = 0.45, scale = 1) {
         this.x = x; this.y = y; this.kind = kind; this.life = life; this.scale = scale;
+    }
+    step(dt: number) {
+        this.t += dt;
+        if (this.kind === 'debris' || this.kind === 'smoke' || this.kind === 'fire') {
+            this.x += this.vx * dt;
+            this.y += this.vy * dt;
+            if (this.g) {
+                this.vz -= this.g * dt;
+                this.z += this.vz * dt;
+                if (this.z < 0) { this.z = 0; this.vz *= -0.32; this.vx *= 0.72; this.vy *= 0.72; }
+            } else {
+                this.z += this.vz * dt;
+            }
+        }
+        if (this.t >= this.life) this.dead = true;
+    }
+    get k() { return Math.min(1, this.t / this.life); }
+}
+
+/** persistent ground mark (shell crater / track) that fades very slowly */
+export class Decal {
+    x: number;
+    y: number;
+    r: number;
+    alpha: number;
+    kind: 'crater' | 'track';
+    t = 0;
+    life: number;
+    dead = false;
+    constructor(x: number, y: number, r: number, kind: Decal['kind'], life = 40) {
+        this.x = x; this.y = y; this.r = r; this.kind = kind;
+        this.life = life;
+        this.alpha = kind === 'crater' ? 150 : 55;
     }
     step(dt: number) {
         this.t += dt;

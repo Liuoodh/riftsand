@@ -12,6 +12,11 @@ export class CameraRig {
     targetZoom = 0.86;
     minZoom = 0.5;
     maxZoom = 1.7;
+    /** impact shake, decays in a few frames */
+    private shakeAmt = 0;
+    private shakeT = 0;
+    private shakeX = 0;
+    private shakeY = 0;
 
     private tx = 0;
     private ty = 0;
@@ -19,6 +24,11 @@ export class CameraRig {
     screenH = 720;
 
     constructor(private worldRoot: Node) {}
+
+    addShake(strength: number) {
+        this.shakeAmt = Math.min(16, Math.max(this.shakeAmt, strength));
+        this.shakeT = 0.32;
+    }
 
     setScreen(w: number, h: number) {
         this.screenW = w;
@@ -109,11 +119,25 @@ export class CameraRig {
         this.x += (this.tx - this.x) * k;
         this.y += (this.ty - this.y) * k;
         this.clampCam();
+        if (this.shakeT > 0) {
+            this.shakeT -= dt;
+            const amp = this.shakeAmt * Math.max(0, this.shakeT / 0.32);
+            this.shakeX = (Math.random() - 0.5) * amp;
+            this.shakeY = (Math.random() - 0.5) * amp * 0.7;
+            if (this.shakeT <= 0) { this.shakeAmt = 0; this.shakeX = 0; this.shakeY = 0; }
+        } else {
+            this.shakeX = 0;
+            this.shakeY = 0;
+        }
         this.apply();
     }
 
     apply() {
-        this.worldRoot.setPosition(-this.x * this.zoom, -this.y * this.zoom, 0);
+        this.worldRoot.setPosition(
+            -this.x * this.zoom + this.shakeX,
+            -this.y * this.zoom + this.shakeY,
+            0,
+        );
         this.worldRoot.setScale(this.zoom, this.zoom, 1);
     }
 

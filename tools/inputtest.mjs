@@ -46,8 +46,10 @@ const browser = await puppeteer.launch({
 const page = await browser.newPage();
 const errors = [];
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-page.on('pageerror', (e) => errors.push(e.message));
+page.on('pageerror', (e) => { errors.push(e.message); console.log('[pageerror]', e.message); });
 page.on('response', (r) => { if (r.status() >= 400) console.log('[http' + r.status() + ']', r.url()); });
+page.on('framenavigated', (f) => { if (f === page.mainFrame()) console.log('[navigated]', f.url()); });
+page.on('error', (e) => console.log('[crash]', e.message));
 
 // silence the browser's automatic /favicon.ico 404 so the error log stays meaningful
 await page.evaluateOnNewDocument(() => {
@@ -241,7 +243,10 @@ const box2 = {
     y0: Math.min(...s.units.map((u) => u.y)) - 34,
     y1: Math.max(...s.units.map((u) => u.y)) + 34,
 };
-await dragSingle({ x: box2.x0, y: box2.y0 }, { x: box2.x1, y: box2.y1 });
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+console.log('   box2', JSON.stringify(box2));
+await dragSingle({ x: clamp(box2.x0, 8, 1272), y: clamp(box2.y0, 8, 712) },
+                 { x: clamp(box2.x1, 8, 1272), y: clamp(box2.y1, 8, 712) });
 const selBefore = (await probe()).selection;
 // group cell #1 centre in design space: x=-601, y=104  -> css (39, 256)
 await longPressAt(39, 256, 620);

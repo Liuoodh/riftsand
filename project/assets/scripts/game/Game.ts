@@ -14,11 +14,11 @@ import {
     DMG_TABLE, TECH_BUILDING, QUEUE_MAX, UNLOAD_TIME, MAX_CREDITS, FactionDef, FACTIONS,
     tileToWorld, dist, clamp, GROUP_COUNT, ProdCat, Stance, SuperWeaponId, SUPER_WEAPONS,
     unitCategory, BUILD_REQUIRES, VET_XP_RATIO, VET_MAX_LEVEL, CRATE_INTERVAL,
-    BUILD_RADIUS_TILES, makeRng,
+    BUILD_RADIUS_TILES, makeRng, PROJ_PHYSICS,
 } from '../core/Core';
 import { TerrainMap, CrystalNode } from '../world/Terrain';
 import { PathFinder } from '../world/Path';
-import { Unit, Building, Projectile, Fx, Entity, SpatialGrid, PlayerId, Zone, Crate } from './Entities';
+import { Unit, Building, Projectile, Fx, Entity, SpatialGrid, PlayerId, Zone, Crate, Decal } from './Entities';
 import { AIController } from './AI';
 
 export type Difficulty = 'easy' | 'normal' | 'hard';
@@ -39,6 +39,8 @@ export interface GameEvents {
     onGameOver?: (win: boolean) => void;
     /** short procedural sfx cue, throttled by the audio layer */
     onSfx?: (name: string, x?: number, y?: number) => void;
+    /** camera shake for heavy impacts */
+    onShake?: (strength: number) => void;
 }
 
 export interface QueueItem {
@@ -98,6 +100,7 @@ export class Game {
     buildings: Building[] = [];
     projectiles: Projectile[] = [];
     fx: Fx[] = [];
+    decals: Decal[] = [];
     zones: Zone[] = [];
     crates: Crate[] = [];
     players: PlayerState[] = [];
@@ -135,7 +138,7 @@ export class Game {
     constructor(seed: number, humanFaction: Faction, difficulty: Difficulty, events: GameEvents, options?: Partial<GameOptions>) {
         this.terrain = new TerrainMap();
         this.terrain.generate(seed);
-        this.finder = new PathFinder((tx, ty) => this.isBlocked(tx, ty));
+        this.finder = new PathFinder((tx, ty) => this.isBlocked(tx, ty), (tx, ty) => this.terrain.costAt(tx, ty));
         this.difficulty = difficulty;
         this.events = events;
         this.rng = makeRng(seed ^ 0x9e3779b9);
@@ -349,6 +352,7 @@ export class Game {
         for (let y = ty; y < ty + def.size; y++) {
             for (let x = tx; x < tx + def.size; x++) {
                 if (this.terrain.isSolid(x, y)) return { ok: false, reason: '地形无法建造' };
+                if (this.terrain.isCrystal(x, y)) return { ok: false, reason: '不能在矿脉上建造' };
                 if (this.buildingAt(x, y)) return { ok: false, reason: '与建筑重叠' };
             }
         }
@@ -858,7 +862,7 @@ export class Game {
         const gx = target.x + Math.cos(a) * edge;
         const gy = target.y + Math.sin(a) * edge;
         if (u.isAir) { u.path = [{ x: gx, y: gy }]; u.repath = 0; return; }
-        const path = this.finder.find(u.x, u.y, gx, gy);
+        const path = this.finder.find(u.x, u.y, gx, gy, { radius: u.radius });
         u.path = path || [{ x: gx, y: gy }];
         u.repath = 3;
     }
@@ -870,7 +874,7 @@ export class Game {
         if (u.isAir) {
             u.path = [{ x, y }];
         } else {
-            const path = this.finder.find(u.x, u.y, x, y);
+            const path = this.finder.find(u.x, u.y, x, y, { radius: u.radius });
             u.path = path ? path : [{ x, y }];
         }
         u.repath = 4;
@@ -883,12 +887,32 @@ export class Game {
         u.stop();
     }
 
+    /** nearest reachable field, biased away from fields other trucks already work */
+    pickHarvestNode(u: Unit): CrystalNode | null {
+        let best: CrystalNode | null = null;
+        let bestScore = Infinity;
+        for (const n of this.terrain.nodes) {
+            if (n.amount <= 0) continue;
+            if (this.buildingAt(n.tx, n.ty)) continue;
+            let load = 0;
+            for (const o of this.units) {
+                if (o !== u && !o.dead && o.isHarvester && o.mineNode === n) load++;
+            }
+            const score = dist(u.x, u.y, n.x, n.y) + load * 110;
+            if (score < bestScore) { bestScore = score; best = n; }
+        }
+        return best;
+    }
+
     nearestNode(x: number, y: number, exclude: CrystalNode | null = null): CrystalNode | null {
         let best: CrystalNode | null = null;
         let bd = Infinity;
         for (const n of this.terrain.nodes) {
             if (n.amount <= 0) continue;
             if (exclude && n.id === exclude.id) continue;
+            // ore buried under a structure can never be mined: skip it so a
+            // harvester never parks against a wall forever
+            if (this.buildingAt(n.tx, n.ty)) continue;
             const d = dist(x, y, n.x, n.y);
             if (d < bd) { bd = d; best = n; }
         }
@@ -1259,6 +1283,27 @@ export class Game {
                 continue;
             }
 
+            // battle damage: smoke first, then open flames
+            const hurt = b.hp / b.maxHp;
+            if (hurt < 0.55 && Math.random() < dt * 0.9) {
+                const sx = b.x + (Math.random() - 0.5) * b.radius;
+                const sy = b.y + (Math.random() - 0.5) * b.radius * 0.6;
+                const sm = new Fx(sx, sy, 'smoke', 1.1 + Math.random() * 0.6, 1.2);
+                sm.vz = 16;
+                sm.vx = (Math.random() - 0.5) * 8;
+                this.fx.push(sm);
+                this.events.onFx?.(sm);
+            }
+            if (hurt < 0.28 && Math.random() < dt * 0.8) {
+                const fx = new Fx(
+                    b.x + (Math.random() - 0.5) * b.radius * 0.8,
+                    b.y + (Math.random() - 0.5) * b.radius * 0.5,
+                    'fire', 0.55 + Math.random() * 0.3, 1.1,
+                );
+                this.fx.push(fx);
+                this.events.onFx?.(fx);
+            }
+
             // repair mode
             if (b.repairing) {
                 if (b.hp >= b.maxHp) { b.repairing = false; }
@@ -1301,6 +1346,18 @@ export class Game {
 
             if (u.slowUntil > -1 && this.time > u.slowUntil) u.slowUntil = -1;
             if (u.invulnUntil > -1 && this.time > u.invulnUntil) u.invulnUntil = -1;
+            if (u.recoil > 0) u.recoil -= dt;
+            u.blockedNow = false;
+
+            // sample the ground under the unit: dunes and ore slow it down
+            if (!u.isAir) {
+                const tx = Math.floor((u.x + HALF) / TILE);
+                const ty = Math.floor((u.y + HALF) / TILE);
+                const mul = this.terrain.speedAt(tx, ty, u.def.kind === 'infantry', u.isHover);
+                u.terrainMul = mul > 0 ? mul : 0.35;
+            } else {
+                u.terrainMul = 1;
+            }
 
             // elite units slowly regenerate out of combat
             if (u.level >= VET_MAX_LEVEL && u.calm > 4 && u.hp < u.maxHp) {
@@ -1315,7 +1372,52 @@ export class Game {
 
             if (u.cd > 0) u.cd -= dt * (this.prodFactor(this.players[u.owner]) < 1 ? 0.65 : 1);
 
+            // shot-up hulls trail smoke
+            if (u.hp < u.maxHp * 0.35 && Math.random() < dt * 0.7) {
+                const sm = new Fx(u.x + (Math.random() - 0.5) * 6, u.y + (Math.random() - 0.5) * 4, 'smoke', 0.9, 0.7);
+                sm.vz = 12;
+                this.fx.push(sm);
+                this.events.onFx?.(sm);
+            }
+
+            // dust kicked up by tracks and hover skirts
+            if (!u.isAir && u.def.kind !== 'infantry' && u.speedCur > 26 && u.path.length > 0) {
+                u.dustT -= dt;
+                if (u.dustT <= 0) {
+                    u.dustT = 0.2 + Math.random() * 0.14;
+                    this.pushFx(
+                        u.x - Math.cos(u.face) * u.radius * 0.8,
+                        u.y - Math.sin(u.face) * u.radius * 0.8,
+                        'dust', 0.55, 0.8,
+                    );
+                }
+            }
+
             if (u.speedCap > 0 && u.path.length === 0) u.speedCap = 0;
+
+            // stuck detector: if a unit with a path has not actually moved for
+            // a while, nudge the next waypoint so it can break a deadlock
+            if (u.path.length > 0) {
+                const moved = Math.hypot(u.x - u.prevX, u.y - u.prevY);
+                u.stuck = moved < 0.8 ? u.stuck + dt : 0;
+                if (u.stuck > 1.1) {
+                    u.stuck = 0;
+                    if (u.order.k === 'move' || u.order.k === 'attackmove') {
+                        // try a slightly different approach to the same goal
+                        this.moveUnitTo(
+                            u,
+                            u.order.x + (Math.random() - 0.5) * 70,
+                            u.order.y + (Math.random() - 0.5) * 70,
+                            true,
+                        );
+                    } else if (u.order.k === 'harvest') {
+                        u.order.node = null;
+                        u.order.phase = 'seek';
+                    }
+                }
+            } else {
+                u.stuck = 0;
+            }
 
             // stuck detection for ground units
             if (u.path.length > 0 && u.repath > 0) {
@@ -1323,7 +1425,7 @@ export class Game {
                 if (u.repath <= 0) {
                     u.path.length = 0;
                     if (u.order.k === 'move') {
-                        const p = this.finder.find(u.x, u.y, u.order.x, u.order.y);
+                        const p = this.finder.find(u.x, u.y, u.order.x, u.order.y, { radius: u.radius });
                         if (p) u.path = p;
                     }
                 }
@@ -1426,21 +1528,21 @@ export class Game {
         switch (order.phase) {
             case 'seek': {
                 let node = order.node;
-                if (!node || node.amount <= 0) node = this.nearestNode(u.x, u.y);
+                if (!node || node.amount <= 0) node = this.pickHarvestNode(u);
                 order.node = node;
                 u.mineNode = node;
                 if (!node) { u.order = { k: 'idle' }; return; }
-                const pth = this.finder.find(u.x, u.y, node.x, node.y - TILE);
-                u.path = pth || [{ x: node.x, y: node.y - TILE }];
+                const pth = this.finder.find(u.x, u.y, node.x, node.y, { radius: u.radius });
+                u.path = pth || [{ x: node.x, y: node.y }];
                 order.phase = 'toMine';
                 order.timer = 0;
                 break;
             }
             case 'toMine': {
                 const node = order.node;
-                if (!node || node.amount <= 0) { order.phase = 'seek'; return; }
+                if (!node || node.amount <= 0 || this.buildingAt(node.tx, node.ty)) { order.phase = 'seek'; return; }
                 const d = dist(u.x, u.y, node.x, node.y);
-                if (d < TILE * 2.2) {
+                if (d < TILE * 1.35) {
                     order.phase = 'mining';
                     order.timer = u.def.mineTime || 3;
                     u.stop();
@@ -1463,7 +1565,7 @@ export class Game {
                 if (order.timer <= 0 || u.cargo >= cargo || !node || node.amount <= 0) {
                     const drop = this.nearestDropoff(p, u.x, u.y);
                     if (drop) {
-                        const pth = this.finder.find(u.x, u.y, drop.x, drop.y + drop.radius + 14);
+                        const pth = this.finder.find(u.x, u.y, drop.x, drop.y + drop.radius + 14, { radius: u.radius });
                         u.path = pth || [{ x: drop.x, y: drop.y + drop.radius + 14 }];
                         order.phase = 'toBase';
                     } else {
@@ -1483,7 +1585,7 @@ export class Game {
                 }
                 if (u.path.length > 0) u.moveStep(dt, 1);
                 else {
-                    const pth = this.finder.find(u.x, u.y, drop.x, drop.y + drop.radius + 14);
+                    const pth = this.finder.find(u.x, u.y, drop.x, drop.y + drop.radius + 14, { radius: u.radius });
                     u.path = pth || [];
                     if (u.path.length === 0) order.phase = 'seek';
                 }
@@ -1551,22 +1653,58 @@ export class Game {
         if (!w) return;
         // ground weapons refuse aircraft, and cloaked targets need detection
         if (!this.canShootAt(src, w, target)) return;
-        const ox = src.x;
-        const oy = src.y - (src instanceof Unit && src.isAir ? 0 : 8);
-        const d = dist(ox, oy, target.x, target.y);
-        const speed = w.proj === 'bullet' ? 900 : w.proj === 'shell' ? 420 : w.proj === 'rocket' ? 330 : 260;
-        const dur = Math.max(0.06, d / speed);
-        const p = new Projectile({
-            x: ox, y: oy, tx: target.x, ty: target.y, dur, kind: w.proj,
-            owner: src.owner, dmg: w.dmg * (src instanceof Unit ? src.damageMul : 1),
+        const isUnit = src instanceof Unit;
+        const u = isUnit ? src as Unit : null;
+        const phys = PROJ_PHYSICS[w.proj];
+
+        // muzzle sits on the hull edge in the facing direction
+        const face = u ? u.face : Math.atan2(target.y - src.y, target.x - src.x);
+        const muzzle = u ? Math.max(7, u.radius * 0.9) : Math.min(26, (src as Building).radius * 0.45);
+        const ox = src.x + Math.cos(face) * muzzle;
+        const oy = src.y + Math.sin(face) * muzzle;
+        // bombs fall from the aircraft; AA rounds start at the target's altitude
+        const oz = w.proj === 'bomb' && u && u.isAir ? u.altitude : (target instanceof Unit && target.isAir ? target.altitude : 8);
+
+        // lead the target: three fixed-point iterations are plenty for these speeds
+        const speed = w.speed || phys.speed;
+        let ax = target.x;
+        let ay = target.y;
+        if (target instanceof Unit && !target.isAir) {
+            for (let i = 0; i < 3; i++) {
+                const tt = dist(ox, oy, ax, ay) / Math.max(70, speed);
+                ax = target.x + target.vx * tt;
+                ay = target.y + target.vy * tt;
+            }
+        }
+        const ballistic = w.ballistic ?? phys.ballistic;
+        if (ballistic) {
+            // lobbed rounds are not laser guided: a little scatter makes them
+            // miss fast movers the way the classics do
+            const scatter = w.proj === 'bomb' ? 9 : 15;
+            ax += (Math.random() - 0.5) * scatter;
+            ay += (Math.random() - 0.5) * scatter;
+        }
+
+        const pr = new Projectile({
+            x: ox, y: oy, z: oz, kind: w.proj,
+            owner: src.owner, dmg: w.dmg * (u ? u.damageMul : 1),
             dmgType: w.type, splash: w.splash, target,
+            speed: w.speed, ballistic, homing: w.homing,
+            falloff: w.falloff,
         });
-        p.source = src instanceof Unit ? src : null;
-        this.projectiles.push(p);
-        this.pushFx(ox, oy, 'muzzle', 0.12, w.proj === 'bullet' ? 0.5 : 0.9);
-        if (src instanceof Unit) {
-            src.cloakT = 0;
-            if (src.def.kind === 'infantry') src.face = Math.atan2(target.y - src.y, target.x - src.x);
+        pr.source = u;
+        if (ballistic) pr.launchArc(ax, ay, target instanceof Unit && target.isAir ? target.altitude : 0);
+        else pr.launchStraight(ax, ay);
+        this.projectiles.push(pr);
+
+        this.pushFx(ox, oy, 'muzzle', 0.12, w.proj === 'bullet' ? 0.5 : 0.95);
+        if (u) {
+            u.cloakT = 0;
+            u.recoil = w.proj === 'bullet' ? 0.06 : 0.18;
+            // turretless units must point at the target before shooting
+            if (w.proj !== 'bullet' || u.def.kind === 'infantry') {
+                u.face = Math.atan2(target.y - u.y, target.x - u.x);
+            }
             this.events.onSfx?.(w.proj === 'bullet' ? 'gun' : w.proj === 'shell' ? 'cannon' : 'rocket', ox, oy);
         } else {
             this.events.onSfx?.('cannon', ox, oy);
@@ -1576,51 +1714,133 @@ export class Game {
     private updateProjectiles(dt: number) {
         for (const pr of this.projectiles) {
             if (pr.dead) continue;
+            if (pr.homing) pr.steer(dt);
             pr.step(dt);
-            if (pr.dead) this.impact(pr);
+            if (Math.abs(pr.x) > HALF + 90 || Math.abs(pr.y) > HALF + 90) {
+                pr.dead = true;
+                continue;
+            }
+            if (pr.dead) { this.impactAt(pr, pr.x, pr.y, null); continue; }
+
+            // rocket / bomb exhaust
+            if (pr.kind === 'rocket' || pr.kind === 'bomb') {
+                pr.trailT -= dt;
+                if (pr.trailT <= 0) {
+                    pr.trailT = 0.05;
+                    const smoke = new Fx(pr.x, pr.y, 'smoke', 0.55, 0.7);
+                    smoke.z = Math.max(0, pr.z);
+                    smoke.vz = 12;
+                    this.fx.push(smoke);
+                    this.events.onFx?.(smoke);
+                }
+            }
+
+            // walls stop anything flying low enough
+            const tx = Math.floor((pr.x + HALF) / TILE);
+            const ty = Math.floor((pr.y + HALF) / TILE);
+            const bAt = this.buildingAt(tx, ty);
+            if (pr.z < 26 && (this.terrain.isSolid(tx, ty) || (bAt && bAt.owner !== pr.owner))) {
+                this.impactAt(pr, pr.x, pr.y, bAt);
+                continue;
+            }
+
+            const hit = this.sweepHit(pr);
+            if (hit) {
+                this.impactAt(pr, hit.x, hit.y, hit);
+                continue;
+            }
+
+            if (pr.ballistic && pr.z <= 0) {
+                this.impactAt(pr, pr.x, pr.y, null);
+            }
         }
         for (let i = this.projectiles.length - 1; i >= 0; i--) {
             if (this.projectiles[i].dead) this.projectiles.splice(i, 1);
         }
     }
 
-    private impact(pr: Projectile) {
-        const t = pr.target;
-        if (t && !t.dead) {
-            this.damage(t, pr.dmg, pr.dmgType, pr.owner, pr.source);
-        } else {
-            this.grid.query(pr.tx, pr.ty, 24, this.tmp);
-            for (const e of this.tmp) {
-                if (e.dead || e.owner === pr.owner) continue;
-                this.damage(e, pr.dmg * 0.5, pr.dmgType, pr.owner, pr.source);
-            }
-            for (const b of this.buildings) {
-                if (b.dead || b.owner === pr.owner) continue;
-                if (dist(pr.tx, pr.ty, b.x, b.y) < b.radius) { this.damage(b, pr.dmg * 0.5, pr.dmgType, pr.owner, pr.source); }
-            }
+    /** first enemy whose body intersects the projectile's path this frame */
+    private sweepHit(pr: Projectile): Entity | null {
+        const dx = pr.x - pr.prevX;
+        const dy = pr.y - pr.prevY;
+        const r = Math.hypot(dx, dy) + pr.hitRadius + 40;
+        this.grid.query(pr.x, pr.y, r, this.tmp);
+        let best: Entity | null = null;
+        let bestT = Infinity;
+        for (const e of this.tmp) {
+            if (e.dead || e.owner === pr.owner) continue;
+            const eu = e as Unit;
+            if (eu.isAir && pr.z < 12) continue;      // ground fire passes underneath
+            if (!eu.isAir && pr.z > 46) continue;     // high arcs fly over infantry
+            // ballistic rounds only collide on the way down
+            if (pr.ballistic && pr.vz > 10 && e.isBuilding === false) continue;
+            const hitR = pr.hitRadius + e.radius;
+            const t = segmentCircleT(pr.prevX, pr.prevY, dx, dy, e.x, e.y, hitR);
+            if (t < 0 || t > 1 || t >= bestT) continue;
+            bestT = t;
+            best = e;
         }
+        return best;
+    }
+
+    /** apply damage + visuals at an impact point */
+    private impactAt(pr: Projectile, x: number, y: number, hit: Entity | null) {
+        pr.dead = true;
+        const target = hit && !hit.dead ? hit : (pr.target && !pr.target.dead ? pr.target : null);
+        const direct = target && dist(x, y, target.x, target.y) <= pr.hitRadius + target.radius + 8;
+
+        if (direct && target) {
+            this.damage(target, pr.dmg, pr.dmgType, pr.owner, pr.source);
+        }
+
         if (pr.splash > 0) {
-            this.grid.query(pr.tx, pr.ty, pr.splash, this.tmp);
+            const r = pr.splash;
+            const falloff = pr.falloff;
+            this.grid.query(x, y, r, this.tmp);
             for (const e of this.tmp) {
-                if (e.dead) continue;
-                const d = dist(pr.tx, pr.ty, e.x, e.y);
-                if (d > pr.splash) continue;
-                const k = 1 - (d / pr.splash) * 0.65;
-                if (t && e.id === t.id) continue;
-                this.damage(e, pr.dmg * 0.65 * k, pr.dmgType, pr.owner, pr.source);
+                if (e.dead || (direct && e.id === target!.id)) continue;
+                const d = dist(x, y, e.x, e.y);
+                if (d > r + e.radius * 0.5) continue;
+                const k = 1 - (1 - falloff) * Math.min(1, d / r);
+                this.damage(e, pr.dmg * k, pr.dmgType, pr.owner, pr.source);
             }
             for (const b of this.buildings) {
-                if (b.dead) continue;
-                if (t && b.id === t.id) continue;
-                const d = dist(pr.tx, pr.ty, b.x, b.y);
-                if (d > pr.splash + b.radius * 0.6) continue;
-                this.damage(b, pr.dmg * 0.5, pr.dmgType, pr.owner, pr.source);
+                if (b.dead || (direct && b.id === target!.id)) continue;
+                const d = dist(x, y, b.x, b.y);
+                if (d > r + b.radius * 0.55) continue;
+                const k = 1 - (1 - falloff) * Math.min(1, d / r);
+                this.damage(b, pr.dmg * k * 0.85, pr.dmgType, pr.owner, pr.source);
             }
-            this.pushFx(pr.tx, pr.ty, 'boom', 0.5, Math.min(2.2, pr.splash / 26));
-            this.events.onSfx?.('boom', pr.tx, pr.ty);
+            const scale = Math.min(2.6, 0.6 + r / 34);
+            this.pushFx(x, y, 'boom', 0.55, scale);
+            this.spawnDebris(x, y, Math.min(9, 3 + Math.floor(r / 18)), scale);
+            this.addCrater(x, y, Math.min(42, r * 0.5));
+            this.events.onSfx?.('boom', x, y);
+            if (scale > 1.35) this.events.onShake?.(Math.min(9, scale * 2.4));
         } else {
-            this.pushFx(pr.tx, pr.ty, 'spark', 0.22, 0.7);
+            this.pushFx(x, y, 'spark', 0.22, 0.8);
+            this.spawnDebris(x, y, 2, 0.5);
         }
+    }
+
+    private spawnDebris(x: number, y: number, count: number, scale: number) {
+        for (let i = 0; i < count; i++) {
+            const a = Math.random() * Math.PI * 2;
+            const sp = 30 + Math.random() * 110 * scale;
+            const f = new Fx(x, y, 'debris', 0.45 + Math.random() * 0.55, 0.5 + Math.random() * 0.7 * scale);
+            f.vx = Math.cos(a) * sp;
+            f.vy = Math.sin(a) * sp;
+            f.vz = 50 + Math.random() * 130;
+            f.g = 520;
+            f.spin = (Math.random() - 0.5) * 12;
+            this.fx.push(f);
+            this.events.onFx?.(f);
+        }
+    }
+
+    private addCrater(x: number, y: number, r: number) {
+        this.decals.push(new Decal(x, y, r, 'crater', 45));
+        if (this.decals.length > 64) this.decals.shift();
     }
 
     damage(target: Entity, amount: number, type: 'small' | 'ap' | 'explosive', owner: PlayerId, source: Unit | null = null, silent = false) {
@@ -1647,8 +1867,12 @@ export class Game {
         e.hp = 0;
         this.players[e.owner].lost++;
         if (killer !== e.owner) this.players[killer].kills++;
-        this.pushFx(e.x, e.y, 'boom', e.isBuilding ? 0.9 : 0.5, e.isBuilding ? (e as Building).size * 0.9 : 1.3);
+        const big = e.isBuilding;
+        this.pushFx(e.x, e.y, 'boom', big ? 0.95 : 0.5, big ? (e as Building).size * 0.9 : 1.3);
+        this.spawnDebris(e.x, e.y, big ? 12 : 5, big ? 1.8 : 1);
+        if (big) this.addCrater(e.x, e.y, (e as Building).radius * 0.7);
         this.events.onSfx?.('boom', e.x, e.y);
+        if (big) this.events.onShake?.(4);
         if (source && !source.dead && source.owner === killer) this.gainXp(source, e);
         this.events.onDeath?.(e);
     }
@@ -1685,30 +1909,110 @@ export class Game {
     private updateFx(dt: number) {
         for (const f of this.fx) f.step(dt);
         for (let i = this.fx.length - 1; i >= 0; i--) if (this.fx[i].dead) this.fx.splice(i, 1);
+        for (const d of this.decals) d.step(dt);
+        for (let i = this.decals.length - 1; i >= 0; i--) if (this.decals[i].dead) this.decals.splice(i, 1);
+        // hard caps keep long matches from drowning the renderer
+        while (this.fx.length > 240) {
+            const old = this.fx.shift();
+            if (old) old.dead = true;
+        }
     }
 
     private applySeparation(dt: number) {
-        const tmp: Entity[] = [];
-        const maxPush = 60 * dt;
-        for (const u of this.units) {
-            if (u.dead || u.isAir) continue;
-            this.grid.query(u.x, u.y, u.radius * 3, tmp);
-            for (const e of tmp) {
-                const o = e as Unit;
-                if (o === u || o.dead || !o.def || o.isAir) continue;
-                const dx = u.x - o.x;
-                const dy = u.y - o.y;
+        const list = this.units;
+        for (const a of list) {
+            if (a.dead || a.isAir) continue;
+            this.grid.query(a.x, a.y, a.radius + 36, this.tmp);
+            for (const e of this.tmp) {
+                const b = e as Unit;
+                if (b === a || b.dead || !b.def || b.isAir) continue;
+                if (b.id < a.id) continue;   // each pair is resolved exactly once
+                const dx = b.x - a.x;
+                const dy = b.y - a.y;
                 const d2 = dx * dx + dy * dy;
-                const rr = (u.radius + o.radius) * 0.92;
-                if (d2 >= rr * rr || d2 < 0.001) continue;
+                const rr = (a.radius + b.radius) * 0.94;
+                if (d2 >= rr * rr || d2 < 0.0001) continue;
+
+                // heavy hulls run over hostile infantry
+                const crushA = a.canCrush && b.def.kind === 'infantry' && a.owner !== b.owner && a.speedCur > 24;
+                const crushB = b.canCrush && a.def.kind === 'infantry' && b.owner !== a.owner && b.speedCur > 24;
+                if (crushA) { this.crush(b, a); continue; }
+                if (crushB) { this.crush(a, b); continue; }
+
                 const d = Math.sqrt(d2);
-                const push = Math.min(maxPush, (rr - d) * 0.5);
-                u.x += (dx / d) * push;
-                u.y += (dy / d) * push;
+                const overlap = rr - d;
+                const nx = dx / d;
+                const ny = dy / d;
+
+                // head-on traffic: pure symmetric push deadlocks two units on the
+                // same lane, so give one of them a sideways bias and they slide past
+                // positive when the two hulls are driving into each other
+                const closing = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
+                if (closing > 8 && a.speedCur > 4 && b.speedCur > 4) {
+                    const side = a.id < b.id ? 1 : -1;
+                    const s = Math.max(6, Math.min(overlap * 0.8, 11));
+                    a.x += -ny * side * s;
+                    a.y += nx * side * s;
+                    b.x += ny * side * s;
+                    b.y += -nx * side * s;
+                }
+
+                // mass-weighted push: infantry yields to a tank, not the other way
+                const invA = 1 / a.mass;
+                const invB = 1 / b.mass;
+                const soft = (a.def.kind === 'infantry' && b.def.kind === 'infantry') ? 0.55 : 0.92;
+                const push = overlap * soft;
+                const ka = push * invA / (invA + invB);
+                const kb = push * invB / (invA + invB);
+                a.x -= nx * ka;
+                a.y -= ny * ka;
+                b.x += nx * kb;
+                b.y += ny * kb;
             }
+        }
+        for (const u of list) {
+            if (u.dead || u.isAir) continue;
+            this.resolveWorldCollision(u);
             u.x = clamp(u.x, -HALF + 12, HALF - 12);
             u.y = clamp(u.y, -HALF + 12, HALF - 12);
         }
+    }
+
+    private crush(victim: Unit, by: Unit) {
+        if (victim.dead) return;
+        victim.dead = true;
+        victim.hp = 0;
+        this.players[victim.owner].lost++;
+        if (by.owner !== victim.owner) this.players[by.owner].kills++;
+        this.pushFx(victim.x, victim.y, 'dust', 0.55, 1.1);
+        this.events.onSfx?.('scatter', victim.x, victim.y);
+        if (this.players[by.owner].isHuman) this.events.onMessage?.(`${by.def.name} 碾过 ${victim.def.name}`, 'info');
+        if (by.owner !== victim.owner) this.gainXp(by, victim);
+        this.events.onDeath?.(victim);
+    }
+
+    /** push a unit out of a solid tile or a building footprint */
+    private resolveWorldCollision(u: Unit) {
+        const tx = Math.floor((u.x + HALF) / TILE);
+        const ty = Math.floor((u.y + HALF) / TILE);
+        if (!this.isBlocked(tx, ty)) return;
+        u.blockedNow = true;
+        for (let r = 1; r <= 3; r++) {
+            for (let a = 0; a < 8; a++) {
+                const ang = (a / 8) * Math.PI * 2;
+                const cx = tx + Math.cos(ang) * r;
+                const cy = ty + Math.sin(ang) * r;
+                const ntx = Math.round(cx);
+                const nty = Math.round(cy);
+                if (this.isBlocked(ntx, nty)) continue;
+                u.x = ntx * TILE + TILE / 2 - HALF;
+                u.y = nty * TILE + TILE / 2 - HALF;
+                return;
+            }
+        }
+        // no room nearby: rewind to the last valid spot
+        u.x = u.prevX;
+        u.y = u.prevY;
     }
 
     /* ------------------------------------------------------------ */
@@ -1782,6 +2086,24 @@ export class Game {
     missingRequirement(p: PlayerState, d: BuildingDef): string {
         return this.lockReason(p, d);
     }
+}
+
+/** closest intersection (0..1) of a segment and a circle, -1 when it misses */
+function segmentCircleT(x0: number, y0: number, dx: number, dy: number, cx: number, cy: number, r: number): number {
+    const fx = x0 - cx;
+    const fy = y0 - cy;
+    const a = dx * dx + dy * dy;
+    if (a < 0.0001) return (fx * fx + fy * fy <= r * r) ? 0 : -1;
+    const b = 2 * (fx * dx + fy * dy);
+    const c = fx * fx + fy * fy - r * r;
+    const disc = b * b - 4 * a * c;
+    if (disc < 0) return -1;
+    const sq = Math.sqrt(disc);
+    const t1 = (-b - sq) / (2 * a);
+    const t2 = (-b + sq) / (2 * a);
+    if (t1 >= 0 && t1 <= 1) return t1;
+    if (t2 >= 0 && t2 <= 1) return t2;
+    return -1;
 }
 
 /** internal alias so orders can be passed around without the union widening */
