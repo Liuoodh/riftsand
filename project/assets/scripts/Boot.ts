@@ -25,6 +25,11 @@ import { CrystalNode } from './world/Terrain';
 import { WorldRenderer, gfxNode } from './render/Views';
 import { CameraRig } from './render/CameraRig';
 import { worldToProj, projToWorld } from './world/Iso';
+import { ShpFile } from './assets/Shp';
+import { TmpFile } from './assets/Tmp';
+import { encodeShp } from './assets/ShpEncode';
+import { parsePal, remapTeam, syntheticPal } from './assets/Palette';
+import { frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable } from './assets/Assets';
 import { UI, mkNode } from './ui/UI';
 import { RadialItem } from './ui/Overlay';
 import { sfx } from './audio/Sfx';
@@ -953,6 +958,10 @@ function tryBoot(): boolean {
     anyObj.__RIFTSAND_BOOTED__ = true;
     // exposed for the headless test / showcase tooling
     anyObj.__riftsandDefs = { UNITS, BUILDINGS };
+    anyObj.__riftsandAssets = {
+        ShpFile, TmpFile, encodeShp, parsePal, remapTeam, syntheticPal,
+        frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable,
+    };
     let appNode = canvas.getChildByName('App');
     if (!appNode) {
         appNode = new Node('App');

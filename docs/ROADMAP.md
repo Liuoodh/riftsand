@@ -75,7 +75,48 @@
 - [x] **损伤表现**：残血建筑冒烟/起火，残血车辆拖烟，履带扬尘、步兵起伏、飞机倾斜
 - [x] 自动回归：`phystest` 10 项 + `inputtest` 20 项 + 6 分钟对局
 
-## v0.5 等距地图与帧序列（当前）
+## v0.6 素材管线与纹理帧渲染（当前）
+
+用户指出：如果按原版方式使用地图/单位素材，那么程序生成的矢量美术**作为渲染方式是不合适的**。
+这一版把渲染模型换成素材模型。
+
+### 交付
+
+| 项 | 说明 |
+|---|---|
+| 绘制后端抽象 | `assets/Pen.ts`：`GfxPen`（cc.Graphics）/ `CanvasPen`（离屏 2D） |
+| SHP 解析 | 头 + 24B 帧表 + 压缩 0/1/2/3(LCW)，`assets/Shp.ts` |
+| SHP 写入 | `assets/ShpEncode.ts`，用于 round-trip 验证与预烘焙 |
+| PAL | 6bit→8bit、索引 0 透明、阵营 remap 16..31，`assets/Palette.ts` |
+| TMP | 头 + 块元数据（zHeight / terrainType / rampType），`assets/Tmp.ts` |
+| 烘焙 | `bakeFrame()` 离屏 canvas → Texture2D → SpriteFrame，72×72，LRU 900 |
+| 单位改 Sprite | `EntityView` 用 `Sprite` + `SpriteFrame`，车体烘焙、炮塔现画 |
+| 建筑等距化 | 菱形顶面 + 两侧墙 + 类型化屋顶（核心/电厂/矿厂/兵营/工厂/机场/炮塔/超武） |
+
+### 回归记录
+
+| 指标 | 结果 |
+|---|---|
+| `tsc --noEmit` | 0 错误 |
+| `assettest` | **16 / 16**（SHP 像素 mismatch = 0） |
+| `phystest` | 10 / 10 |
+| `inputtest` | 20 / 20 |
+| `smoke` | 60 FPS，0 错误 |
+| `battletest` 6 分钟 | earned 11680 / 21 击杀 / 0 错误 |
+
+### 踩坑
+
+- 手工构造的 `SpriteFrame` 必须补 `originalSize` 与 `offset`，否则渲染 quad 尺寸为 0，精灵**静默不可见**。
+
+### 下一步
+
+`REFERENCE-PARITY.md` 的 E1（碰撞模型）仍未修：成对圆形碰撞 + 质量位移应替换为
+瓦片占用表 + subCell + `CollisionState` + `MoveAsideTask`；碾压改为换格判定；
+补 `Warhead.Verses × ArmorType` 与 `guardArea`。
+
+---
+
+## v0.5 等距地图与帧序列（已完成）
 
 这一版是对 `docs/REFERENCE-PARITY.md` 里四个方向性错误中 E2/E3/E4 的直接修正。
 **改动不可逆**：世界从直角俯视换成等距投影，单位从「每帧矢量重绘」换成「8 方向帧序列」。
@@ -152,7 +193,11 @@
 | 炮塔与车体解耦 | ✅ | v0.5：独立追踪 + 回正 |
 | 深度排序 / 遮挡 | ✅ | v0.5：画家序 + 共享世界层 |
 | 转向前置 | ✅ | v0.5：大角度先转再走 |
-| **建筑等距立面** | ⬜ | 计划 v0.6（等距墙体 + 主图四态 + ActiveAnim 偏移） |
+| 纹理帧渲染 | ✅ | v0.6：单位走 SpriteFrame，矢量降级为烘焙源 |
+| SHP / PAL / TMP 解析 | ✅ | v0.6：round-trip 验证 |
+| 建筑等距立面 | ✅ | v0.6：菱形顶面 + 侧墙 + 类型化屋顶 |
+| **建筑主图四态** | ⬜ | 计划 v0.7（正常/受损/进驻/废墟 + ActiveAnim 偏移） |
+| **TMP 像素展开** | ⬜ | 计划 v0.7（有真瓦片后校准菱形扫描线） |
 | **瓦片占用碰撞** | ⬜ | 计划 v0.6（subCell + 停车等待 + MoveAside） |
 | **Warhead.Verses** | ⬜ | 计划 v0.6（10 种装甲 × 弹头矩阵、默认误伤） |
 | **运输载具 / 乘客** | ⬜ | 计划 v0.4（APC/IFV 装载、卸载按钮、乘客面板） |

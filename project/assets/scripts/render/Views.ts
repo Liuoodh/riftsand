@@ -17,8 +17,9 @@ import { Game, PlayerState } from '../game/Game';
 import { Unit, Building, Entity, Projectile, Fx, Zone, Crate, Decal } from '../game/Entities';
 import {
     drawUnit, drawBuilding, drawCrystal, drawRock, drawBush, drawCrate,
-    drawChevron, drawPickup,
+    drawChevron, drawPickup, paintTurret, pen,
 } from './Art';
+import { unitBodyFrame, FRAME_W, FRAME_H } from '../assets/Assets';
 
 const hex = (h: string, a = 255) => HEX(h, a);
 
@@ -65,7 +66,7 @@ export class TerrainView {
             const p = worldToProj(n.x, n.y, terrain.heightAt(n.x, n.y));
             g.node.setPosition(p.x, p.y, 0);
             (g.node as any).__depth = p.y;
-            drawCrystal(g, n.seed, 1);
+            drawCrystal(pen(g), n.seed, 1);
             (g.node as any).__node = n;
         }
     }
@@ -76,7 +77,7 @@ export class TerrainView {
             const n = (k as any).__node;
             if (!n) continue;
             const g = k.getComponent(Graphics);
-            if (g) drawCrystal(g, n.seed, n.amount / n.max);
+            if (g) drawCrystal(pen(g), n.seed, n.amount / n.max);
             k.active = n.amount > 0;
         }
     }
@@ -350,7 +351,13 @@ export function isoAngle(face: number) {
 
 export class EntityView {
     node: Node;
+    /** Graphics body — structures only */
     body: Graphics;
+    /** Sprite body — units, fed by baked or SHP frames */
+    spriteNode: Node;
+    sprite: Sprite;
+    /** live turret overlay (two primitives, cheaper than baking every combo) */
+    turret: Graphics;
     ring: Graphics;
     hp: Graphics;
     chev: Graphics;
@@ -377,27 +384,38 @@ export class EntityView {
         (this.node as any).__depth = p0.y;
         this.ring = gfxNode(this.node, 'ring');
         this.body = gfxNode(this.node, 'body');
+        this.spriteNode = plainNode(this.node, 'sprite');
+        this.sprite = this.spriteNode.addComponent(Sprite);
+        this.sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        this.sprite.type = Sprite.Type.SIMPLE;
+        const st = this.spriteNode.getComponent(UITransform)!;
+        st.setContentSize(FRAME_W, FRAME_H);
+        this.turret = gfxNode(this.node, 'turret');
         this.hp = gfxNode(this.node, 'hp');
         this.chev = gfxNode(this.node, 'chev');
         this.deco = gfxNode(this.node, 'deco');
-        this.op = this.body.node.addComponent(UIOpacity);
+        this.op = this.spriteNode.addComponent(UIOpacity);
         if (e instanceof Unit) {
-            drawUnit(this.body, e.def, factionOf(e.owner));
-            // world art is a touch small on phones; scale the body only so the
-            // selection ring and hp bar keep their true footprint
-            this.body.node.setScale(1.28, 1.28, 1);
+            this.body.node.active = false;
+            this.applyFrame(e, factionOf(e.owner));
         } else if (e instanceof Building) {
-            drawBuilding(this.body, e.def, factionOf(e.owner), e.progress);
+            this.spriteNode.active = false;
+            this.turret.node.active = false;
+            drawBuilding(pen(this.body), e.def, factionOf(e.owner), e.progress);
         }
         this.lastOwner = e.owner;
     }
 
+    /** fetch the sprite frame for this unit's current facing / walk frame */
+    private applyFrame(u: Unit, faction: Faction) {
+        const sf = unitBodyFrame(u.def, faction, Math.max(0, this.dir8), Math.max(0, this.frame));
+        if (sf) this.sprite.spriteFrame = sf;
+    }
+
     redraw(selFaction: Faction) {
         if (this.e instanceof Unit) {
-            const u = this.e;
-            drawUnit(this.body, u.def, selFaction,
-                Math.max(0, this.dir8), Math.max(0, this.frame), Math.max(0, this.tDir8));
-        } else if (this.e instanceof Building) drawBuilding(this.body, this.e.def, selFaction, (this.e as Building).progress);
+            this.applyFrame(this.e, selFaction);
+        } else if (this.e instanceof Building) drawBuilding(pen(this.body), this.e.def, selFaction, (this.e as Building).progress);
         this.lastOwner = this.e.owner;
     }
 
@@ -415,6 +433,14 @@ export class EntityView {
                 // rotation (plus bank) is correct for them
                 const bank = Math.max(-18, Math.min(18, u.turnDelta * 7));
                 this.node.angle = isoAngle(u.face) + bank;
+                this.spriteNode.setScale(1, 1, 1);
+                this.spriteNode.setPosition(0, 0, 0);
+                // air art is painted from one fixed view; only the node rotates
+                if (this.dir8 !== 0 || this.frame !== 0) {
+                    this.dir8 = 0;
+                    this.frame = 0;
+                    this.applyFrame(u, factionOf(u.owner));
+                }
             } else {
                 // ground units use discrete facing images: never spin the node
                 this.node.angle = 0;
@@ -426,22 +452,28 @@ export class EntityView {
                 this.anim.play(u.speedCur > 4 ? Seq.Walk : Seq.Ready);
                 this.anim.step(dt);
 
-                const flip = Math.cos((facingDeg(dir8) * Math.PI) / 180) < -0.15;
-                const S = 1.28 * (u.hitFlash > 0 ? 1.04 : 1);
-                if (u.def.kind === 'infantry') {
-                    this.body.node.setScale(flip ? -S : S, S, 1);
-                    this.body.node.setPosition(0, 0, 0);
-                } else {
-                    this.body.node.setScale(S, S, 1);
-                    this.body.node.setPosition(-u.recoil * 26, 0, 0);
-                }
-                if (dir8 !== this.dir8 || tDir8 !== this.tDir8 || this.anim.frame !== this.frame) {
+                const flip = u.def.kind === 'infantry'
+                    && Math.cos((facingDeg(dir8) * Math.PI) / 180) < -0.15;
+                const S = u.hitFlash > 0 ? 1.04 : 1;
+                this.spriteNode.setScale(flip ? -S : S, S, 1);
+                this.spriteNode.setPosition(-u.recoil * 26, 0, 0);
+
+                if (dir8 !== this.dir8 || this.anim.frame !== this.frame) {
                     this.dir8 = dir8;
-                    this.tDir8 = tDir8;
                     this.frame = this.anim.frame;
-                    drawUnit(this.body, u.def, factionOf(u.owner), dir8, this.frame, tDir8);
+                    this.applyFrame(u, factionOf(u.owner));
                 }
+
+                // turret overlay: only repaint when its heading actually changed
+                if (tDir8 !== this.tDir8 || u.owner !== this.lastOwner) {
+                    this.tDir8 = tDir8;
+                    const tp = pen(this.turret);
+                    tp.clear();
+                    if (u.def.kind === 'vehicle') paintTurret(tp, u.def, factionOf(u.owner), tDir8);
+                }
+                this.turret.node.setPosition(-u.recoil * 26, 0, 0);
             }
+
             // own cloaked units read as a ghost so the player can still command them
             const target = cloaked ? 120 : 255;
             if (this.op.opacity !== target) this.op.opacity = target;
@@ -449,7 +481,7 @@ export class EntityView {
                 this.lastLevel = u.level;
                 this.chev.clear();
                 if (u.level > 0) {
-                    drawChevron(this.chev, u.level, u.radius + (air ? 30 : 20), HEX(PAL.amber, 235));
+                    drawChevron(pen(this.chev), u.level, u.radius + (air ? 30 : 20), HEX(PAL.amber, 235));
                 }
             }
         } else if (e instanceof Building) {
@@ -457,7 +489,7 @@ export class EntityView {
             if (b.owner !== this.lastOwner) this.redraw(factionOf(b.owner));
             if (Math.abs(b.progress - this.lastProgress) > 0.02) {
                 this.lastProgress = b.progress;
-                drawBuilding(this.body, b.def, factionOf(b.owner), b.progress);
+                drawBuilding(pen(this.body), b.def, factionOf(b.owner), b.progress);
             }
             if (b.repairing !== this.lastRepair) {
                 this.lastRepair = b.repairing;
@@ -971,7 +1003,7 @@ export class WorldRenderer {
             }
             const cp = worldToProj(c.x, c.y, g.terrain.heightAt(c.x, c.y));
             gg.node.setPosition(cp.x, cp.y, 0);
-            drawPickup(gg, c.kind, c.t);
+            drawPickup(pen(gg), c.kind, c.t);
         }
         for (const [c, gg] of this.crateViews) {
             if (c.dead || g.crates.indexOf(c) < 0) { gg.node.destroy(); this.crateViews.delete(c); }

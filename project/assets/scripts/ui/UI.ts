@@ -18,7 +18,7 @@ import {
 } from '../core/Core';
 import { Game } from '../game/Game';
 import { Building } from '../game/Entities';
-import { drawBuilding, drawUnit } from '../render/Art';
+import { drawBuilding, drawUnit, pen } from '../render/Art';
 import { Overlay } from './Overlay';
 
 const W = 1280;
@@ -666,7 +666,7 @@ export class UI {
             if (this.tab === 'structure') {
                 const defs = g.availableStructures(h).map<{ id: string; name: string; cost: number; kind: 'build'; icon: (gg: Graphics) => void }>(def => ({
                     id: def.id, name: def.name, cost: def.cost, kind: 'build', scale: 0.46,
-                    icon: (gg: Graphics) => drawBuilding(gg, def, h.faction, 1),
+                    icon: (gg: Graphics) => drawBuilding(pen(gg), def, h.faction, 1),
                 }));
                 this.layoutCards(defs);
             } else {
@@ -674,7 +674,7 @@ export class UI {
                     id: def.id, name: def.name, cost: def.cost, kind: 'unit',
                     scale: def.kind === 'infantry' ? 1.15 : def.kind === 'mcv' ? 0.72
                         : def.kind === 'air' ? 0.85 : def.kind === 'harvester' ? 0.9 : 0.95,
-                    icon: (gg: Graphics) => drawUnit(gg, def, h.faction),
+                    icon: (gg: Graphics) => drawUnit(pen(gg), def, h.faction),
                 }));
                 this.layoutCards(defs);
             }

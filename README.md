@@ -6,7 +6,7 @@
 - 引擎：Cocos Creator 3.8.8
 - 语言：TypeScript
 - 仓库：https://github.com/Liuoodh/riftsand
-- 当前版本：**v0.5.0-dev — 等距地图（高度层 / 坡道）与单位帧序列（8 方向 / 炮塔解耦）**
+- 当前版本：**v0.6.0-dev — 素材管线（SHP/PAL/TMP）+ 纹理帧渲染 + 等距建筑**
 
 ![主菜单](docs/shots/menu.png)
 
@@ -159,6 +159,43 @@ frameIndex = startFrame + facingMult * facingIndex + animFrame
 
 等距下屏幕矩形对应世界**菱形**，把两个角反投影成世界 AABB 必然漏选。
 现在框选是「逐单位投影到屏幕再判断是否在矩形内」——这是等距下唯一正确的做法。
+
+## 素材管线（v0.6）
+
+这一版解决一个方向问题：**渲染方式不能是"每帧画矢量"**。
+
+只要单位还是运行时用 `Graphics` 画出来的，将来把原版素材放进来就得推翻整个渲染层。
+所以现在渲染改成 **纹理 + Sprite**，矢量绘制降级为「素材生成器」：
+
+```
+.shp / .pal / .tmp  ──→  assets/Shp.ts · Tmp.ts · Palette.ts  ──┐
+                                                                  ├─→ Texture2D → SpriteFrame → Sprite
+Art.ts 绘制 ──→ CanvasPen 离屏烘焙 ──→ assets/Assets.ts  ────────┘
+```
+
+单位渲染层（`EntityView`）**不认识 SHP，也不认识 Art.ts**，它只要 `SpriteFrame`。
+接真素材时只换数据源，不动渲染代码。
+
+### 已实现的零售格式
+
+| 格式 | 内容 | 验证 |
+|---|---|---|
+| **SHP** | 头 + 24B 帧描述符 + 绝对偏移 + 压缩 0/1/2/**3(LCW)** | 编码→解码**逐字节一致**（32 帧） |
+| **PAL** | 768B / 6bit→8bit / 索引 0 透明 / 阵营 remap 16..31 | 最亮档 `252`、最暗档 `32` |
+| **TMP** | 头 + 52B 块头 + `zHeight` / `terrainType` / `rampType` | `terrain=14 ramp=7 z=2` |
+
+`TMP.terrainType` 经 `TERRAIN_TYPE_LAND` 映射后可直接填 `Terrain.kind/level`，
+`rampType` 换成顶点高度——**真瓦片进来不用改玩法代码**。
+
+### 帧的两种来源
+
+- 程序化烘焙（当前）：72×72，单位居中，缓存上限 900 帧。
+- SHP 直读（素材到位后）：`frameFromShp()` 返回同一个 `SpriteFrame` 类型。
+
+车体烘焙成帧（8 方向 × 4 帧），**炮塔每帧现画**（椭圆 + 炮管两笔）——
+否则缓存会膨胀到 256 张/单位。
+
+细节与接入步骤见 [`docs/ASSETS.md`](docs/ASSETS.md)。
 
 ## 操作
 
