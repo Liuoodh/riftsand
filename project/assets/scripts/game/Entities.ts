@@ -25,6 +25,22 @@ export type Order =
 
 let nextId = 1;
 
+/**
+ * Terrain/building occupancy probe, injected once by Game.
+ *
+ * The reference engine never resolves a collision by teleporting a unit: a
+ * blocked move is *refused* (the unit waits or picks another cell). To behave the
+ * same way the unit needs to know what the world looks like, but `Entities.ts`
+ * must not import `Game.ts` (circular), so it asks through this hook.
+ *
+ *   (x, y, radius) -> true when a hull of `radius` cannot occupy that point
+ */
+let worldBlockedFn: ((x: number, y: number, r: number) => boolean) | null = null;
+
+export function setWorldBlocked(fn: ((x: number, y: number, r: number) => boolean) | null) {
+    worldBlockedFn = fn;
+}
+
 export class Entity {
     id = nextId++;
     owner: PlayerId = 0;
@@ -69,6 +85,8 @@ export class Unit extends Entity {
     retry = 0;
     /** >0 means "hold still and let the other one pass" (reference: WaitTicksTask) */
     waitT = 0;
+    /** per-frame budget of separation shoves, so a crowd cannot pop a unit */
+    pushAcc = 0;
     /** cached "engaged" target for attack-move */
     engage: Entity | null = null;
     bob = Math.random() * Math.PI * 2;
@@ -152,6 +170,13 @@ export class Unit extends Entity {
     get slowed() { return this.slowUntil > -1; }
     get invulnerable() { return this.invulnUntil > -1; }
 
+    /** can a hull of this radius sit here? airborne units always can */
+    canOccupy(x: number, y: number) {
+        if (this.isAir) return true;
+        if (!worldBlockedFn) return true;
+        return !worldBlockedFn(x, y, this.radius);
+    }
+
     moveStep(dt: number, speedMul: number): boolean {
         this.prevX = this.x;
         this.prevY = this.y;
@@ -214,10 +239,40 @@ export class Unit extends Entity {
         this.speedCur += Math.max(-maxDelta, Math.min(maxDelta, delta));
         if (this.speedCur < 0) this.speedCur = 0;
         const step = Math.min(d, this.speedCur * dt);
-        this.x += (dx / d) * step;
-        this.y += (dy / d) * step;
-        this.vx = (dx / d) * this.speedCur;
-        this.vy = (dy / d) * this.speedCur;
+        const ux = dx / d, uy = dy / d;
+        const ax = ux * step;
+        const ay = uy * step;
+
+        // Move, but never into solid ground. Sliding along one axis is what keeps
+        // a column hugging a wall instead of grinding to a halt, and when both
+        // axes are blocked the unit simply stays put and reports it — the old
+        // code instead teleported it to the nearest free cell centre, which is
+        // what made harvesters appear to "reset" over and over at the start.
+        if (!this.canOccupy(this.x + ax, this.y + ay)) {
+            const slideX = this.canOccupy(this.x + ax, this.y);
+            const slideY = this.canOccupy(this.x, this.y + ay);
+            if (slideX) {
+                this.x += ax;
+                this.vx = ux * this.speedCur;
+                this.vy = 0;
+            } else if (slideY) {
+                this.y += ay;
+                this.vx = 0;
+                this.vy = uy * this.speedCur;
+            } else {
+                this.speedCur = 0;
+                this.vx = 0;
+                this.vy = 0;
+                this.blockedNow = true;
+                return this.path.length > 0;
+            }
+        } else {
+            this.x += ax;
+            this.y += ay;
+            this.vx = ux * this.speedCur;
+            this.vy = uy * this.speedCur;
+        }
+        this.blockedNow = false;
         return true;
     }
 

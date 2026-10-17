@@ -15,7 +15,7 @@ import {
     EventTouch, EventMouse, EventKeyboard, KeyCode, Vec2, Layers, Graphics, Color, profiler,
 } from 'cc';
 import {
-    BUILDINGS, UNITS, Faction, HALF, TILE, clamp, dist,
+    BUILDINGS, UNITS, Faction, HALF, TILE, MAP_TILES, clamp, dist,
     TAP_MAX_MS, TAP_SLOP, LONG_PRESS_MS, BOX_MIN_PX, SNAP_PX,
     ProdCat, SuperWeaponId, SUPER_WEAPONS,
 } from './core/Core';
@@ -761,8 +761,11 @@ export class RiftApp extends Component {
         this.worldNode = worldHolder;
         this.cam = new CameraRig(this.renderer.root);
         this.cam.setScreen(DESIGN_W, DESIGN_H);
-        this.cam.targetZoom = 0.78;
-        this.cam.zoom = 0.78;
+        // 1.55 shows ~13 cells across the diamond, which is the scale the retail
+        // engine uses; 0.78 was zoomed so far out that the whole map was a
+        // pixel-sized smudge and the shroud edge dominated the screen.
+        this.cam.targetZoom = 1.55;
+        this.cam.zoom = 1.55;
 
         this.game = game;
         app.game = game;
@@ -774,8 +777,11 @@ export class RiftApp extends Component {
 
         const core = game.buildings.find(b => b.owner === 0 && b.def.isCore);
         if (core) {
-            const fp = worldToProj(core.x + 90, core.y - 80, 0);
-            this.cam.focus(fp.x, fp.y, true);
+            // aim a little above the base: the HUD covers the bottom ~200px, so
+            // centring exactly on the core would hide it behind the build bar
+            const fp = worldToProj(core.x, core.y, 0);
+            const camOff = 80 / this.cam.zoom;
+            this.cam.focus(fp.x, fp.y - camOff, true);
         }
         (globalThis as any).__riftsandGame = game;
         this.ui.refresh(0);
@@ -976,6 +982,7 @@ function tryBoot(): boolean {
     anyObj.__RIFTSAND_BOOTED__ = true;
     // exposed for the headless test / showcase tooling
     anyObj.__riftsandDefs = { UNITS, BUILDINGS };
+    anyObj.__riftsandConst = { TILE, HALF, MAP_TILES };
     anyObj.__riftsandAssets = {
         ShpFile, TmpFile, encodeShp, parsePal, remapTeam, syntheticPal,
         frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable,

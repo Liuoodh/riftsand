@@ -24,6 +24,14 @@ import { unitBodyFrame, FRAME_W, FRAME_H } from '../assets/Assets';
 const hex = (h: string, a = 255) => HEX(h, a);
 
 /** multiply a palette colour — used for height shading and face darkening */
+/** blend two hex colours then scale brightness */
+function mixHex(a: string, b: string, t: number, f = 1, alpha = 255): Color {
+    const pa = a.replace('#', ''), pb = b.replace('#', '');
+    const ch = (p: string, i: number) => parseInt(p.substring(i, i + 2), 16);
+    const m = (i: number) => Math.min(255, ((ch(pa, i) * (1 - t) + ch(pb, i) * t) * f) | 0);
+    return new Color(m(0), m(2), m(4), alpha);
+}
+
 function shade(h: string, f: number, a = 255): Color {
     const s = h.replace('#', '');
     const r = Math.min(255, (parseInt(s.substring(0, 2), 16) * f) | 0);
@@ -142,40 +150,56 @@ export class TerrainView {
         const T = TILE, H = HALF, N = MAP_TILES;
         const kind = this.terrain.kind[ty * N + tx];
         const wx = tx * T - H, wy = ty * T - H;
-        const p00 = worldToProj(wx, wy, this.terrain.vhAt(tx, ty));
-        const p10 = worldToProj(wx + T, wy, this.terrain.vhAt(tx + 1, ty));
-        const p11 = worldToProj(wx + T, wy + T, this.terrain.vhAt(tx + 1, ty + 1));
-        const p01 = worldToProj(wx, wy + T, this.terrain.vhAt(tx, ty + 1));
+        const h00 = this.terrain.vhAt(tx, ty);
+        const h10 = this.terrain.vhAt(tx + 1, ty);
+        const h11 = this.terrain.vhAt(tx + 1, ty + 1);
+        const h01 = this.terrain.vhAt(tx, ty + 1);
+        const p00 = worldToProj(wx, wy, h00);
+        const p10 = worldToProj(wx + T, wy, h10);
+        const p11 = worldToProj(wx + T, wy + T, h11);
+        const p01 = worldToProj(wx, wy + T, h01);
 
         const lv = this.terrain.levelAt(tx, ty);
-        let base = PAL.sand;
-        if (kind === TileKind.Dune) base = PAL.sandLight;
-        else if (kind === TileKind.Crystal) base = '#8a9459';
-        else if (kind === TileKind.Rock) base = PAL.rock;
+        const hAvg = (h00 + h10 + h11 + h01) / 4;
 
-        const jitter = 0.94 + (this.terrain.tint[ty * N + tx] || 0) * 0.14;
-        const lift = 1 + lv * 0.05;
+        /*
+         * Shading is derived from the surface itself, not from an arbitrary
+         * per-tile jitter. Because neighbouring diamonds share their corner
+         * heights, lift and slope vary continuously across the ground — the
+         * same thing the retail `rampType` interpolation gives you — so the
+         * sand reads as dunes instead of a patchwork of flat diamonds.
+         */
+        // screen-space slope: >0 means the tile tilts away from the light (NW)
+        const slope = (h00 + h10 - h01 - h11) / 2;
+        const light = 1 + slope * 0.16 + (hAvg - 0.5) * 0.10;
+        const jitter = 0.99 + (this.terrain.tint[ty * N + tx] || 0) * 0.04;
 
-        // raised tiles show a bit of side wall, which sells the height
-        if (lv > 0) {
-            const drop = HEIGHT_PX * 0.55;
-            g.moveTo(p01.x, p01.y); g.lineTo(p11.x, p11.y);
-            g.lineTo(p11.x, p11.y + drop); g.lineTo(p01.x, p01.y + drop); g.close();
-            g.fillColor = shade(base, jitter * 0.72);
-            g.fill();
-            g.moveTo(p10.x, p10.y); g.lineTo(p11.x, p11.y);
-            g.lineTo(p11.x, p11.y + drop); g.lineTo(p10.x, p10.y + drop); g.close();
-            g.fillColor = shade(base, jitter * 0.6);
-            g.fill();
+        let col: Color;
+        if (kind === TileKind.Crystal) {
+            col = shade('#8a9459', light * jitter);
+        } else if (kind === TileKind.Rock) {
+            col = shade(PAL.rock, light * jitter);
+        } else {
+            // sand -> sunlit dune top, blended by actual elevation so there is
+            // no visible seam where a dune starts
+            const t = Math.max(0, Math.min(1, hAvg / 1.7));
+            col = mixHex(PAL.sand, PAL.sandLight, t, light * jitter);
         }
 
-        g.moveTo(p00.x, p00.y);
-        g.lineTo(p10.x, p10.y);
-        g.lineTo(p11.x, p11.y);
-        g.lineTo(p01.x, p01.y);
+        // tiny inflation removes the anti-aliased hairline between diamonds
+        const cx = (p00.x + p10.x + p11.x + p01.x) / 4;
+        const cy = (p00.y + p10.y + p11.y + p01.y) / 4;
+        const k = 1 + 0.62 / ISO_HW;
+        const ox = (q: { x: number; y: number }) => cx + (q.x - cx) * k;
+        const oy = (q: { x: number; y: number }) => cy + (q.y - cy) * k;
+        g.moveTo(ox(p00), oy(p00));
+        g.lineTo(ox(p10), oy(p10));
+        g.lineTo(ox(p11), oy(p11));
+        g.lineTo(ox(p01), oy(p01));
         g.close();
-        g.fillColor = shade(base, jitter * lift);
+        g.fillColor = col;
         g.fill();
+        void lv;
     }
 
     private rockAt(g: Graphics, x: number, y: number, rng: () => number) {
@@ -251,36 +275,21 @@ export class FogView {
     private g: Graphics;
     private timer = 0;
     private lastSig = 0;
+    /** per-tile shroud depth: 0 visible, 1 dim, 2/3 fringe rings, 4 deep dark */
+    private st = new Uint8Array(MAP_TILES * MAP_TILES);
 
+    /**
+     * Retail shroud is a per-tile black sprite whose edge is dithered, not a
+     * crisp cut. A single hard boundary read as a giant pixel staircase across
+     * the screen, so the edge is built as two graded rings instead: terrain
+     * shows through the first ring, the second is nearly solid, the rest is
+     * fully opaque. Same silhouette as the original, without needing a texture.
+     */
     constructor(parent: Node) {
-        // colour the whole diamond-outside region near-black so the desert never
-        // leaks; the four corner triangles fill the gaps around the map diamond
-        const W = PROJ_HALF_X, H = PROJ_HALF_Y, BIG = 3000;
+        // NO opaque backdrop here: the fog layer sits above everything, so a
+        // full-screen fill would hide the map itself. TerrainView already paints
+        // the out-of-map colour underneath.
         this.node = plainNode(parent, 'Fog');
-        const vg = gfxNode(this.node, 'void');
-        vg.fillColor = new Color(9, 12, 15, 255);
-        vg.rect(-BIG, H, BIG * 2, BIG);
-        vg.fill();
-        vg.rect(-BIG, -H - BIG, BIG * 2, BIG);
-        vg.fill();
-        vg.rect(-BIG, -H, BIG - W, H * 2);
-        vg.fill();
-        vg.rect(W, -H, BIG - W, H * 2);
-        vg.fill();
-        // Graphics.fill() consumes the current path, so each corner needs its own
-        const tri = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) => {
-            vg.moveTo(ax, ay); vg.lineTo(bx, by); vg.lineTo(cx, cy); vg.close();
-            vg.fill();
-        };
-        tri(-W, -H, 0, -H, -W, 0);
-        tri(0, -H, W, -H, W, 0);
-        tri(W, 0, W, H, 0, H);
-        tri(-W, 0, -W, H, 0, H);
-        vg.moveTo(0, -H); vg.lineTo(W, 0); vg.lineTo(0, H); vg.lineTo(-W, 0); vg.close();
-        vg.strokeColor = new Color(63, 217, 236, 26);
-        vg.lineWidth = 3;
-        vg.stroke();
-
         this.g = gfxNode(this.node, 'shroud');
     }
 
@@ -290,7 +299,7 @@ export class FogView {
         this.timer = 0.18;
         // cheap signature: skip the rebuild when visibility did not change
         let sig = 0;
-        for (let i = 0; i < p.visible.length; i += 5) {
+        for (let i = 0; i < p.visible.length; i += 3) {
             sig = (sig * 33 + (p.visible[i] ? 3 : p.explored[i] ? 1 : 0)) | 0;
         }
         if (sig === this.lastSig) return;
@@ -298,50 +307,129 @@ export class FogView {
         this.rebuild(p);
     }
 
-    /**
-     * One parallelogram per run of same-state tiles in a row.  Runs keep the
-     * rebuild down to a few hundred polys instead of 4096 diamonds, and hard
-     * edges are what the retail shroud sprite looks like anyway.
-     */
+    private depthOf(p: PlayerState) {
+        const N = MAP_TILES;
+        const st = this.st;
+        for (let i = 0; i < st.length; i++) {
+            st[i] = p.visible[i] ? 0 : p.explored[i] ? 1 : 4;
+        }
+        // ring 1: unknown next to anything known
+        for (let pass = 0; pass < 2; pass++) {
+            const ring = 2 + pass;
+            const src = ring; // tiles of the previous depth are "known"
+            for (let y = 0; y < N; y++) {
+                for (let x = 0; x < N; x++) {
+                    const i = y * N + x;
+                    if (st[i] !== 4) continue;
+                    let near = false;
+                    for (let dy = -1; dy <= 1 && !near; dy++) {
+                        for (let dx = -1; dx <= 1; dx++) {
+                            const nx = x + dx, ny = y + dy;
+                            if (nx < 0 || ny < 0 || nx >= N || ny >= N) continue;
+                            if (st[ny * N + nx] < src) { near = true; break; }
+                        }
+                    }
+                    if (near) st[i] = ring;
+                }
+            }
+        }
+        return st;
+    }
+
+    /** deterministic 0..1 hash per tile — the shroud edge is noise, not a rule */
+    private static noise(tx: number, ty: number) {
+        let h = (tx * 73856093) ^ (ty * 19349663);
+        h = (h ^ (h >>> 13)) * 1274126177;
+        return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+    }
+
     private rebuild(p: PlayerState) {
         const g = this.g;
         g.clear();
         const N = MAP_TILES, T = TILE, H = HALF;
-        const dark = new Color(8, 11, 14, 236);
-        const dim = new Color(8, 11, 14, 138);
+        const st = this.depthOf(p);
+
+        const v = (gx: number, gy: number) => worldToProj(gx * T - H, gy * T - H, 0);
+
+        /**
+         * Fill the union of a horizontal run of tiles.
+         *
+         * A tile's diamond has its four corners AT THE CELL CORNERS:
+         * v(tx,ty) top, v(tx+1,ty) right, v(tx+1,ty+1) bottom, v(tx,ty+1) left.
+         * The union of a run therefore is the parallelogram
+         * (tx0,ty) (tx1,ty) (tx1,ty+1) (tx0,ty+1).
+         *
+         * The previous version sampled the EDGE MIDPOINTS ((tx+0.5, ty+0.5)),
+         * which produced a half-size diamond per run — every pair of adjacent
+         * tiles leaked a triangle of terrain through the fog, which is what made
+         * the shroud edge look like a checkerboard.
+         */
+        const run = (tx0: number, tx1: number, ty: number, col: Color, grow = 0) => {
+            const gx = grow / ISO_HW;
+            const gy = grow / ISO_HH;
+            const a = v(tx0 - gx, ty - gy);
+            const b = v(tx1 + gx, ty - gy);
+            const c = v(tx1 + gx, ty + 1 + gy);
+            const d2 = v(tx0 - gx, ty + 1 + gy);
+            g.moveTo(a.x, a.y);
+            g.lineTo(b.x, b.y);
+            g.lineTo(c.x, c.y);
+            g.lineTo(d2.x, d2.y);
+            g.close();
+            g.fillColor = col;
+            g.fill();
+            // stroke in the same colour: half a pixel of bleed hides the
+            // anti-aliased seam between neighbouring runs
+            g.strokeColor = col;
+            g.lineWidth = 1.1;
+            g.stroke();
+        };
+
         for (let ty = 0; ty < N; ty++) {
             let tx = 0;
             while (tx < N) {
-                const i0 = ty * N + tx;
-                const st = p.visible[i0] ? 0 : p.explored[i0] ? 1 : 2;
-                let tx2 = tx + 1;
-                if (st !== 0) {
-                    while (tx2 < N) {
-                        const j = ty * N + tx2;
-                        const s2 = p.visible[j] ? 0 : p.explored[j] ? 1 : 2;
-                        if (s2 !== st) break;
-                        tx2++;
+                const d = st[ty * N + tx];
+                if (d === 0) { tx++; continue; }
+
+                if (d === 2) {
+                    /*
+                     * Fringe tile: solid black, plus small black diamonds poking
+                     * into the lit side. Per-tile alpha produced a literal
+                     * checkerboard, because neighbouring fringe tiles always
+                     * differ; scattering sub-tile blobs instead is exactly how
+                     * the retail SHROUD.SHP softens its edge, and it breaks the
+                     * staircase into noise.
+                     */
+                    run(tx, tx + 1, ty, new Color(8, 11, 15, 255), 0.5);
+                    const dirs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+                    for (const [dx, dy] of dirs) {
+                        const nx2 = tx + dx, ny2 = ty + dy;
+                        if (nx2 < 0 || ny2 < 0 || nx2 >= N || ny2 >= N) continue;
+                        if (st[ny2 * N + nx2] >= 2) continue;
+                        for (let i = 0; i < 3; i++) {
+                            const t = -0.26 + i * 0.26;
+                            const h = FogView.noise(tx * 7 + i, ty * 13 + i * 3);
+                            if (h < 0.22) continue;
+                            const px2 = tx + 0.5 + dx * 0.46 + (dy !== 0 ? t : 0);
+                            const py2 = ty + 0.5 + dy * 0.46 + (dx !== 0 ? t : 0);
+                            const c = worldToProj(px2 * T - H, py2 * T - H, 0);
+                            const w = 7.5 + h * 4;
+                            g.moveTo(c.x - w, c.y);
+                            g.lineTo(c.x, c.y - w * 0.5);
+                            g.lineTo(c.x + w, c.y);
+                            g.lineTo(c.x, c.y + w * 0.5);
+                            g.close();
+                            g.fillColor = new Color(8, 11, 15, 205);
+                            g.fill();
+                        }
                     }
-                    // The union of the diamonds in a run is a HEXAGON, not a
-                    // parallelogram. Using the bounding quad left hairline gaps
-                    // along every row boundary (visible as diagonal seams).
-                    const v = (gx: number, gy: number) => worldToProj(gx * T - H, gy * T - H, 0);
-                    const q0 = v(tx, ty + 0.5);
-                    const q1 = v(tx + 0.5, ty);
-                    const q2 = v(tx2 - 0.5, ty);
-                    const q3 = v(tx2, ty + 0.5);
-                    const q4 = v(tx2 - 0.5, ty + 1);
-                    const q5 = v(tx + 0.5, ty + 1);
-                    g.moveTo(q0.x, q0.y);
-                    g.lineTo(q1.x, q1.y);
-                    g.lineTo(q2.x, q2.y);
-                    g.lineTo(q3.x, q3.y);
-                    g.lineTo(q4.x, q4.y);
-                    g.lineTo(q5.x, q5.y);
-                    g.close();
-                    g.fillColor = st === 2 ? dark : dim;
-                    g.fill();
+                    tx++;
+                    continue;
                 }
+
+                let tx2 = tx + 1;
+                while (tx2 < N && st[ty * N + tx2] === d) tx2++;
+                run(tx, tx2, ty, d === 1 ? new Color(8, 11, 15, 150) : new Color(8, 11, 15, 255));
                 tx = tx2;
             }
         }

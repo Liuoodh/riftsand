@@ -184,11 +184,36 @@ export class PathFinder {
     /** tile is free, and wide enough for the unit footprint */
     private clear(tx: number, ty: number, radius: number) {
         if (this.blocked(tx, ty)) return false;
-        // current units all fit inside a single tile; the clearance branch is
-        // kept for future 2x2 hulls and simply stays inert below that size
-        if (radius <= TILE * 0.55) return true;
-        return !this.blocked(tx - 1, ty) && !this.blocked(tx + 1, ty)
-            && !this.blocked(tx, ty - 1) && !this.blocked(tx, ty + 1);
+        // Wide hulls need the disc centred on the cell to fit; below ~1/3 of a
+        // tile the unit is narrower than a cell and the single check is exact.
+        if (radius <= TILE * 0.34) return true;
+        return this.discFree(tx * TILE + TILE / 2 - HALF, ty * TILE + TILE / 2 - HALF, radius);
+    }
+
+    /**
+     * Is a disc of `r` free of blocking cells?
+     *
+     * This is what stops a tank from clipping the corner of a building: the
+     * centre line of a diagonal path is clear, but the hull is not. The reference
+     * solves the same problem with its footprint test against tile occupation.
+     */
+    discFree(x: number, y: number, r: number) {
+        if (r <= 0) return !this.blocked(Math.floor((x + HALF) / TILE), Math.floor((y + HALF) / TILE));
+        const x0 = Math.floor((x - r + HALF) / TILE);
+        const x1 = Math.floor((x + r + HALF) / TILE);
+        const y0 = Math.floor((y - r + HALF) / TILE);
+        const y1 = Math.floor((y + r + HALF) / TILE);
+        const rr = r * r * 0.86;
+        for (let ty = y0; ty <= y1; ty++) {
+            for (let tx = x0; tx <= x1; tx++) {
+                if (!this.blocked(tx, ty)) continue;
+                const cx = Math.max(tx * TILE - HALF, Math.min(x, tx * TILE + TILE - HALF));
+                const cy = Math.max(ty * TILE - HALF, Math.min(y, ty * TILE + TILE - HALF));
+                const dx = x - cx, dy = y - cy;
+                if (dx * dx + dy * dy < rr) return false;
+            }
+        }
+        return true;
     }
 
     private nearestFree(tx: number, ty: number, radius: number): { tx: number; ty: number } | null {
@@ -222,13 +247,14 @@ export class PathFinder {
     }
 
     lineClear(x0: number, y0: number, x1: number, y1: number, radius = 0) {
-        const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / (TILE * 0.4));
+        // sample finely enough that a hull cannot slip through a cell corner
+        const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / (TILE * 0.25));
         for (let s = 1; s < steps; s++) {
             const t = s / steps;
             const x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
             const tx = Math.floor((x + HALF) / TILE), ty = Math.floor((y + HALF) / TILE);
             if (tx < 0 || ty < 0 || tx >= N || ty >= N) return false;
-            if (!this.clear(tx, ty, radius)) return false;
+            if (!this.discFree(x, y, radius)) return false;
         }
         return true;
     }

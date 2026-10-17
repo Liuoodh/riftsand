@@ -131,7 +131,12 @@ export const TEAM_COLOR: Record<Faction, string> = { BU: PAL.teamBU, DS: PAL.tea
 /* World constants                                                     */
 /* ------------------------------------------------------------------ */
 export const TILE = 32;
-export const MAP_TILES = 64;
+/**
+ * 80x80 cells. The retail maps are ~100 cells a side and the camera keeps the
+ * viewport inside the playfield, so a 64-cell map left the camera pinned against
+ * an edge with the base off-centre.
+ */
+export const MAP_TILES = 80;
 export const MAP_SIZE = TILE * MAP_TILES;
 export const HALF = MAP_SIZE / 2;
 

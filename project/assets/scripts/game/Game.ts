@@ -18,7 +18,7 @@ import {
 } from '../core/Core';
 import { TerrainMap, CrystalNode } from '../world/Terrain';
 import { PathFinder } from '../world/Path';
-import { Unit, Building, Projectile, Fx, Entity, SpatialGrid, PlayerId, Zone, Crate, Decal } from './Entities';
+import { Unit, Building, Projectile, Fx, Entity, SpatialGrid, PlayerId, Zone, Crate, Decal, setWorldBlocked } from './Entities';
 import { AIController } from './AI';
 
 export type Difficulty = 'easy' | 'normal' | 'hard';
@@ -95,6 +95,12 @@ const REPAIR_SECONDS = 24;
 export class Game {
     terrain: TerrainMap;
     finder: PathFinder;
+    /**
+     * Ore fields that recently proved unreachable, with the time they may be
+     * reconsidered. Prevents a truck from re-running A* into the same wall every
+     * frame (the reference keeps a "no route" timer for the same reason).
+     */
+    nodeCooldown = new Map<number, number>();
     grid = new SpatialGrid();
     units: Unit[] = [];
     buildings: Building[] = [];
@@ -141,6 +147,9 @@ export class Game {
         this.terrain = new TerrainMap();
         this.terrain.generate(seed);
         this.finder = new PathFinder((tx, ty) => this.isBlocked(tx, ty), (tx, ty) => this.terrain.costAt(tx, ty));
+        // movement asks the world directly (see Entities.setWorldBlocked): a unit
+        // must never step into a cell it does not fit in
+        setWorldBlocked((x, y, r) => this.worldBlockedAt(x, y, r));
         this.difficulty = difficulty;
         this.events = events;
         this.rng = makeRng(seed ^ 0x9e3779b9);
@@ -209,7 +218,8 @@ export class Game {
     private setupBase(pid: PlayerId) {
         const p = this.players[pid];
         const f = FACTIONS[p.faction];
-        const bx = pid === 0 ? 11 : MAP_TILES - 12;
+        // far enough from the rim that the camera can centre on the base
+        const bx = pid === 0 ? 18 : MAP_TILES - 19;
         const by = MAP_TILES / 2;
         const coreDef = BUILDINGS[f.core];
         const dropDef = p.faction === 'BU' ? BUILDINGS.sluice : BUILDINGS.market;
@@ -244,7 +254,18 @@ export class Game {
     }
 
     spawnUnit(owner: PlayerId, def: UnitDef, x: number, y: number): Unit {
-        const u = new Unit(def, owner, clamp(x, -HALF + 20, HALF - 20), clamp(y, -HALF + 20, HALF - 20));
+        let px = clamp(x, -HALF + 20, HALF - 20);
+        let py = clamp(y, -HALF + 20, HALF - 20);
+        // A unit must never appear inside a wall or a structure footprint: the
+        // reference resolves the building's exit cell before spawning, so do the
+        // geometric equivalent here instead of letting the physics untangle it.
+        if (this.worldBlockedAt(px, py, def.radius)) {
+            const spot = this.nearestStandable(
+                Math.floor((px + HALF) / TILE), Math.floor((py + HALF) / TILE), def.radius, 5,
+            );
+            if (spot) { px = spot.x; py = spot.y; }
+        }
+        const u = new Unit(def, owner, px, py);
         u.owner = owner;
         this.units.push(u);
         this.players[owner].built++;
@@ -259,6 +280,47 @@ export class Game {
         for (const b of this.buildings) {
             if (b.dead) continue;
             if (b.occupies(tx, ty)) return b;
+        }
+        return null;
+    }
+
+    /**
+     * True when a disc of `r` centred at (x, y) overlaps terrain or a structure.
+     * This is the coarse "footprint" test the reference performs against its
+     * tile-occupation table; keeping it geometric avoids a parallel index.
+     */
+    worldBlockedAt(x: number, y: number, r: number) {
+        const T = TILE;
+        const x0 = Math.floor((x - r + HALF) / T);
+        const x1 = Math.floor((x + r + HALF) / T);
+        const y0 = Math.floor((y - r + HALF) / T);
+        const y1 = Math.floor((y + r + HALF) / T);
+        for (let ty = y0; ty <= y1; ty++) {
+            for (let tx = x0; tx <= x1; tx++) {
+                if (!this.isBlocked(tx, ty)) continue;
+                // distance from the disc centre to the tile square
+                const cx = clamp(x, tx * T - HALF, tx * T + T - HALF);
+                const cy = clamp(y, ty * T - HALF, ty * T + T - HALF);
+                const dx = x - cx, dy = y - cy;
+                if (dx * dx + dy * dy < r * r * 0.86) return true;
+            }
+        }
+        return false;
+    }
+
+    /** nearest tile a hull of `r` can stand on, searched outward from (tx, ty) */
+    private nearestStandable(tx: number, ty: number, r: number, maxR = 4): { x: number; y: number } | null {
+        for (let rad = 0; rad <= maxR; rad++) {
+            for (let dy = -rad; dy <= rad; dy++) {
+                for (let dx = -rad; dx <= rad; dx++) {
+                    if (rad > 0 && Math.abs(dx) !== rad && Math.abs(dy) !== rad) continue;
+                    const nx = tx + dx, ny = ty + dy;
+                    if (nx < 0 || ny < 0 || nx >= MAP_TILES || ny >= MAP_TILES) continue;
+                    const wx = nx * TILE + TILE / 2 - HALF;
+                    const wy = ny * TILE + TILE / 2 - HALF;
+                    if (!this.worldBlockedAt(wx, wy, r)) return { x: wx, y: wy };
+                }
+            }
         }
         return null;
     }
@@ -368,6 +430,25 @@ export class Game {
                 if (this.terrain.isSolid(x, y)) return { ok: false, reason: '地形无法建造' };
                 if (this.terrain.isCrystal(x, y)) return { ok: false, reason: '不能在矿脉上建造' };
                 if (this.buildingAt(x, y)) return { ok: false, reason: '与建筑重叠' };
+            }
+        }
+        /*
+         * Do not drop a structure on top of a unit.
+         *
+         * The reference checks the target cells against its occupation table; we
+         * do the geometric equivalent. Without this, a building placed over a
+         * hull embeds it, and the only way out is the collision safety net, which
+         * shows up as a unit being shoved sideways out of a wall.
+         */
+        const x0 = tx * TILE - HALF;
+        const y0 = ty * TILE - HALF;
+        const x1 = x0 + def.size * TILE;
+        const y1 = y0 + def.size * TILE;
+        for (const u of this.units) {
+            if (u.dead || u.isAir) continue;
+            const pad = u.radius * 0.55;
+            if (u.x > x0 - pad && u.x < x1 + pad && u.y > y0 - pad && u.y < y1 + pad) {
+                return { ok: false, reason: '单位挡住了建造位置' };
             }
         }
         if (!ignoreRadius && !def.isCore) {
@@ -1007,12 +1088,23 @@ export class Game {
     }
 
     /** nearest reachable field, biased away from fields other trucks already work */
+    /** mark a field unreachable for a while so harvesters stop re-trying it */
+    private coolNode(n: CrystalNode, seconds = 8) {
+        this.nodeCooldown.set(n.id, this.time + seconds);
+    }
+
+    private nodeReady(n: CrystalNode) {
+        const until = this.nodeCooldown.get(n.id);
+        return until === undefined || until <= this.time;
+    }
+
     pickHarvestNode(u: Unit): CrystalNode | null {
         let best: CrystalNode | null = null;
         let bestScore = Infinity;
         for (const n of this.terrain.nodes) {
             if (n.amount <= 0) continue;
             if (this.buildingAt(n.tx, n.ty)) continue;
+            if (!this.nodeReady(n)) continue;
             let load = 0;
             for (const o of this.units) {
                 if (o !== u && !o.dead && o.isHarvester && o.mineNode === n) load++;
@@ -1032,10 +1124,24 @@ export class Game {
             // ore buried under a structure can never be mined: skip it so a
             // harvester never parks against a wall forever
             if (this.buildingAt(n.tx, n.ty)) continue;
+            if (!this.nodeReady(n)) continue;
             const d = dist(x, y, n.x, n.y);
             if (d < bd) { bd = d; best = n; }
         }
         return best;
+    }
+
+    /**
+     * Where a truck should park to unload. Approaching from its own side (instead
+     * of a fixed slot south of the building) stops two trucks from queueing on
+     * the exact same point and shoving each other while unloading.
+     */
+    private dockPoint(u: Unit, drop: Building) {
+        const dx = u.x - drop.x;
+        const dy = u.y - drop.y;
+        const d = Math.hypot(dx, dy) || 1;
+        const r = drop.radius + 20;
+        return { x: drop.x + (dx / d) * r, y: drop.y + (dy / d) * r };
     }
 
     nearestDropoff(p: PlayerState, x: number, y: number): Building | null {
@@ -1656,7 +1762,17 @@ export class Game {
                 u.mineNode = node;
                 if (!node) { u.order = { k: 'idle' }; return; }
                 const pth = this.finder.find(u.x, u.y, node.x, node.y, { radius: u.radius });
-                u.path = pth || [{ x: node.x, y: node.y }];
+                if (!pth || pth.length === 0) {
+                    // No route: cool the field and look for another one. Falling
+                    // back to "walk straight at it" is what used to drive trucks
+                    // into the refinery wall over and over.
+                    this.coolNode(node, 10);
+                    order.node = null;
+                    order.timer = 0.4;
+                    u.order = { k: 'harvest', node: null, phase: 'seek', timer: 0.4 };
+                    return;
+                }
+                u.path = pth;
                 order.phase = 'toMine';
                 order.timer = 0;
                 break;
@@ -1671,8 +1787,16 @@ export class Game {
                     u.stop();
                     break;
                 }
-                if (u.path.length > 0) u.moveStep(dt, 1);
-                else order.phase = 'seek';
+                if (u.path.length > 0) {
+                    u.moveStep(dt, 1);
+                } else if (u.blockedNow) {
+                    // physically wedged on the way in: pick another field
+                    this.coolNode(node, 8);
+                    order.node = null;
+                    order.phase = 'seek';
+                } else {
+                    order.phase = 'seek';
+                }
                 break;
             }
             case 'mining': {
@@ -1688,8 +1812,9 @@ export class Game {
                 if (order.timer <= 0 || u.cargo >= cargo || !node || node.amount <= 0) {
                     const drop = this.nearestDropoff(p, u.x, u.y);
                     if (drop) {
-                        const pth = this.finder.find(u.x, u.y, drop.x, drop.y + drop.radius + 14, { radius: u.radius });
-                        u.path = pth || [{ x: drop.x, y: drop.y + drop.radius + 14 }];
+                        const dock = this.dockPoint(u, drop);
+                        const pth = this.finder.find(u.x, u.y, dock.x, dock.y, { radius: u.radius });
+                        u.path = pth || [];
                         order.phase = 'toBase';
                     } else {
                         order.phase = 'seek';
@@ -1708,7 +1833,8 @@ export class Game {
                 }
                 if (u.path.length > 0) u.moveStep(dt, 1);
                 else {
-                    const pth = this.finder.find(u.x, u.y, drop.x, drop.y + drop.radius + 14, { radius: u.radius });
+                    const dock = this.dockPoint(u, drop);
+                    const pth = this.finder.find(u.x, u.y, dock.x, dock.y, { radius: u.radius });
                     u.path = pth || [];
                     if (u.path.length === 0) order.phase = 'seek';
                 }
@@ -2046,6 +2172,29 @@ export class Game {
 
     private applySeparation(dt: number) {
         const list = this.units;
+        for (const u of list) u.pushAcc = 0;
+        /**
+         * Apply a push only if the hull still fits there (axis-decomposed).
+         *
+         * Separation used to write x/y directly, so a crowded column shoved its
+         * neighbours into the refinery wall; the world-collision pass then had
+         * to drag them back out, which looked like units twitching through
+         * buildings. Clamping the push at the wall keeps everything outside
+         * solid geometry in the first place.
+         */
+        const push = (u: Unit, dx: number, dy: number) => {
+            if (dx === 0 && dy === 0) return;
+            // Budget per unit per frame: several neighbours can push the same
+            // hull, and resolving the sum in one tick reads as a teleport.
+            const len = Math.hypot(dx, dy);
+            const room = Math.max(0, 40 * dt - u.pushAcc);
+            if (room <= 0.001) return;
+            if (len > room) { dx = (dx / len) * room; dy = (dy / len) * room; }
+            u.pushAcc += Math.min(len, room);
+            if (u.canOccupy(u.x + dx, u.y + dy)) { u.x += dx; u.y += dy; return; }
+            if (u.canOccupy(u.x + dx, u.y)) { u.x += dx; return; }
+            if (u.canOccupy(u.x, u.y + dy)) { u.y += dy; }
+        };
         for (const a of list) {
             if (a.dead || a.isAir) continue;
             this.grid.query(a.x, a.y, a.radius + 36, this.tmp);
@@ -2081,49 +2230,39 @@ export class Game {
                     // b is parked: step it out of a's lane, a barely deviates
                     const side = (b.id & 1) ? 1 : -1;
                     const s2 = Math.min(overlap, 9);
-                    b.x += -ny * side * s2;
-                    b.y += nx * side * s2;
-                    a.x -= nx * overlap * 0.18;
-                    a.y -= ny * overlap * 0.18;
+                    push(b, -ny * side * s2, nx * side * s2);
+                    push(a, -nx * overlap * 0.18, -ny * overlap * 0.18);
                 } else if (bMove && !aMove) {
                     const side = (a.id & 1) ? 1 : -1;
                     const s2 = Math.min(overlap, 9);
-                    a.x += -ny * side * s2;
-                    a.y += nx * side * s2;
-                    b.x -= nx * overlap * 0.18;
-                    b.y -= ny * overlap * 0.18;
+                    push(a, -ny * side * s2, nx * side * s2);
+                    push(b, -nx * overlap * 0.18, -ny * overlap * 0.18);
                 } else if (aMove && bMove) {
                     // head-on traffic: give them a sideways bias so they slide past
                     const closing = (a.vx - b.vx) * nx + (a.vy - b.vy) * ny;
                     if (closing > 8) {
                         const side = a.id < b.id ? 1 : -1;
                         const s2 = Math.max(5, Math.min(overlap * 0.8, 10));
-                        a.x += -ny * side * s2;
-                        a.y += nx * side * s2;
-                        b.x += ny * side * s2;
-                        b.y += -nx * side * s2;
+                        push(a, -ny * side * s2, nx * side * s2);
+                        push(b, ny * side * s2, -nx * side * s2);
                     }
                     // both driving: split the overlap evenly, no mass weighting
                     const half = overlap * 0.5;
-                    a.x -= nx * half;
-                    a.y -= ny * half;
-                    b.x += nx * half;
-                    b.y += ny * half;
+                    push(a, -nx * half, -ny * half);
+                    push(b, nx * half, ny * half);
                 } else {
                     // both idle: separate very slowly. Snapping them apart makes
                     // parked formations jitter, but leaving them stacked forever
                     // is worse (spawn points can overlap).
                     const slow = overlap * 0.08;
-                    a.x -= nx * slow;
-                    a.y -= ny * slow;
-                    b.x += nx * slow;
-                    b.y += ny * slow;
+                    push(a, -nx * slow, -ny * slow);
+                    push(b, nx * slow, ny * slow);
                 }
             }
         }
         for (const u of list) {
             if (u.dead || u.isAir) continue;
-            this.resolveWorldCollision(u);
+            this.resolveWorldCollision(u, dt);
             u.x = clamp(u.x, -HALF + 12, HALF - 12);
             u.y = clamp(u.y, -HALF + 12, HALF - 12);
         }
@@ -2143,27 +2282,50 @@ export class Game {
     }
 
     /** push a unit out of a solid tile or a building footprint */
-    private resolveWorldCollision(u: Unit) {
+    /**
+     * Safety net for a hull that is *already* inside solid ground (spawned on top
+     * of a structure, or shoved there by separation).
+     *
+     * The old version snapped the unit to a free cell centre up to 3 tiles away,
+     * which is what made a harvester look like it "kept resetting" at match
+     * start: it walked into the corner of the refinery, got snapped back a tile,
+     * walked in again, forever. Now it walks out under its own power at a capped
+     * speed, so the motion reads as shrugging off a wall.
+     */
+    private resolveWorldCollision(u: Unit, dt: number) {
+        if (u.isAir) return;
+        if (!this.worldBlockedAt(u.x, u.y, u.radius)) {
+            u.blockedNow = false;
+            return;
+        }
+        u.blockedNow = true;
+        if ((this as any).dbgOn) {
+            ((this as any).dbgResolve ||= []).push({
+                t: +this.time.toFixed(1), id: u.id, k: u.order.k, ph: (u.order as any).phase,
+                x: +u.x.toFixed(1), y: +u.y.toFixed(1), r: u.radius,
+            });
+        }
         const tx = Math.floor((u.x + HALF) / TILE);
         const ty = Math.floor((u.y + HALF) / TILE);
-        if (!this.isBlocked(tx, ty)) return;
-        u.blockedNow = true;
-        for (let r = 1; r <= 3; r++) {
-            for (let a = 0; a < 8; a++) {
-                const ang = (a / 8) * Math.PI * 2;
-                const cx = tx + Math.cos(ang) * r;
-                const cy = ty + Math.sin(ang) * r;
-                const ntx = Math.round(cx);
-                const nty = Math.round(cy);
-                if (this.isBlocked(ntx, nty)) continue;
-                u.x = ntx * TILE + TILE / 2 - HALF;
-                u.y = nty * TILE + TILE / 2 - HALF;
-                return;
-            }
+        const spot = this.nearestStandable(tx, ty, u.radius, 3);
+        if (!spot) {
+            u.x = u.prevX;
+            u.y = u.prevY;
+            return;
         }
-        // no room nearby: rewind to the last valid spot
-        u.x = u.prevX;
-        u.y = u.prevY;
+        const dx = spot.x - u.x;
+        const dy = spot.y - u.y;
+        const d = Math.hypot(dx, dy);
+        if (d < 0.6) {
+            u.x = spot.x;
+            u.y = spot.y;
+            return;
+        }
+        const step = Math.min(d, 110 * dt);
+        u.x += (dx / d) * step;
+        u.y += (dy / d) * step;
+        // the current path starts inside a wall; ask for a fresh one soon
+        if (u.path.length > 0 && u.repath <= 0) u.repath = 0.3;
     }
 
     /* ------------------------------------------------------------ */

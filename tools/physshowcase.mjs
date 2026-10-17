@@ -54,7 +54,8 @@ const staged = await page.evaluate(() => {
         }
     }
     lane = lane || { tx: 28, ty: 28 };
-    const W = (tx, ty) => ({ x: tx * 32 + 16 - 1024, y: ty * 32 + 16 - 1024 });
+    const { TILE, HALF } = window.__riftsandConst;
+    const W = (tx, ty) => ({ x: tx * TILE + TILE / 2 - HALF, y: ty * TILE + TILE / 2 - HALF });
     const base = W(lane.tx, lane.ty);
 
     const veh = g.availableUnitsFor(h, 'vehicle');

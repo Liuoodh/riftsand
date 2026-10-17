@@ -97,7 +97,7 @@ const stuck = await page.evaluate(async () => {
     const g = window.__riftsandGame;
     g.speed = 2;
     g.aiEnabled = false;
-    const TILE = 32, HALF = 1024;
+    const { TILE, HALF, MAP_TILES: MT } = window.__riftsandConst;
     const w = (tx, ty) => ({ x: tx * TILE + 16 - HALF, y: ty * TILE + 16 - HALF });
 
     // build a solid rock ring around a patch of sand
@@ -106,7 +106,7 @@ const stuck = await page.evaluate(async () => {
         for (let x = cx - R - 1; x <= cx + R + 1; x++) {
             if (x < 0 || y < 0 || x >= 64 || y >= 64) continue;
             const onRing = Math.abs(x - cx) === R || Math.abs(y - cy) === R;
-            const i = y * 64 + x;
+            const i = y * MT + x;
             if (onRing) { g.terrain.kind[i] = 2; g.terrain.solid[i] = 1; }
             else { g.terrain.kind[i] = 0; g.terrain.solid[i] = 0; }
         }
@@ -144,7 +144,7 @@ check('放弃后不再保留路径', stuck.pathLen === 0);
 const reachable = await page.evaluate(async () => {
     const g = window.__riftsandGame;
     g.speed = 6;
-    const TILE = 32, HALF = 1024;
+    const { TILE, HALF, MAP_TILES: MT } = window.__riftsandConst;
     const w = (tx, ty) => ({ x: tx * TILE + 16 - HALF, y: ty * TILE + 16 - HALF });
     const core = g.buildings.find((b) => b.owner === 0 && b.def.isCore);
     const bx = core ? core.tx : 12, by = core ? core.ty : 32;
@@ -152,7 +152,7 @@ const reachable = await page.evaluate(async () => {
     const sx = Math.min(60, bx + 6);
     const s = w(sx, Math.min(60, by + 2));
     const u = g.spawnUnit(0, window.__riftsandDefs.UNITS.rampart, s.x, s.y);
-    const goal = w(Math.min(61, sx + 4), Math.min(60, by + 2));
+    const goal = w(Math.min(MT - 3, sx + 4), Math.min(MT - 4, by + 2));
     g.applyOrder(u, { k: 'move', x: goal.x, y: goal.y });
     const t0 = g.time;
     while (g.time - t0 < 20) {

@@ -251,15 +251,17 @@ export class TerrainMap {
         // NOTE: the first spot used to be [12,32]; its point-mirror (51,31)
         // landed inside the eastern command core, so that side's harvester
         // could never reach its nearest ore field.
+        // positions follow the bases (which sit at x=18 / N-19), so the two
+        // sides stay point-symmetric and neither near field is walled in
         const spots: Array<[number, number, number]> = [
-            [14, 34, 5600],
-            [17, 24, 4200],
-            [17, 40, 4200],
-            [24, 32, 3800],
-            [20, 47, 3200],
-            [20, 17, 3200],
-            [31, 24, 3400],
-            [31, 40, 3400],
+            [21, 34, 5600],
+            [24, 24, 4200],
+            [24, 40, 4200],
+            [31, 32, 3800],
+            [27, 47, 3200],
+            [27, 17, 3200],
+            [38, 24, 3400],
+            [38, 40, 3400],
         ];
         this.nodes = [];
         let nid = 1;

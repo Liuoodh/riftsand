@@ -46,7 +46,7 @@ const out = await page.evaluate(() => {
     const g = app.game;
     const h = g.human;
     const res = {};
-    const TILE = 32, HALF = 1024;
+    const { TILE, HALF, MAP_TILES: MT } = window.__riftsandConst;
     const world = (tx, ty) => ({ x: tx * TILE + 16 - HALF, y: ty * TILE + 16 - HALF });
 
     const step = (seconds) => { const n = Math.round(seconds / 0.05); for (let i = 0; i < n; i++) g.update(0.05); };
@@ -55,20 +55,20 @@ const out = await page.evaluate(() => {
             for (let dy = -r; dy <= r; dy++) {
                 for (let dx = -r; dx <= r; dx++) {
                     const tx = fromX + dx, ty = fromY + dy;
-                    if (tx < 2 || ty < 2 || tx > 61 || ty > 61) continue;
-                    if (g.terrain.kind[ty * 64 + tx] === kind && !g.isBlocked(tx, ty)) return { tx, ty };
+                    if (tx < 2 || ty < 2 || tx >= MT - 2 || ty >= MT - 2) continue;
+                    if (g.terrain.kind[ty * MT + tx] === kind && !g.isBlocked(tx, ty)) return { tx, ty };
                 }
             }
         }
         return null;
     };
     const findOpen = () => {
-        for (let ty = 6; ty < 58; ty++) {
-            for (let tx = 6; tx < 58; tx++) {
+        for (let ty = 6; ty < MT - 8; ty++) {
+            for (let tx = 6; tx < MT - 14; tx++) {
                 let ok = true;
                 for (let y = ty; y < ty + 6 && ok; y++) for (let x = tx; x < tx + 10; x++) {
                     // any driveable ground works; rocks are what fragments the map
-                    if (g.isBlocked(x, y) || g.terrain.kind[y * 64 + x] === 2) { ok = false; break; }
+                    if (g.isBlocked(x, y) || g.terrain.kind[y * MT + x] === 2) { ok = false; break; }
                 }
                 if (ok) return { tx, ty };
             }

@@ -57,7 +57,12 @@ function evictIfNeeded() {
 
 /**
  * Rasterise a Pen drawing into a SpriteFrame.
- * Rows are flipped because canvas 2D is top-down and GL textures are bottom-up.
+ *
+ * NOTE on orientation: CanvasPen already converts the art's y-up coordinates
+ * into the canvas' y-down space (`py(y) = oy - y`), so the bitmap that comes out
+ * of getImageData is ALREADY upright — row 0 is the top of the sprite, which is
+ * what SpriteFrame expects. An extra row flip here inverted every unit (infantry
+ * walked on their heads), which is exactly the bug it used to look like it fixed.
  */
 export function bakeFrame(
     w: number, h: number,
@@ -81,10 +86,7 @@ export function bakeFrame(
         return null;
     }
     const out = new Uint8Array(w * h * 4);
-    const stride = w * 4;
-    for (let y = 0; y < h; y++) {
-        out.set(src.subarray(y * stride, (y + 1) * stride), (h - 1 - y) * stride);
-    }
+    out.set(src.subarray(0, w * h * 4));
     // cheap self-check used by the headless asset test
     let opaque = 0;
     for (let i = 3; i < out.length; i += 4) if (out[i] > 8) opaque++;

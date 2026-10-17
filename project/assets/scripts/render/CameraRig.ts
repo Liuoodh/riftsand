@@ -3,16 +3,17 @@
  * Supports drag-pan, pinch zoom, keyboard pan and edge clamping.
  */
 import { Node } from 'cc';
-import { clamp } from '../core/Core';
-import { PROJ_HALF_X, PROJ_HALF_Y } from '../world/Iso';
+import { clamp, MAP_TILES } from '../core/Core';
+import { ISO_HW, ISO_HH } from '../world/Iso';
 
 export class CameraRig {
     x = 0;
     y = 0;
-    zoom = 1.25;
-    targetZoom = 1.25;
-    minZoom = 0.62;
-    maxZoom = 2.1;
+    zoom = 1.55;
+    targetZoom = 1.55;
+    /** chosen so the 16:9 viewport always stays inside the 64-tile map */
+    minZoom = 1.0;
+    maxZoom = 3.0;
     /** impact shake, decays in a few frames */
     private shakeAmt = 0;
     private shakeT = 0;
@@ -104,16 +105,33 @@ export class CameraRig {
         };
     }
 
+    /**
+     * Keep the view inside the map, the way the retail engine does.
+     *
+     * The old clamp worked in projected space against the diamond's half extents
+     * and added 120/160px of slack, so panning to an edge showed the black void.
+     * Clamping in WORLD space instead — convert the camera centre back to map
+     * coordinates, then require the visible rectangle (its bounding box) to stay
+     * within 0..MAP_TILES — makes that impossible by construction.
+     */
     private clampCam() {
         this.zoom = this.targetZoom;
         const halfW = this.screenW / 2 / this.zoom;
         const halfH = this.screenH / 2 / this.zoom;
-        // the camera lives in projected (isometric) space, so clamp against the
-        // diamond's half extents rather than the cartesian map size
-        const limX = Math.max(0, PROJ_HALF_X + 120 - halfW);
-        const limY = Math.max(0, PROJ_HALF_Y + 160 - halfH);
-        this.tx = clamp(this.tx, -limX, limX);
-        this.ty = clamp(this.ty, -limY, limY);
+
+        // projected rect -> map-space half extents. `rx`/`ry` are tile units
+        // measured from the map centre, so they live in -32..32 for a 64x64 map.
+        const halfMap = MAP_TILES / 2;
+        const span = Math.min(halfMap, halfW / (2 * ISO_HW) + halfH / (2 * ISO_HH));
+
+        // camera centre in tile space
+        let rx = (this.tx / ISO_HW + this.ty / ISO_HH) / 2;
+        let ry = (this.ty / ISO_HH - this.tx / ISO_HW) / 2;
+        rx = clamp(rx, -halfMap + span, halfMap - span);
+        ry = clamp(ry, -halfMap + span, halfMap - span);
+
+        this.tx = (rx - ry) * ISO_HW;
+        this.ty = (rx + ry) * ISO_HH;
     }
 
     update(dt: number) {

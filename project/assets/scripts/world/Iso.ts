@@ -11,7 +11,7 @@
  *   screen = (xs - ys, (xs + ys) / 2)
  *   tileHeightToScreen(h) = h * 15
  */
-import { TILE } from '../core/Core';
+import { TILE, MAP_TILES } from '../core/Core';
 
 /** diamond width in px (2:1 ratio, matches the classic iso tile) */
 export const ISO_W = 56;
@@ -22,9 +22,9 @@ export const ISO_HH = ISO_H / 2;
 /** how many screen px one terrain level lifts a tile */
 export const HEIGHT_PX = 16;
 
-/** furthest reachable corner of a level-0 map (used for camera clamping) */
-export const PROJ_HALF_X = 32 * ISO_HW * 2; // rx-ry spans -64..64
-export const PROJ_HALF_Y = 32 * ISO_HH * 2;
+// projected half extents of the playfield (rx-ry spans -MAP_TILES..MAP_TILES)
+export const PROJ_HALF_X = (MAP_TILES / 2) * ISO_HW * 2;
+export const PROJ_HALF_Y = (MAP_TILES / 2) * ISO_HH * 2;
 
 export interface Proj {
     x: number;

@@ -39,11 +39,11 @@ const staging = await page.evaluate(() => {
     const app = window.cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
     const g = app.game;
     g.aiEnabled = false;
-    const TILE = 32, HALF = 1024;
+    const { TILE, HALF, MAP_TILES: MT } = window.__riftsandConst;
     const w = (tx, ty) => ({ x: tx * TILE + 16 - HALF, y: ty * TILE + 16 - HALF });
     // clear a patch
     for (let y = 26; y < 40; y++) for (let x = 26; x < 40; x++) {
-        const i = y * 64 + x;
+        const i = y * MT + x;
         g.terrain.kind[i] = 0; g.terrain.solid[i] = 0;
     }
     g.terrain.rebuildSpeed();
@@ -71,7 +71,7 @@ console.log('staged', JSON.stringify(staging));
 // aim the camera between the two groups
 await page.evaluate(() => {
     const app = window.cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
-    const TILE = 32, HALF = 1024;
+    const { TILE, HALF, MAP_TILES: MT } = window.__riftsandConst;
     const wx = 34 * TILE + 16 - HALF, wy = 33 * TILE + 16 - HALF;
     const rx = wx / TILE, ry = wy / TILE;
     app.cam.focus((rx - ry) * 28, (rx + ry) * 14, true);
@@ -84,7 +84,7 @@ await shot('u1-armour-line.png');
 await page.evaluate(() => {
     const app = window.cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
     const g = app.game;
-    const TILE = 32, HALF = 1024;
+    const { TILE, HALF, MAP_TILES: MT } = window.__riftsandConst;
     const tx = 36 * TILE + 16 - HALF, ty = 33 * TILE + 16 - HALF;
     for (const u of g.units) if (u.owner === 0 && u.def.kind === 'vehicle') g.applyOrder(u, { k: 'move', x: tx, y: ty });
 });
@@ -107,12 +107,13 @@ const lift = await page.evaluate(() => {
     const app = window.cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
     const g = app.game;
     const T = g.terrain;
+    const { TILE, HALF, MAP_TILES: MT } = window.__riftsandConst;
     let best = null;
-    for (let y = 2; y < 62; y++) for (let x = 2; x < 62; x++) {
+    for (let y = 2; y < MT - 2; y++) for (let x = 2; x < MT - 2; x++) {
         if (T.levelAt(x, y) >= 1 && T.levelAt(x, y + 1) === 0) { best = { x, y }; break; }
         if (best) break;
     }
-    return best ? { tile: best, h: T.heightAt(best.x * 32 + 16 - 1024, best.y * 32 + 16 - 1024) } : null;
+    return best ? { tile: best, h: T.heightAt(best.x * TILE + TILE / 2 - HALF, best.y * TILE + TILE / 2 - HALF) } : null;
 });
 console.log('slope probe', JSON.stringify(lift));
 

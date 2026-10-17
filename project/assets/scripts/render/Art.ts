@@ -232,7 +232,10 @@ function isoBody(
     const proj = (lx: number, ly: number, lift: number) => {
         const dx = lx * ca - ly * sa;
         const dy = lx * sa + ly * ca;
-        return { x: (dx - dy) * ISO_SX, y: (dx + dy) * ISO_SY - lift };
+        // Screen y grows upward, so a lift (roof height) must be ADDED. With the
+        // old minus sign every hull hung below the ground point it stood on, and
+        // its roof faced the floor.
+        return { x: (dx - dy) * ISO_SX, y: (dx + dy) * ISO_SY + lift };
     };
     const top = local.map(([x, y]) => proj(x, y, H));
     const bot = local.map(([x, y]) => proj(x, y, 0));
@@ -324,7 +327,10 @@ export function drawTurret(
     const heavy = def.armor === 'heavy';
     const L = heavy ? 33 : 28;
     const H = heavy ? 12 : 9.5;
-    const c = { x: 0, y: -(H + 0.6) };
+    // The roof is at +H in the same space the baked hull uses (y up). This was
+    // negative, a leftover from when the baked frame was still flipped, which
+    // parked every turret under the hull instead of on top of it.
+    const c = { x: 0, y: H - 0.5 };
     const ta = (facingDeg(turretDir8) * Math.PI) / 180;
     const tdx = Math.cos(ta), tdy = Math.sin(ta);
     const bx = (tdx - tdy) * ISO_SX;
