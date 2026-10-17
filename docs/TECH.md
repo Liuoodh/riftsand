@@ -12,8 +12,17 @@
 
 ## 2. 启动流程
 
-`main.scene` 只有 `Canvas + Camera`，不含自定义组件（避免场景内脚本 UUID 绑定问题）。
-`Boot.ts` 在模块加载时注册两个自举钩子：
+`main.scene` 只含 `Canvas + Camera + App` 三个节点，`App` 上挂着唯一自定义组件 `RiftApp`（`Boot.ts`）。
+Cocos 只有在场景中真实引用了脚本时才会把它打进构建产物，因此需要把组件的**压缩 UUID** 直接写进场景 JSON：
+
+```json
+{ "__type__": "a3634Afu59HhJ1rnkvg9ZLS" }
+```
+
+> 该值是 `Boot.ts.meta` 里 uuid 的压缩形式（`ab5f7f1f-…` → `ab5f78f0ahPY6/23VWmdHHX` 可反推验证）。
+> 脚本改名、改文件夹或重新生成 meta 都会让压缩 UUID 变化，届时需要在编辑器里重新挂载组件。
+
+`Boot.ts` 在模块加载时额外注册两个自举钩子，作为"场景组件未生效"（例如刚改名、热重载、从别的场景切入）时的兜底：
 
 ```
 director.once(EVENT_AFTER_SCENE_LAUNCH, tryBoot)   // 正常路径
@@ -100,6 +109,26 @@ node "<Cocos>/resources/app.asar.unpacked/node_modules/typescript/bin/tsc" -p ts
 ```
 
 > Windows 下若通过 Electron 宿主终端调用，需先清除 `ELECTRON_RUN_AS_NODE`，否则 `CocosCreator.exe` 会以 node 模式启动并报 `bad option`。
+> 命令行构建退出码为 `36` 属正常结束（Electron 的既有行为），以 `build/web-mobile/index.html` 是否刷新为准。
+
+### 7.1 自动回归
+
+`tools/` 下两个脚本用 puppeteer-core + 本机 Chrome headless 跑真实构建产物，无需手动点击：
+
+```bash
+# 静态检查：能否启动、开局单位/建筑数量、帧率、控制台错误、关键界面截图
+node tools/smoke.mjs
+
+# 动态检查：?auto=1 进对局并用 window.__riftsandGame 快进模拟，输出各时间点经济/兵力/胜负
+node tools/battletest.mjs
+```
+
+为此保留两个开发钩子（不会影响正常玩家）：
+
+| 钩子 | 作用 |
+| --- | --- |
+| `?auto=1` | 跳过主菜单，直接以「磐岩联合 / 标准」开局 |
+| `window.__riftsandGame` | 暴露当前 `Game` 实例，供脚本快进与读取统计 |
 
 ## 8. 已知限制
 

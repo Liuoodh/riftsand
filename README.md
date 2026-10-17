@@ -78,8 +78,22 @@
 
 ## 分支
 
-- `main`：稳定可玩版本
-- `dev-liu`：日常开发提交
+- `main`：稳定可玩版本（打 tag 的版本都从这里出）
+- `dev-liu`：日常开发提交，当前开发线（新东西先进这里，稳定后合回 `main`）
+
+```bash
+git clone git@github.com:Liuoodh/riftsand.git
+git checkout dev-liu
+```
+
+## 自动化验证
+
+```bash
+node tools/smoke.mjs       # 启动、开局、帧率、控制台错误、界面截图
+node tools/battletest.mjs  # 快进对局，输出经济/兵力/胜负曲线
+```
+
+需要本机 Chrome 与 `puppeteer-core`（脚本内已指向本地安装路径）。
 
 ## 版权
 
