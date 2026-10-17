@@ -65,6 +65,10 @@ export class Unit extends Entity {
     cargo = 0;
     repath = 0;
     stuck = 0;
+    /** consecutive failed approach attempts; resets as soon as the unit moves */
+    retry = 0;
+    /** >0 means "hold still and let the other one pass" (reference: WaitTicksTask) */
+    waitT = 0;
     /** cached "engaged" target for attack-move */
     engage: Entity | null = null;
     bob = Math.random() * Math.PI * 2;
@@ -151,6 +155,14 @@ export class Unit extends Entity {
     moveStep(dt: number, speedMul: number): boolean {
         this.prevX = this.x;
         this.prevY = this.y;
+        if (this.waitT > 0) {
+            // yielding to whoever is blocking us; do not consume path nodes
+            this.waitT -= dt;
+            this.speedCur = 0;
+            this.vx = 0;
+            this.vy = 0;
+            return this.path.length > 0;
+        }
         if (this.path.length === 0) {
             this.speedCur = Math.max(0, this.speedCur - this.accel * dt);
             this.vx = 0; this.vy = 0;

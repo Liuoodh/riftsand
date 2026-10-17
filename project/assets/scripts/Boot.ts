@@ -115,6 +115,11 @@ export class RiftApp extends Component {
             onAttackMove: () => { this.attackMovePending = this.ui.attackMoveMode; },
             onHarvest: () => this.game?.orderHarvest(null),
             onPause: () => this.pause(),
+            onSpeed: () => {
+                if (!this.game) return;
+                this.game.cycleSpeed();
+                this.ui.setSpeedLabel(this.game.speedMul);
+            },
             onResume: () => this.resume(),
             onStart: (f, d, credits, superWeapons) => this.startGame(f, d, credits, superWeapons),
             onRestart: () => this.startGame(this.faction, this.diff, this.credits, this.superWeapons),
@@ -820,9 +825,22 @@ export class RiftApp extends Component {
         if (this.ui.mode === 'game' && this.game) {
             this.checkLongPress();
             this.handleKeyboardPan(step);
-            this.game.update(step);
+
+            // Game speed scales SIMULATION time only. The step is sliced so a 4x
+            // setting cannot tunnel units through walls, and camera/HUD keep
+            // running on real time so the interface never feels sluggish.
+            const mul = this.game.speedMul;
+            let simLeft = step * mul;
+            let guard = 0;
+            const MAX_SIM_STEP = 1 / 30;
+            while (simLeft > 1e-4 && guard++ < 8) {
+                const s = Math.min(MAX_SIM_STEP, simLeft);
+                this.game.update(s);
+                simLeft -= s;
+            }
+            const animStep = step * mul;
             this.cam?.update(step);
-            this.renderer?.sync(step, this.cam!.viewBounds);
+            this.renderer?.sync(animStep, this.cam!.viewBounds);
             this.ui.refresh(step);
             this.updateGhost();
             this.updateSwGhost();

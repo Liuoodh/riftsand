@@ -43,6 +43,8 @@ export interface UIHooks {
     onAttackMove: () => void;
     onHarvest: () => void;
     onPause: () => void;
+    /** cycle the retail game-speed ladder */
+    onSpeed: () => void;
     onResume: () => void;
     onStart: (faction: Faction, diff: 'easy' | 'normal' | 'hard', credits: number, superWeapons: boolean) => void;
     onRestart: () => void;
@@ -259,6 +261,7 @@ export class UI {
     private toastT = 0;
 
     private btnPause: UIButton;
+    private btnSpeed: UIButton;
     private btnAll: UIButton;
     private btnStop: UIButton;
     private btnAttackMove: UIButton;
@@ -368,6 +371,8 @@ export class UI {
 
         this.btnPause = new UIButton(this.topBar, 84, 30, '暂停', 13, () => this.hooks.onPause());
         this.btnPause.setPosition(HW - 72, HH - 36);
+        this.btnSpeed = new UIButton(this.topBar, 74, 30, '1.0x', 13, () => this.hooks.onSpeed(), PAL.amber);
+        this.btnSpeed.setPosition(HW - 164, HH - 36);
     }
 
     /* ------------------------------------------------------------ */
@@ -1062,7 +1067,7 @@ export class UI {
     }
 
     private staticButtons(): UIButton[] {
-        return [this.btnPause, this.btnAll, this.btnZoomIn, this.btnZoomOut];
+        return [this.btnPause, this.btnSpeed, this.btnAll, this.btnZoomIn, this.btnZoomOut];
     }
 
     hitTest(x: number, y: number): boolean {
@@ -1166,6 +1171,11 @@ export class UI {
     }
 
     /* ------------------------------------------------------------ */
+    /** keep the speed chip in sync with the simulation clock */
+    setSpeedLabel(mul: number) {
+        if (this.btnSpeed) this.btnSpeed.setText(`${mul.toFixed(1)}x`);
+    }
+
     refresh(dt: number) {
         if (this.mode === 'menu' || !this.game) return;
         const g = this.game;

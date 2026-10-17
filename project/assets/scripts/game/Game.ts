@@ -14,7 +14,7 @@ import {
     DMG_TABLE, TECH_BUILDING, QUEUE_MAX, UNLOAD_TIME, MAX_CREDITS, FactionDef, FACTIONS,
     tileToWorld, dist, clamp, GROUP_COUNT, ProdCat, Stance, SuperWeaponId, SUPER_WEAPONS,
     unitCategory, BUILD_REQUIRES, VET_XP_RATIO, VET_MAX_LEVEL, CRATE_INTERVAL,
-    BUILD_RADIUS_TILES, makeRng, PROJ_PHYSICS,
+    BUILD_RADIUS_TILES, makeRng, PROJ_PHYSICS, gameSpeedMul, GAME_SPEED_MAX,
 } from '../core/Core';
 import { TerrainMap, CrystalNode } from '../world/Terrain';
 import { PathFinder } from '../world/Path';
@@ -115,6 +115,8 @@ export class Game {
     selectedBuilding: Building | null = null;
     /** structure waiting to be placed (human only) */
     placeMode: string | null = null;
+    /** retail speed slot 0..6 (2 = 1.0x); scales the whole simulation clock */
+    speed = 2;
     buildTile = { tx: 0, ty: 0 };
     /** super weapon currently being aimed by the player */
     swTargeting: SuperWeaponId | null = null;
@@ -191,6 +193,18 @@ export class Game {
     get factionDef(): FactionDef { return FACTIONS[this.human.faction]; }
     /** kept for the HUD / input layer */
     get buildMode(): string | null { return this.placeMode; }
+
+    /** simulation time multiplier for the current speed slot */
+    get speedMul() { return gameSpeedMul(this.speed); }
+
+    setSpeed(slot: number) {
+        this.speed = Math.max(0, Math.min(GAME_SPEED_MAX, Math.round(slot)));
+        this.events.onMessage?.(`游戏速度 ${this.speedMul.toFixed(1)}x`, 'info');
+    }
+
+    cycleSpeed() {
+        this.setSpeed((this.speed + 1) % (GAME_SPEED_MAX + 1));
+    }
 
     private setupBase(pid: PlayerId) {
         const p = this.players[pid];
@@ -868,21 +882,121 @@ export class Game {
         const gy = target.y + Math.sin(a) * edge;
         if (u.isAir) { u.path = [{ x: gx, y: gy }]; u.repath = 0; return; }
         const path = this.finder.find(u.x, u.y, gx, gy, { radius: u.radius });
-        u.path = path || [{ x: gx, y: gy }];
-        u.repath = 3;
+        if (path && path.length) {
+            u.path = path;
+            u.repath = 3;
+        } else {
+            const alt = this.findFreeNear(gx, gy, 96);
+            if (alt) this.repathTo(u, alt.x, alt.y);
+            else u.path = [];
+        }
+    }
+
+    /** the point this unit is currently trying to reach */
+    private orderGoal(u: Unit): { x: number; y: number } | null {
+        const o = u.order;
+        if (o.k === 'move' || o.k === 'attackmove') return { x: o.x, y: o.y };
+        if (o.k === 'harvest') return o.node ? { x: o.node.x, y: o.node.y } : null;
+        if (o.k === 'attack' && o.target && !o.target.dead) return { x: o.target.x, y: o.target.y };
+        return null;
+    }
+
+    /**
+     * Spiral outward from a point looking for ground a unit can actually stand on.
+     * Used both to salvage an unreachable order and to widen a stuck unit's goal.
+     */
+    private findFreeNear(x: number, y: number, maxR: number): { x: number; y: number } | null {
+        const T = TILE;
+        for (let r = 0; r <= maxR; r += T * 0.5) {
+            const steps = r < 1 ? 1 : Math.max(8, Math.ceil((Math.PI * 2 * r) / (T * 0.55)));
+            for (let i = 0; i < steps; i++) {
+                const a = (i / steps) * Math.PI * 2;
+                const px = x + Math.cos(a) * r;
+                const py = y + Math.sin(a) * r;
+                if (px < -HALF + 24 || py < -HALF + 24 || px > HALF - 24 || py > HALF - 24) continue;
+                const tx = Math.floor((px + HALF) / T);
+                const ty = Math.floor((py + HALF) / T);
+                if (this.terrain.isSolid(tx, ty)) continue;
+                if (this.isBlocked(tx, ty)) continue;
+                return { x: px, y: py };
+            }
+        }
+        return null;
+    }
+
+    /** recompute a path without touching the current order (retry must not drift it) */
+    private repathTo(u: Unit, x: number, y: number) {
+        if (u.isAir) {
+            u.path = [{ x, y }];
+        } else {
+            const p = this.finder.find(u.x, u.y, x, y, { radius: u.radius });
+            u.path = p && p.length ? p : [];
+        }
+        u.repath = 4;
+    }
+
+    /** the reference gives up after 5 unreachable targets; do the same */
+    private escalateStuck(u: Unit) {
+        if (u.retry > 5) {
+            this.giveUpOrder(u);
+            return;
+        }
+        if (u.retry === 1) {
+            // first response is patience: the blocker is often a friendly unit
+            u.waitT = 0.55;
+            return;
+        }
+        const goal = this.orderGoal(u);
+        if (!goal) {
+            this.giveUpOrder(u);
+            return;
+        }
+        if (u.order.k === 'harvest' && u.retry >= 3) {
+            // the field itself is walled off; try another one
+            u.order.node = null;
+            u.order.phase = 'seek';
+            u.stuck = 0;
+            return;
+        }
+        const alt = this.findFreeNear(goal.x, goal.y, 28 + u.retry * 44);
+        if (!alt) {
+            u.waitT = 0.4;
+            return;
+        }
+        this.repathTo(u, alt.x, alt.y);
+    }
+
+    private giveUpOrder(u: Unit) {
+        const wasMoving = u.order.k !== 'idle';
+        u.retry = 0;
+        u.stuck = 0;
+        u.waitT = 0;
+        u.stop();
+        u.order = { k: 'idle' };
+        if (wasMoving && u.owner === 0) this.events.onMessage?.('无法抵达目标，已取消行进', 'warn');
     }
 
     private moveUnitTo(u: Unit, x: number, y: number, keepOrder: boolean) {
         x = clamp(x, -HALF + 24, HALF - 24);
         y = clamp(y, -HALF + 24, HALF - 24);
         if (!keepOrder) u.order = { k: 'move', x, y };
+        u.retry = 0;
+        u.waitT = 0;
         if (u.isAir) {
             u.path = [{ x, y }];
-        } else {
-            const path = this.finder.find(u.x, u.y, x, y, { radius: u.radius });
-            u.path = path ? path : [{ x, y }];
+            u.repath = 4;
+            return;
         }
-        u.repath = 4;
+        const path = this.finder.find(u.x, u.y, x, y, { radius: u.radius });
+        if (path && path.length) {
+            u.path = path;
+            u.repath = 4;
+            return;
+        }
+        // unreachable: walk to the closest reachable spot instead of into a wall
+        const alt = this.findFreeNear(x, y, 160);
+        if (alt) this.repathTo(u, alt.x, alt.y);
+        else this.giveUpOrder(u);
     }
 
     private startHarvest(u: Unit, node: CrystalNode | null) {
@@ -1408,40 +1522,32 @@ export class Game {
 
             if (u.speedCap > 0 && u.path.length === 0) u.speedCap = 0;
 
-            // stuck detector: if a unit with a path has not actually moved for
-            // a while, nudge the next waypoint so it can break a deadlock
-            if (u.path.length > 0) {
+            // Stuck handling, modelled on the reference's MoveTask degradation
+            // chain: wait for the blocker, then search a wider replacement goal,
+            // then give up (MoveResult.Fail) instead of retrying forever.
+            if (u.waitT > 0) {
+                u.stuck = 0;
+            } else if (u.path.length > 0) {
                 const moved = Math.hypot(u.x - u.prevX, u.y - u.prevY);
-                u.stuck = moved < 0.8 ? u.stuck + dt : 0;
-                if (u.stuck > 1.1) {
+                if (moved >= 0.8) {
                     u.stuck = 0;
-                    if (u.order.k === 'move' || u.order.k === 'attackmove') {
-                        // try a slightly different approach to the same goal
-                        this.moveUnitTo(
-                            u,
-                            u.order.x + (Math.random() - 0.5) * 70,
-                            u.order.y + (Math.random() - 0.5) * 70,
-                            true,
-                        );
-                    } else if (u.order.k === 'harvest') {
-                        u.order.node = null;
-                        u.order.phase = 'seek';
+                    u.retry = 0;
+                } else {
+                    u.stuck += dt;
+                    const limit = 0.85 + u.retry * 0.35;
+                    if (u.stuck > limit) {
+                        u.stuck = 0;
+                        u.retry++;
+                        this.escalateStuck(u);
                     }
                 }
             } else {
                 u.stuck = 0;
             }
 
-            // stuck detection for ground units
+            // periodic re-path toward a moving attack target
             if (u.path.length > 0 && u.repath > 0) {
                 u.repath -= dt;
-                if (u.repath <= 0) {
-                    u.path.length = 0;
-                    if (u.order.k === 'move') {
-                        const p = this.finder.find(u.x, u.y, u.order.x, u.order.y, { radius: u.radius });
-                        if (p) u.path = p;
-                    }
-                }
             }
         }
     }

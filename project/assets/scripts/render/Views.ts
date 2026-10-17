@@ -320,14 +320,22 @@ export class FogView {
                         if (s2 !== st) break;
                         tx2++;
                     }
-                    const p0 = worldToProj(tx * T - H, ty * T - H, 0);
-                    const p1 = worldToProj(tx2 * T - H, ty * T - H, 0);
-                    const p2 = worldToProj(tx2 * T - H, (ty + 1) * T - H, 0);
-                    const p3 = worldToProj(tx * T - H, (ty + 1) * T - H, 0);
-                    g.moveTo(p0.x, p0.y);
-                    g.lineTo(p1.x, p1.y);
-                    g.lineTo(p2.x, p2.y);
-                    g.lineTo(p3.x, p3.y);
+                    // The union of the diamonds in a run is a HEXAGON, not a
+                    // parallelogram. Using the bounding quad left hairline gaps
+                    // along every row boundary (visible as diagonal seams).
+                    const v = (gx: number, gy: number) => worldToProj(gx * T - H, gy * T - H, 0);
+                    const q0 = v(tx, ty + 0.5);
+                    const q1 = v(tx + 0.5, ty);
+                    const q2 = v(tx2 - 0.5, ty);
+                    const q3 = v(tx2, ty + 0.5);
+                    const q4 = v(tx2 - 0.5, ty + 1);
+                    const q5 = v(tx + 0.5, ty + 1);
+                    g.moveTo(q0.x, q0.y);
+                    g.lineTo(q1.x, q1.y);
+                    g.lineTo(q2.x, q2.y);
+                    g.lineTo(q3.x, q3.y);
+                    g.lineTo(q4.x, q4.y);
+                    g.lineTo(q5.x, q5.y);
                     g.close();
                     g.fillColor = st === 2 ? dark : dim;
                     g.fill();

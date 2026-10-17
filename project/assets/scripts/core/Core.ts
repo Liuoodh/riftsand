@@ -610,3 +610,25 @@ export const PROJ_PHYSICS: Record<ProjKind, { speed: number; ballistic: boolean;
     rocket: { speed: 300, ballistic: false, homing: true, turn: 2.4, accel: 240, gravity: 0, radius: 9, falloff: 0.45 },
     bomb: { speed: 240, ballistic: true, homing: false, turn: 0, accel: 0, gravity: 620, radius: 14, falloff: 0.35 },
 };
+
+
+/* ------------------------------------------------------------------ */
+/* Game speed                                                          */
+/* ------------------------------------------------------------------ */
+/**
+ * Retail speed ladder. The simulation runs on ticks and 15 ticks/s is 1.0x, so
+ * changing the slider changes construction, movement, rate of fire and every
+ * animation at once (reference: redalert2/src/game/GameSpeed.ts:1-15).
+ */
+export const GAME_SPEED_MAX = 6;
+export const GAME_SPEED_BASE_TICKS = 15;
+
+export function gameSpeedTicks(speed: number): number {
+    const s = Math.max(0, Math.min(GAME_SPEED_MAX, Math.floor(speed)));
+    if (s === 6) return 60;
+    if (s === 5) return 45;
+    return 60 / (6 - s);
+}
+
+/** multiplier applied to simulation time; 1.0x at speed 2 */
+export const gameSpeedMul = (speed: number) => gameSpeedTicks(speed) / GAME_SPEED_BASE_TICKS;
