@@ -10,6 +10,12 @@ export type Armor = 'light' | 'heavy' | 'air' | 'building';
 export type DmgType = 'small' | 'ap' | 'explosive';
 export type ProjKind = 'bullet' | 'shell' | 'rocket' | 'bomb';
 
+/** sidebar production categories, same split as the classics */
+export type ProdCat = 'structure' | 'infantry' | 'vehicle' | 'aircraft';
+/** how a unit behaves when it is not explicitly ordered around */
+export type Stance = 'aggressive' | 'guard' | 'hold';
+export type SuperWeaponId = 'orbital' | 'aegis' | 'sandstorm' | 'mirage';
+
 export interface WeaponDef {
     dmg: number;
     type: DmgType;
@@ -18,14 +24,14 @@ export interface WeaponDef {
     splash?: number;
     proj: ProjKind;
     turret?: boolean;   // can only shoot in facing arc (visual only here)
-    antiAir?: boolean;
+    antiAir?: boolean;  // required to shoot at aircraft
 }
 
 export interface UnitDef {
     id: string;
     name: string;
     faction: Faction;
-    kind: 'infantry' | 'vehicle' | 'air' | 'harvester';
+    kind: 'infantry' | 'vehicle' | 'air' | 'harvester' | 'mcv';
     cost: number;
     time: number;
     hp: number;
@@ -33,12 +39,18 @@ export interface UnitDef {
     speed: number;      // world units / second
     sight: number;      // tiles
     radius: number;     // collision radius (world units)
-    from: string;       // producing building id
-    tech: number;       // 0 = always, 1 = needs tech building
+    from: string;       // producing building id (spawn / tech hint)
+    tech: number;       // 0 = always, 1 = needs tech building, 2/3 = higher tiers
     desc: string;
     weapon?: WeaponDef;
     cargo?: number;
     mineTime?: number;
+    /** stays hidden from enemies unless a detector is nearby */
+    cloak?: boolean;
+    /** captures enemy structures instead of shooting */
+    engineer?: boolean;
+    /** deploys into a command core */
+    mcv?: boolean;
 }
 
 export interface BuildingDef {
@@ -52,9 +64,12 @@ export interface BuildingDef {
     sight: number;      // tiles
     power: number;      // + produces, - consumes
     tech: number;
-    produces?: string[];
-    dropoff?: boolean;  // accepts harvesters
+    produces?: string[];    // legacy list, kept for flavour text
+    factory?: ProdCat;      // which sidebar queue this building unlocks
+    dropoff?: boolean;      // accepts harvesters
     isCore?: boolean;
+    detects?: boolean;      // reveals cloaked enemies
+    superWeapon?: SuperWeaponId;
     desc: string;
     weapon?: WeaponDef;
 }
@@ -110,8 +125,18 @@ export const START_CREDITS = 4200;
 export const MAX_CREDITS = 99999;
 export const HARVEST_TICK = 4.2;      // seconds to fill cargo
 export const UNLOAD_TIME = 2.2;
-export const QUEUE_MAX = 5;
+export const QUEUE_MAX = 5;           // per unit queue
 export const POWER_PENALTY_TIME = 1.7;
+
+/** veterancy: xp needed per rank = unit cost * ratio, kills grant target cost */
+export const VET_XP_RATIO = 3;
+export const VET_MAX_LEVEL = 2;
+/** seconds for a super weapon to recharge */
+export const SW_CHARGE = 170;
+/** how often a supply crate drops somewhere on the map */
+export const CRATE_INTERVAL = 52;
+/** buildings must be raised within this many tiles of an existing structure */
+export const BUILD_RADIUS_TILES = 9;
 
 /* ------------------------------------------------------------------ */
 /* Touch interface tuning (mobile-first)                               */
@@ -126,6 +151,10 @@ export const GROUP_COUNT = 5;         // control groups
 export const tileToWorld = (tx: number, ty: number) => ({ x: tx * TILE + TILE / 2 - HALF, y: ty * TILE + TILE / 2 - HALF });
 export const worldToTile = (x: number, y: number) => ({ tx: Math.floor((x + HALF) / TILE), ty: Math.floor((y + HALF) / TILE) });
 export const inMap = (tx: number, ty: number) => tx >= 0 && ty >= 0 && tx < MAP_TILES && ty < MAP_TILES;
+
+/** which sidebar tab a unit belongs to */
+export const unitCategory = (d: UnitDef): ProdCat =>
+    d.kind === 'infantry' ? 'infantry' : d.kind === 'air' ? 'aircraft' : 'vehicle';
 
 /* ------------------------------------------------------------------ */
 /* Damage matrix                                                       */
@@ -150,6 +179,9 @@ export interface FactionDef {
     style: string;
     core: string;
     harvester: string;
+    mcv: string;
+    engineer: string;
+    stealth: string;
 }
 
 export const FACTIONS: Record<Faction, FactionDef> = {
@@ -164,6 +196,9 @@ export const FACTIONS: Record<Faction, FactionDef> = {
         style: '重装 · 阵地 · 高生存',
         core: 'core',
         harvester: 'hourglass',
+        mcv: 'rig',
+        engineer: 'sapper',
+        stealth: 'veil',
     },
     DS: {
         id: 'DS',
@@ -176,6 +211,9 @@ export const FACTIONS: Record<Faction, FactionDef> = {
         style: '机动 · 游击 · 高产',
         core: 'nest',
         harvester: 'scav',
+        mcv: 'crawler',
+        engineer: 'wire',
+        stealth: 'shade',
     },
 };
 
@@ -197,8 +235,21 @@ export const UNITS: Record<string, UnitDef> = {
         id: 'breaker', name: '破岩火箭兵', faction: 'BU', kind: 'infantry',
         cost: 320, time: 8, hp: 105, armor: 'light', speed: 31, sight: 7, radius: 7,
         from: 'barracks', tech: 1,
-        weapon: { dmg: 34, type: 'ap', range: 148, cd: 2.1, proj: 'rocket' },
-        desc: '穿甲火箭，专治重型装甲。对步兵效率低下。',
+        weapon: { dmg: 34, type: 'ap', range: 148, cd: 2.1, proj: 'rocket', antiAir: true },
+        desc: '穿甲火箭，专治重型装甲，也能打下低空目标。',
+    }),
+    sapper: U({
+        id: 'sapper', name: '战地工兵', faction: 'BU', kind: 'infantry',
+        cost: 480, time: 7.5, hp: 95, armor: 'light', speed: 40, sight: 6, radius: 7,
+        from: 'barracks', tech: 0, engineer: true,
+        desc: '潜入敌方建筑将其接管，用后即撤。对己方建筑使用可紧急抢修。',
+    }),
+    veil: U({
+        id: 'veil', name: '帷幕潜行者', faction: 'BU', kind: 'infantry',
+        cost: 420, time: 8, hp: 100, armor: 'light', speed: 40, sight: 6, radius: 7,
+        from: 'barracks', tech: 2, cloak: true,
+        weapon: { dmg: 24, type: 'small', range: 104, cd: 0.95, proj: 'bullet' },
+        desc: '光学迷彩步兵，开火前几乎无法被发现。需要探测器或警戒塔才能反制。',
     }),
     anvil: U({
         id: 'anvil', name: '铁砧装甲车', faction: 'BU', kind: 'vehicle',
@@ -225,8 +276,8 @@ export const UNITS: Record<string, UnitDef> = {
         id: 'warden', name: '天穹无人机', faction: 'BU', kind: 'air',
         cost: 700, time: 12, hp: 240, armor: 'air', speed: 92, sight: 10, radius: 12,
         from: 'airpad', tech: 2,
-        weapon: { dmg: 20, type: 'small', range: 155, cd: 1.0, proj: 'bullet' },
-        desc: '空中侦察与对地骚扰，只有防空单位能威胁到它。',
+        weapon: { dmg: 20, type: 'small', range: 155, cd: 1.0, proj: 'bullet', antiAir: true },
+        desc: '空中侦察与对地骚扰，也能拦截敌方飞行器。',
     }),
     hammer: U({
         id: 'hammer', name: '重锤轰炸机', faction: 'BU', kind: 'air',
@@ -241,6 +292,12 @@ export const UNITS: Record<string, UnitDef> = {
         from: 'foundry', tech: 0, cargo: 300, mineTime: HARVEST_TICK,
         desc: '前往晶砂矿脉采集，送回淘洗站换取晶体。',
     }),
+    rig: U({
+        id: 'rig', name: '磐石基地车', faction: 'BU', kind: 'mcv',
+        cost: 3000, time: 24, hp: 900, armor: 'heavy', speed: 36, sight: 8, radius: 15,
+        from: 'foundry', tech: 1, mcv: true,
+        desc: '移动的指挥中枢。抵达新矿区后部署，建立前进基地。',
+    }),
 
     /* ---------------- DUNE SYNDICATE ---------------- */
     sandfly: U({
@@ -254,8 +311,21 @@ export const UNITS: Record<string, UnitDef> = {
         id: 'stinger', name: '刺针火箭兵', faction: 'DS', kind: 'infantry',
         cost: 280, time: 7, hp: 88, armor: 'light', speed: 37, sight: 7, radius: 7,
         from: 'tent', tech: 1,
-        weapon: { dmg: 30, type: 'ap', range: 156, cd: 1.9, proj: 'rocket' },
-        desc: '轻便的反装甲火力，机动性优于磐岩的火箭兵。',
+        weapon: { dmg: 30, type: 'ap', range: 156, cd: 1.9, proj: 'rocket', antiAir: true },
+        desc: '轻便的反装甲火力，也能对空射击。',
+    }),
+    wire: U({
+        id: 'wire', name: '拆解师', faction: 'DS', kind: 'infantry',
+        cost: 420, time: 6.5, hp: 85, armor: 'light', speed: 44, sight: 6, radius: 7,
+        from: 'tent', tech: 0, engineer: true,
+        desc: '擅长撬锁与接线，能把敌方建筑整套接管。',
+    }),
+    shade: U({
+        id: 'shade', name: '沙影', faction: 'DS', kind: 'infantry',
+        cost: 380, time: 7, hp: 85, armor: 'light', speed: 46, sight: 6, radius: 7,
+        from: 'tent', tech: 2, cloak: true,
+        weapon: { dmg: 20, type: 'small', range: 96, cd: 0.8, proj: 'bullet' },
+        desc: '沙蜥的潜行刺客，靠斗篷贴近后排，开火后才会暴露。',
     }),
     dart: U({
         id: 'dart', name: '疾行悬浮摩托', faction: 'DS', kind: 'vehicle',
@@ -282,7 +352,7 @@ export const UNITS: Record<string, UnitDef> = {
         id: 'gnat', name: '蚊式侦察机', faction: 'DS', kind: 'air',
         cost: 620, time: 10, hp: 190, armor: 'air', speed: 104, sight: 11, radius: 11,
         from: 'strip', tech: 2,
-        weapon: { dmg: 16, type: 'small', range: 140, cd: 0.85, proj: 'bullet' },
+        weapon: { dmg: 16, type: 'small', range: 140, cd: 0.85, proj: 'bullet', antiAir: true },
         desc: '视野极佳的空中游击单位，也是最好的侦察手段。',
     }),
     shrike: U({
@@ -298,6 +368,12 @@ export const UNITS: Record<string, UnitDef> = {
         from: 'workshop', tech: 0, cargo: 260, mineTime: HARVEST_TICK * 0.9,
         desc: '跑得更快的采集车，单趟收益略低但循环更快。',
     }),
+    crawler: U({
+        id: 'crawler', name: '迁徙基地车', faction: 'DS', kind: 'mcv',
+        cost: 2800, time: 22, hp: 820, armor: 'heavy', speed: 42, sight: 8, radius: 14,
+        from: 'workshop', tech: 1, mcv: true,
+        desc: '沙蜥的移动母巢。部署后在新据点展开整套指挥设施。',
+    }),
 };
 
 /* ------------------------------------------------------------------ */
@@ -307,13 +383,13 @@ export const BUILDINGS: Record<string, BuildingDef> = {
     /* ---------------- BASTION UNION ---------------- */
     core: {
         id: 'core', name: '指挥核心', faction: 'BU', cost: 0, time: 0, hp: 3200, size: 4,
-        sight: 9, power: 30, tech: 0, produces: ['hourglass'], isCore: true,
-        desc: '磐岩联合的指挥中枢与采集车生产点。被摧毁即战败。',
+        sight: 9, power: 30, tech: 0, produces: ['hourglass'], isCore: true, factory: 'structure',
+        desc: '磐岩联合的指挥中枢与建造中心。被摧毁即战败。',
     },
     furnace: {
         id: 'furnace', name: '熔炉电站', faction: 'BU', cost: 600, time: 11, hp: 820, size: 2,
         sight: 5, power: 70, tech: 0,
-        desc: '为基地供能。断电会让生产变慢、炮塔迟钝。',
+        desc: '为基地供能。断电会让生产停滞、雷达与超级武器离线。',
     },
     sluice: {
         id: 'sluice', name: '淘洗站', faction: 'BU', cost: 1750, time: 19, hp: 1050, size: 3,
@@ -322,36 +398,46 @@ export const BUILDINGS: Record<string, BuildingDef> = {
     },
     barracks: {
         id: 'barracks', name: '兵营', faction: 'BU', cost: 500, time: 11, hp: 900, size: 2,
-        sight: 6, power: -10, tech: 0, produces: ['pebble', 'breaker'],
+        sight: 6, power: -10, tech: 0, produces: ['pebble', 'breaker'], factory: 'infantry',
         desc: '训练步兵单位。',
     },
     foundry: {
         id: 'foundry', name: '战车库', faction: 'BU', cost: 1350, time: 20, hp: 1300, size: 3,
-        sight: 6, power: -25, tech: 0, produces: ['anvil', 'rampart', 'mortar'],
-        desc: '生产装甲车辆与采集车。',
+        sight: 6, power: -25, tech: 0, produces: ['anvil', 'rampart', 'mortar'], factory: 'vehicle',
+        desc: '生产装甲车辆、采集车与基地车。',
     },
     airpad: {
         id: 'airpad', name: '塔台', faction: 'BU', cost: 1550, time: 21, hp: 1000, size: 3,
-        sight: 7, power: -25, tech: 1, produces: ['warden', 'hammer'],
+        sight: 7, power: -25, tech: 1, produces: ['warden', 'hammer'], factory: 'aircraft',
         desc: '起降空中单位。需要智库提供航电支持。',
     },
     turret: {
         id: 'turret', name: '棱堡炮塔', faction: 'BU', cost: 700, time: 13, hp: 950, size: 1,
-        sight: 8, power: -15, tech: 1,
-        weapon: { dmg: 46, type: 'ap', range: 210, cd: 1.6, proj: 'shell' },
-        desc: '固定防御炮塔，对地重火力。',
+        sight: 9, power: -15, tech: 1, detects: true,
+        weapon: { dmg: 46, type: 'ap', range: 210, cd: 1.6, proj: 'shell', antiAir: true },
+        desc: '固定防御炮塔，对地与对空兼备，同时能识破伪装。',
     },
     archive: {
         id: 'archive', name: '智库', faction: 'BU', cost: 1800, time: 24, hp: 1150, size: 3,
-        sight: 6, power: -30, tech: 0,
-        desc: '解锁二级与三级科技（重炮、空军、高级装甲）。',
+        sight: 8, power: -30, tech: 0, detects: true,
+        desc: '解锁二级与三级科技（重炮、空军、高级装甲、超级武器）。',
+    },
+    orbital: {
+        id: 'orbital', name: '天基阵列', faction: 'BU', cost: 2600, time: 26, hp: 1200, size: 3,
+        sight: 6, power: -80, tech: 3, superWeapon: 'orbital',
+        desc: '超级武器：轨道打击。充能完成后可对任意地点投射天基火力。',
+    },
+    aegis: {
+        id: 'aegis', name: '力场锚', faction: 'BU', cost: 2000, time: 22, hp: 1000, size: 2,
+        sight: 6, power: -55, tech: 3, superWeapon: 'aegis',
+        desc: '超级武器：力场护盾。短时间内让范围内的己方单位免疫伤害。',
     },
 
     /* ---------------- DUNE SYNDICATE ---------------- */
     nest: {
         id: 'nest', name: '母巢', faction: 'DS', cost: 0, time: 0, hp: 2800, size: 4,
-        sight: 9, power: 30, tech: 0, produces: ['scav'], isCore: true,
-        desc: '沙蜥商团的移动中枢与采集车生产点。被摧毁即战败。',
+        sight: 9, power: 30, tech: 0, produces: ['scav'], isCore: true, factory: 'structure',
+        desc: '沙蜥商团的指挥中枢与建造中心。被摧毁即战败。',
     },
     sunwell: {
         id: 'sunwell', name: '日光井', faction: 'DS', cost: 500, time: 9.5, hp: 700, size: 2,
@@ -365,29 +451,39 @@ export const BUILDINGS: Record<string, BuildingDef> = {
     },
     tent: {
         id: 'tent', name: '营帐', faction: 'DS', cost: 420, time: 9, hp: 820, size: 2,
-        sight: 6, power: -10, tech: 0, produces: ['sandfly', 'stinger'],
-        desc: '训练民兵与火箭兵。',
+        sight: 6, power: -10, tech: 0, produces: ['sandfly', 'stinger'], factory: 'infantry',
+        desc: '训练民兵、火箭兵与拆解师。',
     },
     workshop: {
         id: 'workshop', name: '改装厂', faction: 'DS', cost: 1150, time: 18, hp: 1120, size: 3,
-        sight: 6, power: -20, tech: 0, produces: ['dart', 'lizard', 'squall'],
-        desc: '拼装各类沙海载具与采集车。',
+        sight: 6, power: -20, tech: 0, produces: ['dart', 'lizard', 'squall'], factory: 'vehicle',
+        desc: '拼装各类沙海载具、采集车与基地车。',
     },
     strip: {
         id: 'strip', name: '起降坪', faction: 'DS', cost: 1450, time: 19, hp: 900, size: 3,
-        sight: 7, power: -25, tech: 1, produces: ['gnat', 'shrike'],
+        sight: 7, power: -25, tech: 1, produces: ['gnat', 'shrike'], factory: 'aircraft',
         desc: '简易跑道，用于起降轻型飞行器。',
     },
     spike: {
         id: 'spike', name: '棘刺塔', faction: 'DS', cost: 600, time: 11, hp: 780, size: 1,
-        sight: 8, power: -12, tech: 1,
-        weapon: { dmg: 22, type: 'small', range: 200, cd: 0.9, proj: 'bullet' },
-        desc: '速射防御塔，反步兵效率高。',
+        sight: 9, power: -12, tech: 1, detects: true,
+        weapon: { dmg: 22, type: 'small', range: 200, cd: 0.9, proj: 'bullet', antiAir: true },
+        desc: '速射防御塔，反步兵与防空效率高，可识破伪装。',
     },
     vault: {
         id: 'vault', name: '密档室', faction: 'DS', cost: 1600, time: 22, hp: 1000, size: 3,
-        sight: 6, power: -25, tech: 0,
-        desc: '解锁二级与三级科技（远程火力、空军、高级载具）。',
+        sight: 8, power: -25, tech: 0, detects: true,
+        desc: '解锁二级与三级科技（远程火力、空军、高级载具、超级武器）。',
+    },
+    storm: {
+        id: 'storm', name: '风暴之眼', faction: 'DS', cost: 2500, time: 25, hp: 1150, size: 3,
+        sight: 6, power: -80, tech: 3, superWeapon: 'sandstorm',
+        desc: '超级武器：沙暴领域。在目标区域召唤持续风沙，持续杀伤并减速敌军。',
+    },
+    mirage: {
+        id: 'mirage', name: '蜃楼塔', faction: 'DS', cost: 1900, time: 21, hp: 950, size: 2,
+        sight: 6, power: -55, tech: 3, superWeapon: 'mirage',
+        desc: '超级武器：蜃楼帷幕。短时间内让范围内己方部队全部隐身。',
     },
 };
 
@@ -395,6 +491,55 @@ export const BUILDINGS: Record<string, BuildingDef> = {
 /* Tech mapping: which building grants which tech level                */
 /* ------------------------------------------------------------------ */
 export const TECH_BUILDING: Record<Faction, string> = { BU: 'archive', DS: 'vault' };
+
+/** build-order prerequisite chain (each entry needs the listed structure) */
+export const BUILD_REQUIRES: Record<string, string> = {
+    furnace: 'core', sluice: 'furnace', barracks: 'furnace', foundry: 'barracks',
+    airpad: 'archive', turret: 'barracks', archive: 'foundry',
+    orbital: 'archive', aegis: 'archive',
+    sunwell: 'nest', market: 'sunwell', tent: 'sunwell', workshop: 'tent',
+    strip: 'vault', spike: 'tent', vault: 'workshop',
+    storm: 'vault', mirage: 'vault',
+};
+
+/* ------------------------------------------------------------------ */
+/* Super weapon definitions                                            */
+/* ------------------------------------------------------------------ */
+export interface SuperWeaponDef {
+    id: SuperWeaponId;
+    name: string;
+    short: string;
+    faction: Faction;
+    /** 'strike' hits a point, 'field' creates an area buff/debuff */
+    kind: 'strike' | 'field';
+    radius: number;
+    charge: number;
+    color: string;
+    desc: string;
+}
+
+export const SUPER_WEAPONS: Record<SuperWeaponId, SuperWeaponDef> = {
+    orbital: {
+        id: 'orbital', name: '轨道打击', short: '轨道', faction: 'BU', kind: 'strike',
+        radius: 118, charge: SW_CHARGE, color: PAL.cyan,
+        desc: '1.4 秒后一束天基火力落下，对范围内所有目标造成巨额伤害。',
+    },
+    aegis: {
+        id: 'aegis', name: '力场护盾', short: '力场', faction: 'BU', kind: 'field',
+        radius: 150, charge: SW_CHARGE, color: PAL.amber,
+        desc: '20 秒内范围内己方单位免疫一切伤害。',
+    },
+    sandstorm: {
+        id: 'sandstorm', name: '沙暴领域', short: '沙暴', faction: 'DS', kind: 'field',
+        radius: 160, charge: SW_CHARGE, color: PAL.violet,
+        desc: '12 秒的风沙，持续杀伤并减速范围内的敌军。',
+    },
+    mirage: {
+        id: 'mirage', name: '蜃楼帷幕', short: '蜃楼', faction: 'DS', kind: 'field',
+        radius: 160, charge: SW_CHARGE, color: PAL.green,
+        desc: '20 秒内范围内己方部队全部隐身，开火也不会暴露。',
+    },
+};
 
 /* ------------------------------------------------------------------ */
 /* Small math helpers                                                  */

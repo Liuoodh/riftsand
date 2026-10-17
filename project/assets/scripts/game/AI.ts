@@ -1,22 +1,28 @@
 /**
  * Skirmish AI — a build-order driven opponent.
- * It plays by the same rules as the player (no resource cheats) but gets a
- * sharper build order and faster decision ticks on higher difficulties.
+ * It plays by the same rules as the player: it uses the same four production
+ * queues, pays the same gradual build cost, and its structures wait in the
+ * ready slot just like the player's. Difficulty only changes pacing and
+ * aggression, never income.
  */
-import { BUILDINGS, UNITS, TILE, HALF, dist } from '../core/Core';
+import {
+    BUILDINGS, UNITS, TILE, HALF, dist, SUPER_WEAPONS,
+} from '../core/Core';
 import { Building, Unit, Entity } from './Entities';
 import type { Game, Difficulty, PlayerState } from './Game';
 
-interface BuildStep { id: string; at?: 'base' | 'front'; }
+interface BuildStep { id: string; }
 
 export class AIController {
     private tick = 0;
-    private buildCd = 3;
+    private buildCd = 2;
     private waveTimer = 0;
     private step = 0;
     private order: BuildStep[] = [];
-    private army: Unit[] = [];
     private lastAttack = -999;
+    private expansionTarget: { x: number; y: number } | null = null;
+    private expansionSent = false;
+    private lastSwCast = -999;
 
     constructor(private g: Game, private pid: number, private diff: Difficulty) {
         const p = this.g.players[this.pid];
@@ -24,155 +30,250 @@ export class AIController {
         this.order = bu
             ? [
                 { id: 'furnace' }, { id: 'barracks' }, { id: 'foundry' },
-                { id: 'furnace' }, { id: 'sluice' }, { id: 'archive' },
+                { id: 'sluice' }, { id: 'furnace' }, { id: 'archive' },
                 { id: 'turret' }, { id: 'airpad' }, { id: 'furnace' },
-                { id: 'foundry' }, { id: 'turret' }, { id: 'sluice' },
+                { id: 'orbital' }, { id: 'turret' }, { id: 'aegis' },
             ]
             : [
                 { id: 'sunwell' }, { id: 'tent' }, { id: 'workshop' },
-                { id: 'sunwell' }, { id: 'market' }, { id: 'vault' },
+                { id: 'market' }, { id: 'sunwell' }, { id: 'vault' },
                 { id: 'spike' }, { id: 'strip' }, { id: 'sunwell' },
-                { id: 'workshop' }, { id: 'spike' }, { id: 'market' },
+                { id: 'storm' }, { id: 'spike' }, { id: 'mirage' },
             ];
-        this.waveTimer = this.diff === 'hard' ? 55 : this.diff === 'normal' ? 80 : 110;
+        this.waveTimer = this.diff === 'hard' ? 60 : this.diff === 'normal' ? 85 : 115;
     }
 
     private get p(): PlayerState { return this.g.players[this.pid]; }
 
     private get aggression() {
-        return this.diff === 'hard' ? 10 : this.diff === 'normal' ? 7 : 5;
+        return this.diff === 'hard' ? 11 : this.diff === 'normal' ? 8 : 6;
     }
 
     update(dt: number) {
         if (this.g.phase !== 'playing') return;
         this.tick += dt;
-        if (this.tick < 0.9) return;
+        const interval = this.diff === 'hard' ? 0.8 : 1.0;
+        if (this.tick < interval) return;
+        const step = this.tick;
         this.tick = 0;
         if (this.p.defeated) return;
 
         this.manageEconomy();
         this.manageProduction();
-        this.buildCd -= 0.9;
+        this.buildCd -= step;
         if (this.buildCd <= 0) {
             this.manageBuild();
-            this.buildCd = this.diff === 'hard' ? 2.2 : 3.2;
+            this.buildCd = this.diff === 'hard' ? 1.6 : 2.4;
         }
         this.manageArmy();
+        this.manageSuperWeapons();
+        this.manageExpansion();
     }
 
     /* ---------------- economy ---------------- */
     private manageEconomy() {
         const harvesters = this.g.units.filter(u => !u.dead && u.owner === this.pid && u.isHarvester);
         const dropoffs = this.g.buildings.filter(b => !b.dead && b.owner === this.pid && b.def.dropoff).length;
-        const want = Math.min(8, 2 + dropoffs * 2);
-        const core = this.g.buildings.find(b => !b.dead && b.owner === this.pid && b.def.isCore);
-        if (harvesters.length < want && core && core.queue.length === 0) {
-            const hDef = UNITS[this.g.players[this.pid].faction === 'BU' ? 'hourglass' : 'scav'];
-            if (this.p.credits >= hDef.cost * 1.6) this.g.enqueue(core, hDef.id);
+        const want = Math.min(6, 2 + dropoffs + (this.diff === 'hard' ? 1 : 0));
+        const q = this.p.queues.vehicle;
+        const queued = q.items.filter(i => i.defId === this.harvesterId).length;
+        if (harvesters.length + queued < want) {
+            const affordable = this.p.credits > 260;
+            if (affordable && q.items.length < 2 && this.g.factoryCount(this.p, 'vehicle') > 0) {
+                this.g.queueUnit('vehicle', this.harvesterId, 1, this.pid);
+            }
         }
-        // idle harvesters go back to work
         for (const h of harvesters) {
             if (h.order.k === 'idle') h.order = { k: 'harvest', node: null, phase: 'seek', timer: 0 };
         }
     }
 
+    private get harvesterId(): string {
+        return this.p.faction === 'BU' ? 'hourglass' : 'scav';
+    }
+
     /* ---------------- production ---------------- */
     private armyCap() {
-        return this.diff === 'hard' ? 34 : this.diff === 'normal' ? 26 : 18;
+        return this.diff === 'hard' ? 36 : this.diff === 'normal' ? 27 : 18;
     }
 
     private manageProduction() {
-        const reserve = 350;
         const army = this.g.units.filter(u => !u.dead && u.owner === this.pid && !u.isHarvester).length;
         if (army >= this.armyCap()) return;
-        const mine = this.g.buildings.filter(b => !b.dead && b.owner === this.pid && b.done && b.def.produces);
-        // put one unit into each empty queue, cheapest-value first
-        for (const b of mine) {
-            if (b.queue.length > 0) continue;
-            if (b.def.isCore) continue;
-            const opts = this.g.availableUnits(b);
-            if (opts.length === 0) continue;
-            // prefer the most expensive unit we can afford
-            opts.sort((a, c) => c.cost - a.cost);
-            for (const d of opts) {
-                if (this.p.credits - d.cost >= reserve) {
-                    this.g.enqueue(b, d.id);
-                    break;
+
+        const total = this.g.buildings.filter(b => !b.dead && b.owner === this.pid && b.done).length;
+        const engineers = this.g.units.filter(u => !u.dead && u.owner === this.pid && u.isEngineer).length;
+
+        // infantry: a couple of engineers on higher difficulties, then a mix
+        const iq = this.p.queues.infantry;
+        if (iq.items.length < 1) {
+            if (this.diff !== 'easy' && engineers < 1 && total >= 5 && this.p.credits > 500) {
+                this.g.queueUnit('infantry', this.p.faction === 'BU' ? 'sapper' : 'wire', 1, this.pid);
+            } else {
+                const opts = this.g.availableUnitsFor(this.p, 'infantry').filter(d => !this.g.lockReason(this.p, d));
+                const stealth = opts.find(d => d.cloak);
+                if (stealth && this.g.time > 260 && this.g.time % 3 < 1) {
+                    this.g.queueUnit('infantry', stealth.id, 1, this.pid);
+                } else if (opts.length) {
+                    const pick = opts[Math.floor(this.g.time / 7) % Math.min(2, opts.length)];
+                    this.g.queueUnit('infantry', pick.id, 1, this.pid);
                 }
             }
+        }
+
+        // vehicles: a balanced mix, weighted towards the best affordable hull
+        const vq = this.p.queues.vehicle;
+        if (vq.items.length < 1) {
+            const opts = this.g.availableUnitsFor(this.p, 'vehicle')
+                .filter(d => !d.mcv && !this.g.lockReason(this.p, d));
+            if (opts.length) {
+                const wantHeavy = (this.g.time % 20) < 10;
+                const pick = wantHeavy ? opts[opts.length - 1] : opts[Math.min(1, opts.length - 1)];
+                this.g.queueUnit('vehicle', pick.id, 1, this.pid);
+            }
+        }
+
+        // aircraft
+        const aq = this.p.queues.aircraft;
+        if (aq.items.length < 1 && this.g.factoryCount(this.p, 'aircraft') > 0) {
+            const opts = this.g.availableUnitsFor(this.p, 'aircraft').filter(d => !this.g.lockReason(this.p, d));
+            if (opts.length) this.g.queueUnit('aircraft', opts[opts.length - 1].id, 1, this.pid);
         }
     }
 
     /* ---------------- base building ---------------- */
     private manageBuild() {
+        const q = this.p.queues.structure;
+        if (q.ready) {
+            // Game normally places it the moment it finishes; this is a safety net
+            const ready = this.g.readyStructure(this.p);
+            if (ready && this.placeStructure(ready.defId)) this.g.takeReadyStructure(this.pid);
+            return;
+        }
+        if (q.items.length > 0) return;
         if (this.step >= this.order.length) {
-            // late game: keep adding power and turrets
-            const step = this.p.credits > 2500 ? { id: this.p.faction === 'BU' ? 'turret' : 'spike' } : null;
-            if (step) this.tryBuild(step.id);
+            this.manageLateBuild();
             return;
         }
         const next = this.order[this.step];
         const def = BUILDINGS[next.id];
-        if (this.p.credits < def.cost + 260) return;
-        if (this.g.missingRequirement(this.p, def)) return;
-        if (this.tryBuild(next.id)) this.step++;
+        if (this.g.lockReason(this.p, def)) return;
+        if (this.p.credits < def.cost * 0.45) return;
+        if (this.g.queueBuild(next.id, this.pid)) this.step++;
     }
 
-    private tryBuild(defId: string): boolean {
+    private manageLateBuild() {
+        const defs = this.p.faction === 'BU'
+            ? ['turret', 'furnace', 'orbital', 'aegis', 'foundry', 'sluice']
+            : ['spike', 'sunwell', 'storm', 'mirage', 'workshop', 'market'];
+        const id = defs[Math.floor(this.g.time / 30) % defs.length];
+        const def = BUILDINGS[id];
+        if (this.g.lockReason(this.p, def)) return;
+        if (this.p.credits < def.cost * 0.5) return;
+        this.g.queueBuild(id, this.pid);
+    }
+
+    /** called by Game when the structure queue finishes for this player */
+    placeStructure(defId: string) {
         const def = BUILDINGS[defId];
+        if (!def) return false;
         const core = this.g.buildings.find(b => !b.dead && b.owner === this.pid && b.def.isCore);
-        if (!core) return false;
-        const anchor = core;
-        // spiral search for a free footprint near the core
-        for (let r = 5; r <= 13; r++) {
-            for (let a = 0; a < 16; a++) {
-                const ang = (a / 16) * Math.PI * 2 + r * 0.37;
-                const tx = Math.round(anchor.tx + Math.cos(ang) * r);
-                const ty = Math.round(anchor.ty + Math.sin(ang) * r);
-                if (this.g.canPlace(def, tx, ty).ok) {
-                    this.p.credits -= def.cost;
+        if (!core) {
+            // no core: deploy near the closest MCV instead
+            const mcv = this.g.units.find(u => !u.dead && u.owner === this.pid && u.isMcv);
+            if (!mcv) return false;
+            const tx = Math.round((mcv.x + HALF) / TILE) - Math.floor(def.size / 2);
+            const ty = Math.round((mcv.y + HALF) / TILE) - Math.floor(def.size / 2);
+            if (!this.g.canPlace(def, tx, ty, this.pid).ok) return false;
+            this.g.place(def, this.pid, tx, ty, false);
+            return true;
+        }
+        // spiral outward from the core, preferring spots that do not wall it in
+        let best: { tx: number; ty: number; score: number } | null = null;
+        for (let r = 4; r <= 15; r++) {
+            for (let a = 0; a < 24; a++) {
+                const ang = (a / 24) * Math.PI * 2 + r * 0.41;
+                const tx = Math.round(core.tx + Math.cos(ang) * r);
+                const ty = Math.round(core.ty + Math.sin(ang) * r);
+                if (!this.g.canPlace(def, tx, ty, this.pid).ok) continue;
+                // keep anti-air and defenses facing the enemy side
+                const towardEnemy = this.pid === 1 ? tx > core.tx : tx < core.tx;
+                const score = (towardEnemy ? -3 : 0) + r * 0.4 + Math.abs(Math.sin(ang)) * 2;
+                if (!best || score < best.score) best = { tx, ty, score };
+            }
+            if (best && r >= 6) break;
+        }
+        if (!best) {
+            // fall back to the relaxed radius rule so the AI never stalls
+            for (let r = 4; r <= 18; r++) {
+                for (let a = 0; a < 24; a++) {
+                    const ang = (a / 24) * Math.PI * 2 + r * 0.41;
+                    const tx = Math.round(core.tx + Math.cos(ang) * r);
+                    const ty = Math.round(core.ty + Math.sin(ang) * r);
+                    if (!this.g.canPlace(def, tx, ty, this.pid, true).ok) continue;
                     this.g.place(def, this.pid, tx, ty, false);
                     return true;
                 }
             }
+            return false;
         }
-        return false;
+        this.g.place(def, this.pid, best.tx, best.ty, false);
+        return true;
     }
 
     /* ---------------- army ---------------- */
     private manageArmy() {
         const units = this.g.units.filter(u => !u.dead && u.owner === this.pid && !u.isHarvester);
-        this.waveTimer -= 0.9;
+        const fighters = units.filter(u => !u.isEngineer && !u.isMcv);
+        this.waveTimer -= 1;
 
-        const enemies = this.g.buildings.filter(b => !b.dead && b.owner !== this.pid);
-        const targetBase = this.pickTarget(enemies);
+        const enemyBuildings = this.g.buildings.filter(b => !b.dead && b.owner !== this.pid);
+        const targetBase = this.pickTarget(enemyBuildings);
 
-        // defenders stay home when the base is attacked
         const underAttack = this.g.buildings.some(b => !b.dead && b.owner === this.pid && this.g.time - b.lastHit < 6);
         if (underAttack) {
             const threat = this.g.units.find(u => !u.dead && u.owner !== this.pid);
             if (threat) {
-                for (const u of units) {
+                for (const u of fighters) {
                     if (u.order.k === 'idle' || u.order.k === 'attackmove') {
-                        if (dist(u.x, u.y, threat.x, threat.y) < 900) this.g.orderAttackFor(u, threat);
+                        if (dist(u.x, u.y, threat.x, threat.y) < 950) this.g.orderAttackFor(u, threat);
                     }
+                }
+                // own super weapons defend the base
+                this.castDefensiveSuperWeapon(threat.x, threat.y);
+            }
+        }
+
+        if (this.waveTimer <= 0 && targetBase && fighters.length >= this.aggression) {
+            this.waveTimer = this.diff === 'hard' ? 55 : this.diff === 'normal' ? 90 : 115;
+            this.lastAttack = this.g.time;
+            const rally = this.rallyPoint(targetBase);
+            for (const u of fighters) {
+                if (u.hp < u.maxHp * 0.35) continue;
+                if (u.stance !== 'aggressive') u.stance = 'aggressive';
+                this.g.orderAttackMoveFor(u, rally.x, rally.y);
+            }
+            // engineers trail the wave and grab whatever is left standing
+            const engineers = units.filter(u => u.isEngineer);
+            const victim = enemyBuildings.find(b => b.owner === 0 && !b.def.isCore) || enemyBuildings[0];
+            if (victim) for (const e of engineers) this.g.orderCaptureFor(e, victim);
+        } else if (this.g.time - this.lastAttack < 28 && targetBase) {
+            const rally = this.rallyPoint(targetBase);
+            for (const u of fighters) {
+                if (u.order.k === 'idle' && dist(u.x, u.y, rally.x, rally.y) < 760) {
+                    this.g.orderAttackMoveFor(u, rally.x, rally.y);
                 }
             }
         }
 
-        if (this.waveTimer <= 0 && targetBase && units.length >= this.aggression) {
-            this.waveTimer = this.diff === 'hard' ? 45 : this.diff === 'normal' ? 70 : 100;
-            this.lastAttack = this.g.time;
-            const rally = this.rallyPoint(targetBase);
-            for (const u of units) {
-                if (u.hp < u.maxHp * 0.35) continue;
-                this.g.orderAttackMoveFor(u, rally.x, rally.y);
-            }
-        } else if (this.g.time - this.lastAttack < 25 && targetBase) {
-            // keep pressure on
-            const rally = this.rallyPoint(targetBase);
-            for (const u of units) {
-                if (u.order.k === 'idle' && dist(u.x, u.y, rally.x, rally.y) < 700) {
+        // units that have been idle at home for a while join the staging point
+        if (this.g.time - this.lastAttack > 40 && targetBase) {
+            const home = this.g.buildings.find(b => !b.dead && b.owner === this.pid && b.def.isCore);
+            if (home) {
+                for (const u of fighters) {
+                    if (u.order.k !== 'idle') continue;
+                    if (dist(u.x, u.y, home.x, home.y) > 460) continue;
+                    const rally = this.rallyPoint(targetBase);
                     this.g.orderAttackMoveFor(u, rally.x, rally.y);
                 }
             }
@@ -181,20 +282,116 @@ export class AIController {
 
     private pickTarget(enemies: Building[]): Building | null {
         const core = this.g.buildings.find(b => !b.dead && b.owner === 0 && b.def.isCore);
-        const my = this.g.buildings.filter(b => !b.dead && b.owner === this.pid && b.def.isCore)[0];
+        const my = this.g.buildings.find(b => !b.dead && b.owner === this.pid && b.def.isCore);
         if (!core) return enemies[0] || null;
-        // aim for the closest structure to my base, preferring production
         let best: Building | null = core;
         let bd = Infinity;
         for (const b of enemies) {
             const d = my ? dist(my.x, my.y, b.x, b.y) : 0;
-            const w = b.def.produces ? d * 0.75 : d;
+            let w = d;
+            if (b.def.produces) w *= 0.8;
+            if (b.def.isCore) w *= 0.7;
+            if (b.def.superWeapon) w *= 0.85;
             if (w < bd) { bd = w; best = b; }
         }
         return best;
     }
 
     private rallyPoint(b: Building) {
-        return { x: b.x + (Math.random() - 0.5) * 120, y: b.y + (Math.random() - 0.5) * 120 };
+        return {
+            x: b.x + (this.g.time * 37 % 120) - 60,
+            y: b.y + (this.g.time * 53 % 120) - 60,
+        };
+    }
+
+    /* ---------------- super weapons ---------------- */
+    private manageSuperWeapons() {
+        for (const s of this.p.sw) {
+            if (!s.ready) continue;
+            if (this.g.time - this.lastSwCast < 6) continue;
+            const def = SUPER_WEAPONS[s.id];
+            if (def.kind === 'strike') {
+                const spot = this.enemyCluster();
+                if (spot && this.g.launchSuperWeapon(s.id, spot.x, spot.y, this.pid)) this.lastSwCast = this.g.time;
+            } else {
+                // buff fields: drop them on our own attacking army
+                const army = this.g.units.filter(u => !u.dead && u.owner === this.pid && !u.isHarvester);
+                if (army.length < 4) continue;
+                let cx = 0, cy = 0;
+                for (const u of army) { cx += u.x; cy += u.y; }
+                cx /= army.length; cy /= army.length;
+                const enemiesNear = this.g.units.some(u => !u.dead && u.owner !== this.pid && dist(u.x, u.y, cx, cy) < 700)
+                    || this.g.buildings.some(b => !b.dead && b.owner !== this.pid && dist(b.x, b.y, cx, cy) < 500);
+                if (!enemiesNear) continue;
+                if (this.g.launchSuperWeapon(s.id, cx, cy, this.pid)) this.lastSwCast = this.g.time;
+            }
+        }
+    }
+
+    private castDefensiveSuperWeapon(x: number, y: number) {
+        for (const s of this.p.sw) {
+            if (!s.ready) continue;
+            if (SUPER_WEAPONS[s.id].kind === 'field') {
+                if (this.g.launchSuperWeapon(s.id, x, y, this.pid)) return;
+            }
+        }
+    }
+
+    /** spot with the most player value around it */
+    private enemyCluster(): { x: number; y: number } | null {
+        const targets: Entity[] = [
+            ...this.g.buildings.filter(b => !b.dead && b.owner === 0),
+            ...this.g.units.filter(u => !u.dead && u.owner === 0 && !u.isHarvester),
+        ];
+        if (targets.length === 0) return null;
+        let best = targets[0];
+        let bestScore = -1;
+        for (const t of targets) {
+            let score = 0;
+            for (const o of targets) {
+                const d = dist(t.x, t.y, o.x, o.y);
+                if (d > 150) continue;
+                score += o.isBuilding ? 3 : 1;
+            }
+            if (score > bestScore) { bestScore = score; best = t; }
+        }
+        return { x: best.x, y: best.y };
+    }
+
+    /* ---------------- expansion ---------------- */
+    private manageExpansion() {
+        if (this.diff !== 'hard') return;
+        if (this.expansionSent) return;
+        if (this.g.time < 240) return;
+        if (this.p.credits < 3200) return;
+        if (this.g.factoryCount(this.p, 'vehicle') === 0) return;
+
+        const mcvId = this.p.faction === 'BU' ? 'rig' : 'crawler';
+        const mcv = this.g.units.find(u => !u.dead && u.owner === this.pid && u.isMcv);
+        if (!mcv) {
+            if (this.p.queues.vehicle.items.length === 0 && this.g.time > 300) {
+                this.g.queueUnit('vehicle', mcvId, 1, this.pid);
+            }
+            return;
+        }
+        if (!this.expansionTarget) {
+            const core = this.g.buildings.find(b => !b.dead && b.owner === this.pid && b.def.isCore);
+            let best: { x: number; y: number } | null = null;
+            let bd = Infinity;
+            for (const n of this.g.terrain.nodes) {
+                if (n.amount <= 0) continue;
+                if (core && dist(n.x, n.y, core.x, core.y) < 900) continue;
+                const d = core ? dist(n.x, n.y, core.x, core.y) : 0;
+                if (d < bd) { bd = d; best = { x: n.x, y: n.y }; }
+            }
+            this.expansionTarget = best;
+        }
+        if (!this.expansionTarget) return;
+        const d = dist(mcv.x, mcv.y, this.expansionTarget.x, this.expansionTarget.y);
+        if (d < 90) {
+            if (this.g.tryDeploy(mcv)) this.expansionSent = true;
+        } else if (mcv.order.k === 'idle') {
+            this.g.orderMoveFor(mcv, this.expansionTarget.x, this.expansionTarget.y + 40);
+        }
     }
 }

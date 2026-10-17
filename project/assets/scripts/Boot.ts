@@ -7,7 +7,7 @@
  *   tap            -> select / move / attack (with light target snapping)
  *   drag           -> box select
  *   two fingers    -> pan + pinch zoom
- *   long press     -> command wheel (stop / attack-move / harvest ...)
+ *   long press     -> command wheel (stop / stance / deploy / repair ...)
  *   long press on group strip / production card -> assign group / fill queue
  */
 import {
@@ -15,8 +15,9 @@ import {
     EventTouch, EventMouse, EventKeyboard, KeyCode, Vec2, Layers, Graphics, Color, profiler,
 } from 'cc';
 import {
-    BUILDINGS, Faction, HALF, TILE, clamp,
+    BUILDINGS, Faction, HALF, TILE, clamp, dist,
     TAP_MAX_MS, TAP_SLOP, LONG_PRESS_MS, BOX_MIN_PX, SNAP_PX,
+    ProdCat, SuperWeaponId, SUPER_WEAPONS,
 } from './core/Core';
 import { Game } from './game/Game';
 import { Building, Unit, Entity } from './game/Entities';
@@ -25,6 +26,7 @@ import { WorldRenderer, gfxNode } from './render/Views';
 import { CameraRig } from './render/CameraRig';
 import { UI, mkNode } from './ui/UI';
 import { RadialItem } from './ui/Overlay';
+import { sfx } from './audio/Sfx';
 
 const { ccclass } = _decorator;
 
@@ -74,9 +76,12 @@ export class RiftApp extends Component {
     private keys = new Set<number>();
     private faction: Faction = 'BU';
     private diff: 'easy' | 'normal' | 'hard' = 'normal';
+    private credits = 4200;
+    private superWeapons = true;
     private started = false;
     /** world point the build ghost sticks to while no finger is down */
     private lastBuildWorld: { x: number | null; y: number | null } = { x: null, y: null };
+    private audioReady = false;
 
     onLoad() {
         try { profiler.hideStats(); } catch (e) { /* profiler is debug-only */ }
@@ -84,25 +89,40 @@ export class RiftApp extends Component {
         this.canvasNode = this.node.parent || this.node;
 
         this.ui = new UI(this.canvasNode, {
-            onBuild: (id) => this.game?.beginBuild(id),
-            onProduce: (b, id) => this.game?.enqueue(b, id, 1),
-            onProduceBatch: (b, id, times) => {
-                const n = this.game?.enqueue(b, id, times) || 0;
+            onBuild: (id) => this.game?.queueBuild(id),
+            onPlace: (id) => {
+                if (!this.game) return;
+                this.game.beginPlace(id);
+                this.ui.toast(`放置 ${BUILDINGS[id].name}`, 'info');
+            },
+            onProduce: (cat, id, times) => {
+                const n = this.game?.queueUnit(cat as ProdCat, id, times) || 0;
                 if (n > 1) this.vibrate();
             },
             onSell: () => this.game?.sellSelectedBuilding(),
+            onRepair: () => this.game?.toggleRepair(),
+            onStance: () => this.game?.cycleStance(),
+            onScatter: () => this.game?.orderScatter(),
+            onDeploy: () => this.game?.orderDeploy(),
             onSelectAll: () => this.game?.selectAllArmy(),
             onStop: () => this.game?.orderStop(),
             onAttackMove: () => { this.attackMovePending = this.ui.attackMoveMode; },
             onHarvest: () => this.game?.orderHarvest(null),
             onPause: () => this.pause(),
             onResume: () => this.resume(),
-            onStart: (f, d) => this.startGame(f, d),
-            onRestart: () => this.startGame(this.faction, this.diff),
+            onStart: (f, d, credits, superWeapons) => this.startGame(f, d, credits, superWeapons),
+            onRestart: () => this.startGame(this.faction, this.diff, this.credits, this.superWeapons),
             onQuit: () => this.quitToMenu(),
             onMinimap: (wx, wy) => this.cam?.focus(wx, wy),
-            onCancelBuild: () => { if (this.game) this.game.cancelBuild(); },
+            onCancelBuild: () => {
+                if (!this.game) return;
+                if (this.game.swTargeting) this.game.cancelSwTargeting();
+                else this.game.cancelBuild();
+            },
             onZoom: (dir) => this.cam?.zoomAt(dir > 0 ? 1.18 : 0.85),
+            onSuperWeapon: (id) => this.beginSuperWeapon(id),
+            onToggleSound: (m) => sfx.setMuted(m),
+            onCancelQueue: (cat, index) => this.game?.cancelQueue(cat, index),
         });
 
         this.bindInput();
@@ -111,8 +131,18 @@ export class RiftApp extends Component {
         // dev hook: ?auto=1 jumps straight into a match (used by the smoke test)
         const search = typeof location !== 'undefined' && location.search ? location.search : '';
         if (search.indexOf('auto=1') >= 0) {
-            this.startGame('BU', 'normal');
+            this.startGame('BU', 'normal', 4200, true);
         }
+    }
+
+    /* ------------------------------------------------------------ */
+    /* audio                                                         */
+    /* ------------------------------------------------------------ */
+    private ensureAudio() {
+        if (this.audioReady) return;
+        this.audioReady = true;
+        sfx.init();
+        sfx.resume();
     }
 
     /* ------------------------------------------------------------ */
@@ -150,6 +180,7 @@ export class RiftApp extends Component {
 
     private onTouchStart(e: EventTouch) {
         this.glyphMode = 'touch';
+        this.ensureAudio();
         const p = this.toCentered(e.getUILocation());
         const ptr = this.newPointer(e.getID(), p);
         this.touches.set(e.getID(), ptr);
@@ -202,7 +233,7 @@ export class RiftApp extends Component {
 
         // placing a building: one finger pans the map so the player can pick a
         // spot that is currently off screen (box select is meaningless here)
-        if (this.game.buildMode) {
+        if (this.game.buildMode || this.game.swTargeting) {
             if (t.moved && this.cam) this.cam.panBy(p.x - prevX, p.y - prevY);
             return;
         }
@@ -230,7 +261,6 @@ export class RiftApp extends Component {
         this.touches.delete(e.getID());
         if (!t) return;
         if (this.touches.size < 2) { this.multi = false; this.pinchDist = 0; }
-        // in a two-finger gesture the remaining finger must not turn into a command
         if (this.multi) { for (const p of this.touches.values()) p.longFired = true; return; }
         this.finishPointer(t);
     }
@@ -260,6 +290,7 @@ export class RiftApp extends Component {
     }
 
     private onMouseDown(e: EventMouse) {
+        this.ensureAudio();
         if (this.glyphMode === 'touch' && this.touches.size > 0) return;
         this.glyphMode = 'mouse';
         const p = this.toCentered(e.getUILocation());
@@ -288,7 +319,7 @@ export class RiftApp extends Component {
             if (g.moved && this.cam && this.ui.mode === 'game') this.cam.panBy(dx, dy);
             return;
         }
-        if (g.onUI || !this.game || this.ui.mode !== 'game' || this.game.buildMode) return;
+        if (g.onUI || !this.game || this.ui.mode !== 'game' || this.game.buildMode || this.game.swTargeting) return;
         if (g.moved && Math.hypot(p.x - g.sx, p.y - g.sy) >= BOX_MIN_PX) {
             g.boxMode = true;
             this.ui.overlay.showBox(g.sx, g.sy, p.x, p.y);
@@ -313,11 +344,17 @@ export class RiftApp extends Component {
         if (e.keyCode === KeyCode.SPACE) g?.selectAllArmy();
         if (e.keyCode === KeyCode.ESCAPE) {
             if (this.ui.overlay.radialOpen) this.ui.overlay.hideRadial();
+            else if (g?.swTargeting) g.cancelSwTargeting();
+            else if (g?.buildMode) g.cancelBuild();
             else if (this.ui.mode === 'game') this.pause();
             else if (this.ui.mode === 'paused') this.resume();
         }
         if (e.keyCode === KeyCode.KEY_Q) this.ui.setAttackMoveMode(!this.ui.attackMoveMode);
         if (e.keyCode === KeyCode.KEY_H) g?.orderStop();
+        if (e.keyCode === KeyCode.KEY_Z) g?.cycleStance();
+        if (e.keyCode === KeyCode.KEY_X) g?.orderScatter();
+        if (e.keyCode === KeyCode.KEY_E) g?.orderDeploy();
+        if (e.keyCode === KeyCode.KEY_R) g?.toggleRepair();
         if (e.keyCode === KeyCode.KEY_A && (e as any).ctrlKey) g?.selectAllArmy();
 
         // 1..5 pick a group, shift/ctrl + 1..5 assign the current selection
@@ -369,19 +406,27 @@ export class RiftApp extends Component {
         const g = this.game;
         if (!g) return;
         const items: RadialItem[] = [];
-        const hasUnits = g.selection.length > 0;
+        const sel = g.selection;
+        const hasUnits = sel.length > 0;
         const b = g.selectedBuilding;
+        const combat = sel.some(u => !u.isHarvester && !u.isEngineer && !u.isMcv);
+        const harv = sel.some(u => u.isHarvester);
+        const mcv = sel.some(u => u.isMcv);
 
         if (b && !hasUnits) {
             items.push({ id: 'rally', label: '集结点', enabled: true });
+            items.push({ id: 'repair', label: '维修', enabled: b.done && b.hp < b.maxHp });
             items.push({ id: 'sell', label: '拆除', enabled: b.done });
         } else if (hasUnits) {
             items.push({ id: 'stop', label: '停止', enabled: true });
-            items.push({ id: 'attackmove', label: '攻移', enabled: true });
-            items.push({
-                id: 'harvest', label: '采集',
-                enabled: g.selection.some(u => u.isHarvester),
-            });
+            if (combat) {
+                items.push({ id: 'attackmove', label: '攻移', enabled: true });
+                items.push({ id: 'stance', label: '姿态', enabled: true });
+            }
+            if (harv) items.push({ id: 'harvest', label: '采集', enabled: true });
+            if (mcv) items.push({ id: 'deploy', label: '部署', enabled: true });
+            items.push({ id: 'scatter', label: '散开', enabled: true });
+            items.push({ id: 'waypoint', label: g.waypointMode ? '路径·开' : '路径', enabled: true });
         } else {
             this.ui.toast('先选中单位或建筑', 'info');
             return;
@@ -399,6 +444,28 @@ export class RiftApp extends Component {
         } else if (id === 'harvest') { g.orderHarvest(null); this.ui.toast('采集车前往最近矿脉', 'info'); }
         else if (id === 'rally') { this.ui.toast('点击地图空地设置集结点', 'info'); }
         else if (id === 'sell') { g.sellSelectedBuilding(); }
+        else if (id === 'repair') { g.toggleRepair(); }
+        else if (id === 'stance') { g.cycleStance(); }
+        else if (id === 'scatter') { g.orderScatter(); this.ui.toast('部队散开', 'info'); }
+        else if (id === 'deploy') { g.orderDeploy(); }
+        else if (id === 'waypoint') {
+            g.waypointMode = !g.waypointMode;
+            this.ui.toast(g.waypointMode ? '路径模式：连续点击追加路径点' : '路径模式关闭', 'info');
+        }
+    }
+
+    /* ------------------------------------------------------------ */
+    /* super weapons                                                 */
+    /* ------------------------------------------------------------ */
+    private beginSuperWeapon(id: SuperWeaponId) {
+        const g = this.game;
+        if (!g) return;
+        const st = g.swOf(g.human, id);
+        if (!st) { this.ui.toast('尚未建造对应的超级武器', 'warn'); return; }
+        if (!st.ready) { this.ui.toast(`${SUPER_WEAPONS[id].name} 充能中`, 'warn'); return; }
+        g.beginSwTargeting(id);
+        this.ui.setAttackMoveMode(false);
+        this.ui.toast(`选择 ${SUPER_WEAPONS[id].name} 目标`, 'info');
     }
 
     /* ------------------------------------------------------------ */
@@ -416,26 +483,49 @@ export class RiftApp extends Component {
         const g = this.game;
         const w = this.cam.screenToWorld(x, y);
 
-        /* ---- placement (repeat until credits or the player runs out) ---- */
+        /* ---- super weapon targeting ---- */
+        if (g.swTargeting) {
+            const id = g.swTargeting;
+            if (g.launchSuperWeapon(id, w.x, w.y)) {
+                g.cancelSwTargeting();
+                this.ui.toast(`${SUPER_WEAPONS[id].name} 已发射`, 'good');
+            } else {
+                this.ui.toast('无法发射：电力不足或尚未就绪', 'warn');
+            }
+            return;
+        }
+
+        /* ---- structure placement ---- */
         if (g.buildMode) {
             const def = BUILDINGS[g.buildMode];
             const tx = Math.round((w.x + HALF - (def.size * TILE) / 2) / TILE);
             const ty = Math.round((w.y + HALF - (def.size * TILE) / 2) / TILE);
-            const id = g.buildMode;
-            if (g.confirmBuild(tx, ty)) {
-                // stay in build mode for rapid base layout, redraw the ghost
-                if (g.human.credits >= def.cost) g.beginBuild(id);
-                else g.cancelBuild();
-            }
+            g.confirmBuild(tx, ty);
             return;
         }
 
         /* ---- picking ---- */
         const picked = this.pickAt(w.x, w.y);
         if (picked) {
+            const engineers = g.selection.filter(u => !u.dead && u.isEngineer);
+            if (picked.isBuilding && engineers.length > 0) {
+                if (picked.owner !== 0) {
+                    g.orderCapture(picked);
+                    this.ui.toast(`工兵前往接管 ${(picked as Building).def.name}`, 'info');
+                    this.pushOrderFx(x, y, false);
+                    return;
+                }
+                if (picked.hp < picked.maxHp) {
+                    g.orderCapture(picked);
+                    this.ui.toast('工兵前往抢修', 'info');
+                    this.pushOrderFx(x, y, false);
+                    return;
+                }
+            }
             if (picked.owner === 0) {
                 if (picked.isBuilding) {
                     g.selectBuilding(picked as Building);
+                    this.ui.tab = 'structure';
                     this.ui.activeGroup = -1;
                 } else {
                     const u = picked as Unit;
@@ -451,6 +541,10 @@ export class RiftApp extends Component {
                     this.ui.activeGroup = -1;
                 }
             } else if (g.selection.length > 0) {
+                if (g.selection.every(u => u.isEngineer)) {
+                    this.ui.toast('工兵只能接管建筑', 'warn');
+                    return;
+                }
                 g.orderAttack(picked);
                 this.pushOrderFx(x, y, true);
             }
@@ -468,7 +562,7 @@ export class RiftApp extends Component {
 
         // light snapping: a near-miss on an enemy still becomes an attack order
         const enemy = this.snapEnemy(w.x, w.y);
-        if (enemy) {
+        if (enemy && !g.selection.every(u => u.isEngineer)) {
             g.orderAttack(enemy);
             this.pushOrderFx(x, y, true);
             return;
@@ -490,7 +584,7 @@ export class RiftApp extends Component {
             this.ui.setAttackMoveMode(false);
             this.pushOrderFx(x, y, false);
         } else {
-            g.orderMove(w.x, w.y);
+            g.orderMove(w.x, w.y, g.waypointMode);
             this.pushOrderFx(x, y, false);
         }
     }
@@ -610,21 +704,33 @@ export class RiftApp extends Component {
     /* ------------------------------------------------------------ */
     private disposeGame() {
         if (this.worldNode) { this.worldNode.destroy(); this.worldNode = null; }
+        if (this.ghost) { this.ghost.destroy(); this.ghost = null; }
+        if (this.swGhost) { this.swGhost.destroy(); this.swGhost = null; }
         this.game = null;
         this.renderer = null;
         this.cam = null;
         if (this.ui) { this.ui.game = null; this.ui.cam = null; }
     }
 
-    private startGame(faction: Faction, diff: 'easy' | 'normal' | 'hard') {
+    private startGame(faction: Faction, diff: 'easy' | 'normal' | 'hard', credits = 4200, superWeapons = true) {
+        this.ensureAudio();
         this.faction = faction;
         this.diff = diff;
+        this.credits = credits;
+        this.superWeapons = superWeapons;
         this.disposeGame();
         const seed = (Math.random() * 1000000) | 0;
         const game = new Game(seed, faction, diff, {
             onMessage: (t, k) => this.ui.toast(t, k),
             onGameOver: (win) => this.onGameOver(win),
-        });
+            onSfx: (name, x, y) => {
+                let gain = 1;
+                if (x !== undefined && y !== undefined && this.cam) {
+                    gain = clamp(1 - dist(x, y, this.cam.x, this.cam.y) / 1500, 0, 1);
+                }
+                sfx.play(name, gain);
+            },
+        }, { credits, superWeapons, crates: true });
         const app = this.ui;
 
         // world sits behind the HUD
@@ -641,6 +747,7 @@ export class RiftApp extends Component {
         app.game = game;
         app.cam = this.cam;
         app.activeGroup = -1;
+        app.tab = 'structure';
         app.hideMenu();
         app.hideModal();
 
@@ -699,6 +806,7 @@ export class RiftApp extends Component {
             this.renderer?.sync(step, this.cam!.viewBounds);
             this.ui.refresh(step);
             this.updateGhost();
+            this.updateSwGhost();
         } else if (this.ui.mode === 'paused') {
             // keep the world visible but frozen
             this.renderer?.sync(0, this.cam!.viewBounds);
@@ -748,6 +856,34 @@ export class RiftApp extends Component {
         gr.rect(-half + 4, -half + 4, half * 2 - 8, half * 2 - 8);
         gr.strokeColor = ok ? new Color(63, 217, 236, 90) : new Color(229, 82, 63, 90);
         gr.lineWidth = 1;
+        gr.stroke();
+    }
+
+    /** super weapon aim circle */
+    private swGhost: Node | null = null;
+    private updateSwGhost() {
+        const g = this.game;
+        if (!g || !this.cam) return;
+        if (!g.swTargeting) {
+            if (this.swGhost) { this.swGhost.destroy(); this.swGhost = null; }
+            return;
+        }
+        if (!this.swGhost) this.swGhost = gfxNode(this.renderer!.root, 'swghost').node;
+        const w = this.lastPointerWorld();
+        const def = SUPER_WEAPONS[g.swTargeting];
+        this.swGhost.setPosition(w.x, w.y, 0);
+        const gr = this.swGhost.getComponent(Graphics)!;
+        gr.clear();
+        gr.circle(0, 0, def.radius);
+        gr.fillColor = new Color(63, 217, 236, 30);
+        gr.fill();
+        gr.circle(0, 0, def.radius);
+        gr.strokeColor = new Color(63, 217, 236, 210);
+        gr.lineWidth = 2;
+        gr.stroke();
+        gr.circle(0, 0, 10);
+        gr.strokeColor = new Color(255, 255, 255, 210);
+        gr.lineWidth = 1.4;
         gr.stroke();
     }
 

@@ -137,14 +137,17 @@ const probe = () => page.evaluate(() => {
             id: u.id, type: u.def.id, harvester: u.isHarvester, ...toScreen(u.x, u.y),
         })),
         buildings: g.buildings.filter((b) => b.owner === 0 && !b.dead).map((b) => ({
-            id: b.id, name: b.def.name, produces: !!b.def.produces,
-            avail: g.availableUnits(b).length, done: b.done,
+            id: b.id, name: b.def.name, done: b.done, size: b.size,
             ...toScreen(b.x, b.y),
         })),
         crystals: g.terrain.nodes.filter((n) => n.amount > 0).map((n) => toScreen(n.x, n.y)),
         radialOpen: app.ui.overlay.radialOpen,
         groups: g.groupIds.map((ids) => ids.length),
-        queue: g.selectedBuilding ? g.selectedBuilding.queue.length : -1,
+        queues: ['structure', 'infantry', 'vehicle', 'aircraft'].map((c) => g.human.queues[c].items.length),
+        ready: !!g.readyStructure(g.human),
+        tab: app.ui.tab,
+        waypoint: g.waypointMode,
+        sw: g.human.sw.map((x) => x.id + (x.ready ? '*' : '')),
         credits: g.human.credits,
         errors: 0,
     };
@@ -253,57 +256,33 @@ s = await probe();
 check('点击编队格选中编队', s.selection === s.groups[0] && s.selection > 0,
     `selection=${s.selection} group=${s.groups[0]}`);
 
-/* ---------- 8. batch queue via long press on card ---------- */
-s = await probe();
-const producer = s.buildings.find((b) => b.avail > 0 && b.done);
-if (producer) {
-    await tapAt(producer.x, producer.y);
-    await sleep(150);
+/* ---------- 8. sidebar tabs + batch queue ---------- */
+await page.evaluate(() => {
+    const cc = window.cc;
+    const app = cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
+    app.game.clearSelection();
+    app.ui.tab = 'infantry';
+    app.ui.cardSig = '';
+    app.ui.refreshCards();
+});
+await sleep(260);
+const cards = await page.evaluate(() => {
+    const cc = window.cc;
+    const app = cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
+    return app.ui.cards.map((c) => ({
+        id: c.id,
+        x: c.node.position.x + 640,
+        y: 360 - c.node.position.y,
+    }));
+});
+console.log('   cards', JSON.stringify(cards));
+await page.screenshot({ path: path.join(OUT, 'i6-cards.png') });
+if (cards.length > 0) {
+    await longPressAt(cards[0].x, cards[0].y, 640);
     s = await probe();
-    if (s.queue < 0) {
-        // the building may sit under a unit: select it directly so the rest of
-        // the gesture (long press on a card) is still exercised
-        await page.evaluate((id) => {
-            const cc = window.cc;
-            const app = cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
-            const b = app.game.buildings.find((x) => x.id === id);
-            if (b) app.game.selectBuilding(b);
-        }, producer.id);
-        await sleep(120);
-        s = await probe();
-    }
-    const cards = await page.evaluate(() => {
-        const cc = window.cc;
-        const app = cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
-        return app.ui.cards.map((c) => ({
-            id: c.id,
-            x: c.node.position.x + 640,
-            y: 360 - c.node.position.y,
-        }));
-    });
-    console.log('   cards', JSON.stringify(cards), 'queue', s.queue);
-    const dbg = await page.evaluate(() => {
-        const cc = window.cc;
-        const app = cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
-        const g = app.game;
-        return {
-            buildMode: g.buildMode,
-            building: g.selectedBuilding ? g.selectedBuilding.def.name : null,
-            cardSig: app.ui.cardSig,
-            mode: app.ui.mode,
-        };
-    });
-    console.log('   ui', JSON.stringify(dbg));
-    await page.screenshot({ path: path.join(OUT, 'i6-cards.png') });
-    if (cards.length > 0) {
-        await longPressAt(cards[0].x, cards[0].y, 640);
-        s = await probe();
-        check('长按卡片批量生产', s.queue === 5, `queue=${s.queue} cards=${cards.length}`);
-    } else {
-        check('长按卡片批量生产', false, '没有生产卡片');
-    }
+    check('长按卡片批量生产', s.queues[1] === 5, `infantry queue=${s.queues[1]}`);
 } else {
-    check('长按卡片批量生产', false, '没有生产建筑');
+    check('长按卡片批量生产', false, '没有生产卡片');
 }
 await page.screenshot({ path: path.join(OUT, 'i7-queue.png') });
 
@@ -357,21 +336,134 @@ if (harv && fresh.crystals.length) {
     check('采集车点击矿脉附近自动采集', false, '缺少采集车或矿脉');
 }
 
-/* ---------- 10. assist toggles ---------- */
-const assist = await page.evaluate(() => {
+/* ---------- 10. stance + waypoint toggles ---------- */
+const toggles = await page.evaluate(() => {
     const cc = window.cc;
     const app = cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
     const g = app.game;
-    const before = { auto: g.autoAcquire, form: g.holdFormation };
-    g.autoAcquire = !g.autoAcquire;
-    g.holdFormation = !g.holdFormation;
-    const after = { auto: g.autoAcquire, form: g.holdFormation };
-    g.autoAcquire = before.auto;
-    g.holdFormation = before.form;
-    return { before, after };
+    g.clearSelection();
+    const u = g.units.find((x) => x.owner === 0 && !x.isHarvester && !x.isEngineer && !x.isMcv && x.def.weapon);
+    if (!u) return { skipped: true };
+    g.selectUnit(u, false);
+    const before = u.stance;
+    g.cycleStance();
+    const after = u.stance;
+    const w0 = g.waypointMode;
+    g.waypointMode = !w0;
+    const w1 = g.waypointMode;
+    g.waypointMode = w0;
+    return { before, after, w0, w1 };
 });
-check('辅助开关可切换', assist.before.auto !== assist.after.auto && assist.before.form !== assist.after.form,
-    `自动索敌 ${assist.before.auto}→${assist.after.auto}`);
+check('姿态循环切换', !toggles.skipped && toggles.before !== toggles.after,
+    `${toggles.before} → ${toggles.after}`);
+check('路径模式开关', !toggles.skipped && toggles.w0 !== toggles.w1, `waypoint ${toggles.w0}→${toggles.w1}`);
+
+/* ---------- 11. structure queue -> ready -> place ---------- */
+const prod = await page.evaluate(() => {
+    const cc = window.cc;
+    const app = cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
+    const g = app.game;
+    const h = g.human;
+    const defs = g.availableStructures(h);
+    const def = defs.find((d) => d.id === 'foundry') || defs.find((d) => !g.lockReason(h, d));
+    if (!def) return { skipped: '没有可用建筑' };
+    h.credits = 30000;
+    g.queueBuild(def.id);
+    const q = h.queues.structure;
+    if (!q.items.length) return { skipped: g.lockReason(h, def) || '入队失败' };
+    // finish it instantly, then let the production tick flip it to ready
+    q.items[0].spent = q.items[0].cost - 0.01;
+    for (let i = 0; i < 6; i++) g.update(0.05);
+    const ready = q.ready;
+    g.beginPlace(def.id);
+    const core = g.buildings.find((b) => b.owner === 0 && b.def.isCore);
+    let spot = null;
+    for (let r = 4; r <= 11 && !spot; r++) {
+        for (let a = 0; a < 18; a++) {
+            const ang = (a / 18) * Math.PI * 2 + r * 0.4;
+            const tx = Math.round(core.tx + Math.cos(ang) * r);
+            const ty = Math.round(core.ty + Math.sin(ang) * r);
+            if (g.canPlace(def, tx, ty, 0).ok) { spot = { tx, ty }; break; }
+        }
+    }
+    const before = g.buildings.filter((b) => b.owner === 0).length;
+    const ok = spot ? g.confirmBuild(spot.tx, spot.ty) : false;
+    for (let i = 0; i < 4; i++) g.update(0.05);
+    const after = g.buildings.filter((b) => b.owner === 0).length;
+    return { ready, placed: !!ok && after > before, def: def.name };
+});
+check('建筑队列完成进入就绪', prod.ready === true, prod.skipped || prod.def);
+check('就绪建筑可放置', prod.placed === true, prod.skipped || `placed=${prod.placed}`);
+
+/* ---------- 12. super weapon charge + strike ---------- */
+const swTest = await page.evaluate(() => {
+    const cc = window.cc;
+    const app = cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
+    const g = app.game;
+    const h = g.human;
+    h.credits = 40000;
+    const defs = g.availableStructures(h);
+    const def = defs.find((d) => d.superWeapon);
+    if (!def) return { skipped: '没有超级武器建筑' };
+    const core = g.buildings.find((b) => b.owner === 0 && b.def.isCore);
+    // two extra power plants so the super weapon does not black out the grid
+    for (let n = 0; n < 2; n++) {
+        const pw = defs.find((d) => d.id === (h.faction === 'BU' ? 'furnace' : 'sunwell'));
+        for (let r = 5; r <= 14; r++) {
+            let done = false;
+            for (let a = 0; a < 20; a++) {
+                const ang = (a / 20) * Math.PI * 2 + r * 0.45;
+                const tx = Math.round(core.tx + Math.cos(ang) * r);
+                const ty = Math.round(core.ty + Math.sin(ang) * r);
+                if (g.canPlace(pw, tx, ty, 0, true).ok) { g.place(pw, 0, tx, ty, true); done = true; break; }
+            }
+            if (done) break;
+        }
+    }
+    let spot = null;
+    for (let r = 5; r <= 14 && !spot; r++) {
+        for (let a = 0; a < 20; a++) {
+            const ang = (a / 20) * Math.PI * 2 + r * 0.45;
+            const tx = Math.round(core.tx + Math.cos(ang) * r);
+            const ty = Math.round(core.ty + Math.sin(ang) * r);
+            if (g.canPlace(def, tx, ty, 0, true).ok) { spot = { tx, ty }; break; }
+        }
+    }
+    if (!spot) return { skipped: '没有空位' };
+    g.place(def, 0, spot.tx, spot.ty, true);
+    g.update(0.05);
+    const st = h.sw.find((x) => x.id === def.superWeapon);
+    if (!st) return { skipped: '未生成超武状态' };
+    st.t = st.total - 0.01;
+    g.update(0.1);
+    const ready = st.ready && g.radarOnline(h);
+    const enemyCore = g.buildings.find((b) => b.owner === 1 && b.def.isCore);
+    const hp0 = enemyCore ? enemyCore.hp : 0;
+    const fired = g.launchSuperWeapon(def.superWeapon, enemyCore.x, enemyCore.y, 0);
+    for (let i = 0; i < 50; i++) g.update(0.05);
+    const hp1 = enemyCore && !enemyCore.dead ? enemyCore.hp : 0;
+    return { ready, fired, damaged: hp1 < hp0, hp0: Math.round(hp0), hp1: Math.round(hp1), id: def.superWeapon };
+});
+check('超级武器充能完成', swTest.ready === true, swTest.skipped || `${swTest.id} ready=${swTest.ready}`);
+check('超级武器发射并造成伤害', swTest.fired === true && swTest.damaged === true,
+    swTest.skipped || `${swTest.hp0} → ${swTest.hp1}`);
+
+/* ---------- 13. engineer captures an enemy structure ---------- */
+const cap = await page.evaluate(() => {
+    const cc = window.cc;
+    const app = cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
+    const g = app.game;
+    const h = g.human;
+    const engDef = g.availableUnitsFor(h, 'infantry').find((d) => d.engineer);
+    const target = g.buildings.find((b) => b.owner === 1 && !b.def.isCore) || g.buildings.find((b) => b.owner === 1);
+    if (!engDef || !target) return { skipped: '缺少工兵或目标' };
+    const e = g.spawnUnit(0, engDef, target.x + (target.size * 32) / 2 + 18, target.y);
+    e.invulnUntil = 1e9;
+    g.orderCaptureFor(e, target);
+    for (let i = 0; i < 300 && target.owner !== 0; i++) g.update(0.05);
+    return { captured: target.owner === 0, name: target.def.name };
+});
+check('工兵接管敌方建筑', cap.captured === true, cap.skipped || `${cap.name} → owner 0`);
 
 /* ---------- wrap up ---------- */
 const final = await probe();

@@ -1,13 +1,20 @@
 /**
  * HUD / UI layer — built entirely in code so the whole game ships as scripts.
  * Designed for 1280x720 landscape (WeChat / Douyin mini-game default).
+ *
+ * Layout follows the classic sidebar idea, adapted to a phone:
+ *   top bar      resources, power, clock, contextual hint
+ *   left bottom  radar / minimap
+ *   tab row      structures / infantry / vehicles / aircraft
+ *   card row     the production queue for the active tab
+ *   right edge   super weapon buttons (visible once the building exists)
  */
 import {
     Node, Graphics, Label, UITransform, Layers, Color, Sprite, SpriteFrame, Texture2D, Rect,
 } from 'cc';
 import {
     PAL, HEX, BuildingDef, UnitDef, UNITS, BUILDINGS, Faction, FACTIONS,
-    MAP_TILES, MAP_SIZE, HALF, TILE, fmtTime, clamp, QUEUE_MAX,
+    MAP_TILES, MAP_SIZE, HALF, TILE, fmtTime, clamp, QUEUE_MAX, ProdCat, SuperWeaponId, SUPER_WEAPONS,
 } from '../core/Core';
 import { Game } from '../game/Game';
 import { Building } from '../game/Entities';
@@ -20,22 +27,32 @@ const HW = W / 2;
 const HH = H / 2;
 
 export interface UIHooks {
+    /** queue a structure in the sidebar */
     onBuild: (defId: string) => void;
-    onProduce: (b: Building, defId: string) => void;
-    onProduceBatch: (b: Building, defId: string, times: number) => void;
+    /** place a finished structure */
+    onPlace: (defId: string) => void;
+    /** queue units in a category */
+    onProduce: (cat: ProdCat, defId: string, times: number) => void;
     onSell: () => void;
+    onRepair: () => void;
+    onStance: () => void;
+    onScatter: () => void;
+    onDeploy: () => void;
     onSelectAll: () => void;
     onStop: () => void;
     onAttackMove: () => void;
     onHarvest: () => void;
     onPause: () => void;
     onResume: () => void;
-    onStart: (faction: Faction, diff: 'easy' | 'normal' | 'hard') => void;
+    onStart: (faction: Faction, diff: 'easy' | 'normal' | 'hard', credits: number, superWeapons: boolean) => void;
     onRestart: () => void;
     onQuit: () => void;
     onMinimap: (wx: number, wy: number) => void;
     onCancelBuild: () => void;
     onZoom: (dir: number) => void;
+    onSuperWeapon: (id: SuperWeaponId) => void;
+    onToggleSound: (muted: boolean) => void;
+    onCancelQueue: (cat: ProdCat, index: number) => void;
 }
 
 function circ(g: Graphics, x: number, y: number, r: number, fill: Color | null, stroke: Color | null, lw = 1.5) {
@@ -112,12 +129,14 @@ class UIButton {
     setText(s: string) { if (this.label) this.label.string = s; return this; }
 
     setEnabled(v: boolean) {
+        if (this.enabled === v) return;
         this.enabled = v;
         if (this.label) this.label.color = HEX(v ? PAL.white : '#6b7783');
         this.draw();
     }
 
     setActive(v: boolean) {
+        if (this.active === v) return;
         this.active = v;
         this.draw();
     }
@@ -159,6 +178,7 @@ class Card {
     badge: Label;
     enabled = true;
     available = true;
+    lastSig = '';
     w: number;
     h: number;
 
@@ -177,27 +197,27 @@ class Card {
         this.badge = mkLabel(this.node, '', 12, PAL.cyan, true);
         this.badge.node.setPosition(w / 2 - 10, h / 2 - 12, 0);
         alignLabel(this.badge, 'right');
-        this.drawBase();
+        this.drawBase(false);
     }
 
-    drawBase() {
+    drawBase(ready: boolean, locked = false) {
         const g = this.g;
         g.clear();
         g.roundRect(-this.w / 2, -this.h / 2, this.w, this.h, 7);
-        g.fillColor = HEX('#171d25', 238);
+        g.fillColor = HEX(ready ? '#243021' : locked ? '#14181d' : '#171d25', 238);
         g.fill();
-        g.strokeColor = HEX(PAL.cyanDim, 140);
-        g.lineWidth = 1.2;
+        g.strokeColor = ready ? HEX(PAL.green, 230) : locked ? HEX('#2a333d', 150) : HEX(PAL.cyanDim, 140);
+        g.lineWidth = ready ? 2 : 1.2;
         g.stroke();
         g.rect(-this.w / 2 + 5, this.h / 2 - 5, this.w - 10, 2);
-        g.fillColor = HEX(PAL.cyan, 110);
+        g.fillColor = ready ? HEX(PAL.green, 220) : HEX(PAL.cyan, locked ? 55 : 110);
         g.fill();
         // icon plate keeps the dark vector art readable on a dark card
         const iy = this.h / 2 - 34;
         g.roundRect(-this.w / 2 + 7, iy - 20, this.w - 14, 42, 6);
-        g.fillColor = HEX('#26313c', 255);
+        g.fillColor = HEX(locked ? '#1c232a' : '#26313c', 255);
         g.fill();
-        g.strokeColor = HEX(PAL.cyanDim, 90);
+        g.strokeColor = HEX(PAL.cyanDim, locked ? 45 : 90);
         g.lineWidth = 1;
         g.stroke();
     }
@@ -206,6 +226,16 @@ class Card {
         const p = this.node.position;
         return Math.abs(x - p.x) <= this.w / 2 && Math.abs(y - p.y) <= this.h / 2;
     }
+}
+
+interface SwButton {
+    id: SuperWeaponId;
+    node: Node;
+    g: Graphics;
+    name: Label;
+    time: Label;
+    cx: number;
+    cy: number;
 }
 
 export class UI {
@@ -232,14 +262,22 @@ export class UI {
     private btnAll: UIButton;
     private btnStop: UIButton;
     private btnAttackMove: UIButton;
+    private btnStance: UIButton;
+    private btnScatter: UIButton;
     private btnHarvest: UIButton;
     private btnSell: UIButton;
+    private btnRepair: UIButton;
+    private btnDeploy: UIButton;
     private btnCancelBuild: UIButton;
     private btnZoomIn: UIButton;
     private btnZoomOut: UIButton;
+    private tabBtns: UIButton[] = [];
 
     private cards: Card[] = [];
     private cardSig = '';
+    tab: ProdCat = 'structure';
+
+    private swButtons: SwButton[] = [];
 
     private mmSize = 176;
     private mmX = -HW + 18 + 88;
@@ -248,13 +286,17 @@ export class UI {
     private mmData: Uint8Array | null = null;
     private mmBase: Uint8Array | null = null;
     private mmView: Graphics | null = null;
+    private mmOff: Label | null = null;
     private mmTimer = 0;
+    private mmNoiseT = 0;
 
     private menuBtns: UIButton[] = [];
     private modalBtns: UIButton[] = [];
 
     private selFaction: Faction = 'BU';
     private selDiff: 'easy' | 'normal' | 'hard' = 'normal';
+    private selCredits = 4200;
+    private selSuper = true;
     attackMoveMode = false;
     /** which group strip cell is highlighted, -1 = none */
     activeGroup = -1;
@@ -270,6 +312,7 @@ export class UI {
         this.modalLayer = mkNode(this.root, 'modal');
         this.buildTop();
         this.buildBottom();
+        this.buildTabs();
         this.buildMinimap();
         this.buildToast();
         this.buildMenu();
@@ -299,7 +342,7 @@ export class UI {
         ic.fillColor = HEX('#bff7ff', 200);
         ic.fill();
 
-        this.creditsL = mkLabel(this.topBar, '7000', 19, PAL.white, true);
+        this.creditsL = mkLabel(this.topBar, '4200', 19, PAL.white, true);
         this.creditsL.node.setPosition(-HW + 58, HH - 36, 0);
 
         this.powerG = mkNode(this.topBar, 'pwr').addComponent(Graphics);
@@ -309,6 +352,11 @@ export class UI {
 
         this.timeL = mkLabel(this.topBar, '0:00', 16, PAL.sandLight, true);
         this.timeL.node.setPosition(-HW + 356, HH - 36, 0);
+
+        // contextual hint uses the free middle of the bar
+        this.hintL = mkLabel(this.topBar, '', 13, PAL.sandLight);
+        alignLabel(this.hintL, 'center');
+        this.hintL.node.setPosition(30, HH - 36, 0);
 
         this.btnAll = new UIButton(this.topBar, 92, 30, '全选部队', 13, () => this.hooks.onSelectAll());
         this.btnAll.setPosition(HW - 296, HH - 36);
@@ -335,23 +383,50 @@ export class UI {
         bg.fillColor = HEX(PAL.cyan, 80);
         bg.fill();
 
-        this.hintL = mkLabel(this.bottom, '', 14, PAL.sandLight);
-        this.hintL.node.setPosition(-HW + 220, -HH + 178, 0);
-
-        this.btnStop = new UIButton(this.bottom, 78, 32, '停止', 13, () => this.hooks.onStop());
-        this.btnStop.setPosition(HW - 470, -HH + 178);
-        this.btnAttackMove = new UIButton(this.bottom, 96, 32, '攻击移动', 13, () => {
+        const y = -HH + 186;
+        this.btnStop = new UIButton(this.bottom, 74, 30, '停止', 12, () => this.hooks.onStop());
+        this.btnAttackMove = new UIButton(this.bottom, 74, 30, '攻移', 12, () => {
             this.setAttackMoveMode(!this.attackMoveMode);
         });
-        this.btnAttackMove.setPosition(HW - 372, -HH + 178);
-        this.btnHarvest = new UIButton(this.bottom, 78, 32, '采集', 13, () => this.hooks.onHarvest());
-        this.btnHarvest.setPosition(HW - 274, -HH + 178);
-        this.btnSell = new UIButton(this.bottom, 78, 32, '拆除', 13, () => this.hooks.onSell(), PAL.red);
-        this.btnSell.setPosition(HW - 182, -HH + 178);
+        this.btnStance = new UIButton(this.bottom, 74, 30, '姿态', 12, () => this.hooks.onStance());
+        this.btnScatter = new UIButton(this.bottom, 74, 30, '散开', 12, () => this.hooks.onScatter());
+        this.btnHarvest = new UIButton(this.bottom, 74, 30, '采集', 12, () => this.hooks.onHarvest());
+        this.btnRepair = new UIButton(this.bottom, 74, 30, '维修', 12, () => this.hooks.onRepair(), PAL.green);
+        this.btnSell = new UIButton(this.bottom, 74, 30, '拆除', 12, () => this.hooks.onSell(), PAL.red);
+        this.btnDeploy = new UIButton(this.bottom, 74, 30, '部署', 12, () => this.hooks.onDeploy(), PAL.amber);
+        this.btnCancelBuild = new UIButton(this.bottom, 88, 30, '取消放置', 12, () => this.hooks.onCancelBuild(), PAL.red);
+        for (const b of [this.btnStop, this.btnAttackMove, this.btnStance, this.btnScatter, this.btnHarvest,
+            this.btnRepair, this.btnSell, this.btnDeploy, this.btnCancelBuild]) {
+            b.setPosition(HW - 50, y);
+            b.setVisible(false);
+        }
+    }
 
-        this.btnCancelBuild = new UIButton(this.bottom, 108, 32, '取消建造', 13, () => this.hooks.onCancelBuild(), PAL.red);
-        this.btnCancelBuild.setPosition(HW - 100, -HH + 178);
-        this.btnCancelBuild.setVisible(false);
+    /** production tabs — buildings / infantry / vehicles / aircraft */
+    private buildTabs() {
+        const defs: Array<[ProdCat, string]> = [
+            ['structure', '建筑'], ['infantry', '步兵'], ['vehicle', '车辆'], ['aircraft', '空军'],
+        ];
+        let x = -400;
+        for (const [cat, name] of defs) {
+            const b = new UIButton(this.bottom, 68, 30, name, 13, () => {
+                this.tab = cat;
+                this.cardSig = '';
+                this.refreshTabButtons();
+                this.refreshCards();
+            });
+            b.setPosition(x, -HH + 186);
+            (b as any).cat = cat;
+            this.tabBtns.push(b);
+            x += 76;
+        }
+        this.refreshTabButtons();
+    }
+
+    private refreshTabButtons() {
+        for (const b of this.tabBtns) {
+            b.setActive((b as any).cat === this.tab);
+        }
     }
 
     /* ------------------------------------------------------------ */
@@ -385,6 +460,10 @@ export class UI {
         sn.getComponent(UITransform)!.setContentSize(this.mmSize, this.mmSize);
 
         this.mmView = mkNode(n, 'view').addComponent(Graphics);
+        this.mmOff = mkLabel(n, '雷达离线', 15, PAL.red, true);
+        alignLabel(this.mmOff, 'center');
+        this.mmOff.node.setPosition(0, 0, 0);
+        this.mmOff.node.active = false;
     }
 
     private buildMinimapBase() {
@@ -407,13 +486,35 @@ export class UI {
 
     private refreshMinimap(dt: number) {
         if (!this.game || !this.mmData || !this.mmTex || !this.mmBase) return;
-        this.mmTimer -= dt;
-        if (this.mmTimer > 0) { this.updateMinimapView(); return; }
-        this.mmTimer = 0.28;
-        this.buildMinimapBase();
-        const size = MAP_TILES;
         const p = this.game.human;
+        const online = this.game.radarOnline(p);
+        if (this.mmOff) this.mmOff.node.active = !online;
+        this.mmTimer -= dt;
+        if (this.mmTimer > 0) { this.updateMinimapView(online); return; }
+        this.mmTimer = 0.28;
+        const size = MAP_TILES;
         const d = this.mmData;
+
+        if (!online) {
+            // dead radar: static instead of a battlefield map
+            this.mmNoiseT -= dt;
+            for (let i = 0; i < size * size; i++) {
+                const o = i * 4;
+                const v = 18 + ((i * 37 + Math.floor(this.game.time * 60) * 13) % 26);
+                d[o] = v; d[o + 1] = v + 4; d[o + 2] = v + 6;
+            }
+            for (let y = 0; y < size; y += 6) {
+                for (let x = 0; x < size; x++) {
+                    const o = (y * size + x) * 4;
+                    d[o] = 58; d[o + 1] = 66; d[o + 2] = 72;
+                }
+            }
+            this.uploadMinimap(d);
+            this.updateMinimapView(false);
+            return;
+        }
+
+        this.buildMinimapBase();
         d.set(this.mmBase);
         for (let i = 0; i < size * size; i++) {
             const o = i * 4;
@@ -446,19 +547,26 @@ export class UI {
             if (u.owner === 0) dot(u.x, u.y, 0, 235, 250, 255);
             else dot(u.x, u.y, 0, 235, 90, 72);
         }
+        for (const c of this.game.crates) dot(c.x, c.y, 0, 240, 210, 90);
+        this.uploadMinimap(d);
+        this.updateMinimapView(true);
+    }
+
+    private uploadMinimap(d: Uint8Array) {
+        const size = MAP_TILES;
         const flipped = new Uint8Array(size * size * 4);
         for (let y = 0; y < size; y++) {
             const src = (size - 1 - y) * size * 4;
             flipped.set(d.subarray(src, src + size * 4), y * size * 4);
         }
-        this.mmTex.uploadData(flipped);
-        this.updateMinimapView();
+        this.mmTex!.uploadData(flipped);
     }
 
-    private updateMinimapView() {
+    private updateMinimapView(online: boolean) {
         if (!this.mmView || !this.cam) return;
         const g = this.mmView;
         g.clear();
+        if (!online) return;
         const cam = this.cam;
         const w = (cam.screenW / cam.zoom) / MAP_SIZE * this.mmSize;
         const h = (cam.screenH / cam.zoom) / MAP_SIZE * this.mmSize;
@@ -468,6 +576,21 @@ export class UI {
         g.strokeColor = HEX('#f2fdff', 210);
         g.lineWidth = 1.2;
         g.stroke();
+
+        // radar pings on structures that took damage in the last few seconds
+        const t = this.game.time;
+        for (const b of this.game.buildings) {
+            if (b.dead || b.owner !== 0) continue;
+            const age = t - b.lastHit;
+            if (age > 2.5 || age < 0) continue;
+            const k = age / 2.5;
+            const bx = (b.x + HALF) / MAP_SIZE * this.mmSize - this.mmSize / 2;
+            const by = (b.y + HALF) / MAP_SIZE * this.mmSize - this.mmSize / 2;
+            g.circle(bx, by, 3 + k * 9);
+            g.strokeColor = HEX(PAL.red, Math.floor(220 * (1 - k)));
+            g.lineWidth = 1.6;
+            g.stroke();
+        }
     }
 
     /* ------------------------------------------------------------ */
@@ -498,19 +621,20 @@ export class UI {
         this.cards.length = 0;
     }
 
-    private layoutCards(defs: Array<{ id: string; name: string; cost: number; kind: 'build' | 'unit'; icon: (g: Graphics) => void }>) {
+    private layoutCards(defs: Array<{ id: string; name: string; cost: number; kind: 'build' | 'unit'; scale?: number; icon: (g: Graphics) => void }>) {
         this.clearCards();
         const cw = 78, ch = 96, gap = 8;
         const n = defs.length;
         if (n === 0) { this.cardSig = ''; return; }
         const totalW = n * cw + (n - 1) * gap;
-        let x = -30 - totalW / 2 + cw / 2;
+        let x = -20 - totalW / 2 + cw / 2;
         const y = -HH + 104;
         for (const d of defs) {
             const card = new Card(this.cardLayer, d.id, d.kind, cw, ch);
             card.node.setPosition(x, y, 0);
             card.icon.node.setPosition(0, 14, 0);
-            card.icon.node.setScale(0.5, 0.5, 1);
+            const sc = d.scale ?? 0.5;
+            card.icon.node.setScale(sc, sc, 1);
             d.icon(card.icon);
             card.nameL.string = d.name;
             card.costL.string = `◈ ${d.cost}`;
@@ -522,14 +646,14 @@ export class UI {
     private signature(): string {
         const g = this.game;
         if (!g) return '';
-        if (g.buildMode) return 'none';
-        const b = g.selectedBuilding;
-        if (b && b.done && b.def.produces) {
-            return 'u:' + b.id + ':' + g.availableUnits(b).map(d => d.id).join(',');
-        }
         const h = g.human;
-        const defs = g.availableBuildings(h);
-        return 'b:' + defs.map(d => d.id + (g.missingRequirement(h, d) ? '!' : '')).join(',');
+        if (this.tab === 'structure') {
+            const ready = g.readyStructure(h);
+            return 's:' + (ready ? ready.defId : '-') + '|' + g.availableStructures(h)
+                .map(d => d.id + (g.lockReason(h, d) ? '!' : '')).join(',');
+        }
+        return this.tab + ':' + g.availableUnitsFor(h, this.tab)
+            .map(d => d.id + (g.lockReason(h, d) ? '!' : '')).join(',');
     }
 
     private refreshCards() {
@@ -539,61 +663,135 @@ export class UI {
         const sig = this.signature();
         if (sig !== this.cardSig) {
             this.cardSig = sig;
-            if (sig === 'none') {
-                this.clearCards();
-            } else if (sig.startsWith('u:')) {
-                const b = g.selectedBuilding!;
-                const defs = g.availableUnits(b).map<{ id: string; name: string; cost: number; kind: 'unit'; icon: (gg: Graphics) => void }>(def => ({
-                    id: def.id, name: def.name, cost: def.cost, kind: 'unit',
-                    icon: (gg: Graphics) => drawUnit(gg, def, h.faction),
+            if (this.tab === 'structure') {
+                const defs = g.availableStructures(h).map<{ id: string; name: string; cost: number; kind: 'build'; icon: (gg: Graphics) => void }>(def => ({
+                    id: def.id, name: def.name, cost: def.cost, kind: 'build', scale: 0.46,
+                    icon: (gg: Graphics) => drawBuilding(gg, def, h.faction, 1),
                 }));
                 this.layoutCards(defs);
             } else {
-                const defs = g.availableBuildings(h).map<{ id: string; name: string; cost: number; kind: 'build'; icon: (gg: Graphics) => void }>(def => ({
-                    id: def.id, name: def.name, cost: def.cost, kind: 'build',
-                    icon: (gg: Graphics) => drawBuilding(gg, def, h.faction, 1),
+                const defs = g.availableUnitsFor(h, this.tab).map<{ id: string; name: string; cost: number; kind: 'unit'; icon: (gg: Graphics) => void }>(def => ({
+                    id: def.id, name: def.name, cost: def.cost, kind: 'unit',
+                    scale: def.kind === 'infantry' ? 1.15 : def.kind === 'mcv' ? 0.72
+                        : def.kind === 'air' ? 0.85 : def.kind === 'harvester' ? 0.9 : 0.95,
+                    icon: (gg: Graphics) => drawUnit(gg, def, h.faction),
                 }));
                 this.layoutCards(defs);
             }
         }
 
-        const b = g.selectedBuilding;
+        const q = g.queueInfo(h, this.tab);
+        const ready = this.tab === 'structure' ? g.readyStructure(h) : null;
         for (const c of this.cards) {
             const def = c.kind === 'build' ? BUILDINGS[c.id] : UNITS[c.id];
-            const missing = c.kind === 'build' ? g.missingRequirement(h, def as BuildingDef) : '';
-            const affordable = h.credits >= def.cost;
-            const ok = !missing && affordable;
-            if (c.available !== ok) {
-                c.available = ok;
-                c.enabled = ok;
-                c.nameL.color = HEX(missing ? '#7b8794' : PAL.white);
-                c.costL.string = missing ? `缺 ${missing.replace('需要 ', '')}` : `◈ ${def.cost}`;
-                c.costL.fontSize = missing ? 10 : 11;
-                c.costL.color = HEX(missing ? PAL.red : affordable ? PAL.amber : PAL.red);
-                c.drawBase();
+            const lock = g.lockReason(h, def as any);
+            const affordable = h.credits >= def.cost * 0.15;
+            const isReady = !!ready && ready.defId === c.id;
+            const idx = q.items.findIndex(it => it.defId === c.id);
+            const queuedCount = q.items.filter(it => it.defId === c.id).length;
+            const isFirst = idx === 0;
+            const prog = isFirst ? q.items[0].progress : 0;
+
+            const stateSig = `${lock}|${affordable}|${isReady}|${c.kind === 'build' && idx < 0 ? 'idle' : ''}`;
+            if (c.lastSig !== stateSig) {
+                c.lastSig = stateSig;
+                c.enabled = !lock;
+                c.nameL.color = HEX(lock ? '#6f7c89' : PAL.white);
+                c.costL.string = lock ? lock.replace('需要 ', '缺 ') : `◈ ${def.cost}`;
+                c.costL.fontSize = lock ? 9 : 11;
+                c.costL.color = HEX(lock ? PAL.red : affordable ? PAL.amber : '#9aa6b2');
+                c.drawBase(isReady, !!lock);
             }
+
             const pg = c.progress;
             pg.clear();
-            if (b && c.kind === 'unit') {
-                const idx = b.queue.findIndex(q => q.defId === c.id);
-                if (idx >= 0) {
-                    const q = b.queue[idx];
-                    pg.roundRect(-38, -47, 76, 94, 7);
-                    pg.strokeColor = HEX(PAL.cyan, idx === 0 ? 200 : 90);
-                    pg.lineWidth = idx === 0 ? 2 : 1;
-                    pg.stroke();
-                    if (idx === 0) {
-                        const p = clamp(q.t / q.total, 0, 1);
-                        pg.rect(-38, -47, 76 * p, 3);
-                        pg.fillColor = HEX(PAL.cyan, 240);
-                        pg.fill();
-                    }
-                    c.badge.string = `${idx + 1}`;
-                } else {
-                    c.badge.string = '';
-                }
+            if (prog > 0) {
+                // vertical fill from the bottom of the card
+                pg.rect(-c.w / 2 + 4, -c.h / 2 + 4, (c.w - 8) * clamp(prog, 0, 1), 3);
+                pg.fillColor = HEX(isReady ? PAL.green : PAL.cyan, 235);
+                pg.fill();
+            }
+            if (isReady) {
+                c.badge.string = '就绪';
+                c.badge.color = HEX(PAL.green);
+            } else if (c.kind === 'unit' && queuedCount > 0) {
+                c.badge.string = queuedCount > 1 ? `×${queuedCount}` : `${Math.round(prog * 100)}%`;
+                c.badge.color = HEX(PAL.cyan);
+            } else if (c.kind === 'build' && idx === 0) {
+                c.badge.string = `${Math.round(prog * 100)}%`;
+                c.badge.color = HEX(PAL.cyan);
+            } else {
+                c.badge.string = '';
             }
         }
+    }
+
+    /* ------------------------------------------------------------ */
+    /* super weapon buttons                                          */
+    /* ------------------------------------------------------------ */
+    private refreshSwButtons() {
+        const g = this.game;
+        if (!g) return;
+        const list = g.human.sw;
+        // rebuild when the set changes
+        if (list.length !== this.swButtons.length) {
+            for (const b of this.swButtons) b.node.destroy();
+            this.swButtons = [];
+            for (let i = 0; i < list.length; i++) {
+                const id = list[i].id;
+                const node = mkNode(this.root, 'sw');
+                const gfx = node.addComponent(Graphics);
+                const name = mkLabel(node, SUPER_WEAPONS[id].short, 12, PAL.white, true);
+                alignLabel(name, 'center');
+                name.node.setPosition(0, 6, 0);
+                const time = mkLabel(node, '', 10, PAL.cyan);
+                alignLabel(time, 'center');
+                time.node.setPosition(0, -10, 0);
+                const cx = HW - 46;
+                const cy = HH - 112 - this.swButtons.length * 74;
+                node.setPosition(cx, cy, 0);
+                this.swButtons.push({ id, node, g: gfx, name, time, cx, cy });
+            }
+        }
+        for (let i = 0; i < this.swButtons.length; i++) {
+            const b = this.swButtons[i];
+            const st = list.find(s => s.id === b.id);
+            if (!st) continue;
+            const def = SUPER_WEAPONS[b.id];
+            const online = g.radarOnline(g.human);
+            const prog = st.t / st.total;
+            const gg = b.g;
+            gg.clear();
+            gg.circle(0, 0, 30);
+            gg.fillColor = HEX(st.ready && online ? '#1d3a33' : '#12181f', 240);
+            gg.fill();
+            gg.strokeColor = st.ready && online ? HEX(PAL.green, 240) : HEX(PAL.cyanDim, 120);
+            gg.lineWidth = st.ready && online ? 2.4 : 1.3;
+            gg.stroke();
+            // charge ring
+            if (!st.ready) {
+                gg.arc(0, 0, 26, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * clamp(prog, 0, 1), false);
+                gg.strokeColor = HEX(def.color, 220);
+                gg.lineWidth = 3;
+                gg.stroke();
+            }
+            if (st.ready && online) {
+                gg.circle(0, 0, 34 + Math.sin(g.time * 3) * 2);
+                gg.strokeColor = HEX(PAL.green, 90);
+                gg.lineWidth = 1.4;
+                gg.stroke();
+            }
+            b.time.string = !online ? '断电' : st.ready ? '就绪' : fmtTime(st.total - st.t);
+            b.time.color = HEX(!online ? PAL.red : st.ready ? PAL.green : '#9fb0bc');
+            b.name.color = HEX(st.ready && online ? PAL.white : '#8f9daa');
+        }
+    }
+
+    private swAt(x: number, y: number): SuperWeaponId | null {
+        for (const b of this.swButtons) {
+            if (Math.hypot(x - b.cx, y - b.cy) <= 34) return b.id;
+        }
+        return null;
     }
 
     /* ------------------------------------------------------------ */
@@ -615,35 +813,58 @@ export class UI {
         dim.fill();
 
         const title = mkLabel(ov, '裂 沙 战 线', 54, PAL.white, true);
-        title.node.setPosition(0, 250, 0);
+        title.node.setPosition(0, 258, 0);
         alignLabel(title, 'center');
 
         const sub = mkLabel(ov, 'R I F T S A N D   ·   沙海之上，钢铁与风的战争', 15, PAL.cyan);
-        sub.node.setPosition(0, 206, 0);
+        sub.node.setPosition(0, 214, 0);
         alignLabel(sub, 'center');
 
         this.factionCard(ov, 'BU', -196);
         this.factionCard(ov, 'DS', 196);
 
         const dLabel = mkLabel(ov, '难度', 14, '#93a3b0');
-        dLabel.node.setPosition(-232, -152, 0);
+        dLabel.node.setPosition(-330, -152, 0);
         const diffs: Array<['easy' | 'normal' | 'hard', string]> = [['easy', '轻松'], ['normal', '标准'], ['hard', '残酷']];
-        let dx = -160;
+        let dx = -266;
         for (const [key, text] of diffs) {
-            const b = new UIButton(ov, 92, 32, text, 13, () => {
+            const b = new UIButton(ov, 84, 32, text, 13, () => {
                 this.selDiff = key;
                 this.rebuildMenu();
             });
             b.setPosition(dx, -152);
             b.setActive(this.selDiff === key);
             this.menuBtns.push(b);
-            dx += 100;
+            dx += 90;
         }
+
+        // skirmish options, like the classic set-up screen
+        const cLabel = mkLabel(ov, '资金', 14, '#93a3b0');
+        cLabel.node.setPosition(20, -152, 0);
+        let cx = 84;
+        for (const amount of [4200, 7000, 10000]) {
+            const b = new UIButton(ov, 76, 32, `${amount / 1000}k`, 13, () => {
+                this.selCredits = amount;
+                this.rebuildMenu();
+            });
+            b.setPosition(cx, -152);
+            b.setActive(this.selCredits === amount);
+            this.menuBtns.push(b);
+            cx += 82;
+        }
+
+        const sw = new UIButton(ov, 150, 32, `超级武器 ${this.selSuper ? '开' : '关'}`, 13, () => {
+            this.selSuper = !this.selSuper;
+            this.rebuildMenu();
+        }, this.selSuper ? PAL.cyan : PAL.cyanDim);
+        sw.setPosition(432, -152);
+        sw.setActive(this.selSuper);
+        this.menuBtns.push(sw);
 
         const start = new UIButton(ov, 250, 54, '开 始 战 斗', 21, () => {
             this.mode = 'game';
             this.menuLayer.active = false;
-            this.hooks.onStart(this.selFaction, this.selDiff);
+            this.hooks.onStart(this.selFaction, this.selDiff, this.selCredits, this.selSuper);
         }, PAL.cyan);
         start.setPosition(0, -238);
         this.menuBtns.push(start);
@@ -726,6 +947,7 @@ export class UI {
         this.overlay.setGroupsVisible(false);
         this.overlay.hideRadial();
         this.overlay.hideBox();
+        for (const b of this.swButtons) b.node.active = false;
     }
 
     hideMenu() {
@@ -735,6 +957,8 @@ export class UI {
         this.cardLayer.active = true;
         this.overlay.setGroupsVisible(true);
         this.mode = 'game';
+        this.cardSig = '';
+        for (const b of this.swButtons) b.node.active = true;
     }
 
     /* ------------------------------------------------------------ */
@@ -777,21 +1001,28 @@ export class UI {
 
     showPause() {
         this.mode = 'paused';
-        const box = this.modalBase(460, 420, '暂 停', PAL.cyan);
-        this.modalButton(box, 0, 96, 236, '继续战斗', () => this.hooks.onResume());
-        this.toggleButton(box, 0, 36, 236, '自动索敌', !!this.game?.autoAcquire, () => {
-            if (!this.game) return;
-            this.game.autoAcquire = !this.game.autoAcquire;
-            this.showPause();
-        });
-        this.toggleButton(box, 0, -8, 236, '保持阵型', !!this.game?.holdFormation, () => {
+        const box = this.modalBase(480, 470, '暂 停', PAL.cyan);
+        this.modalButton(box, 0, 118, 250, '继续战斗', () => this.hooks.onResume());
+        this.toggleButton(box, 0, 58, 250, '保持阵型', !!this.game?.holdFormation, () => {
             if (!this.game) return;
             this.game.holdFormation = !this.game.holdFormation;
             this.showPause();
         });
-        this.modalButton(box, 0, -70, 236, '重新开始', () => this.hooks.onRestart());
-        this.modalButton(box, 0, -126, 236, '返回主菜单', () => this.hooks.onQuit(), PAL.red);
+        this.toggleButton(box, 0, 14, 250, '采集车警报', !!this.game?.autoReplace, () => {
+            if (!this.game) return;
+            this.game.autoReplace = !this.game.autoReplace;
+            this.showPause();
+        });
+        this.toggleButton(box, 0, -30, 250, '音效', !this.soundMuted, () => {
+            this.soundMuted = !this.soundMuted;
+            this.hooks.onToggleSound(this.soundMuted);
+            this.showPause();
+        });
+        this.modalButton(box, 0, -92, 250, '重新开始', () => this.hooks.onRestart());
+        this.modalButton(box, 0, -148, 250, '返回主菜单', () => this.hooks.onQuit(), PAL.red);
     }
+
+    soundMuted = false;
 
     /** on/off switch used by the optional assists inside the pause panel */
     private toggleButton(parent: Node, x: number, y: number, w: number, text: string, on: boolean, cb: () => void) {
@@ -825,17 +1056,28 @@ export class UI {
     /* ------------------------------------------------------------ */
     /* input                                                         */
     /* ------------------------------------------------------------ */
-    private allButtons(): UIButton[] {
-        return [this.btnPause, this.btnAll, this.btnStop, this.btnAttackMove, this.btnHarvest,
-            this.btnSell, this.btnCancelBuild, this.btnZoomIn, this.btnZoomOut];
+    private actionButtons(): UIButton[] {
+        return [this.btnStop, this.btnAttackMove, this.btnStance, this.btnScatter, this.btnHarvest,
+            this.btnRepair, this.btnSell, this.btnDeploy, this.btnCancelBuild];
+    }
+
+    private staticButtons(): UIButton[] {
+        return [this.btnPause, this.btnAll, this.btnZoomIn, this.btnZoomOut];
     }
 
     hitTest(x: number, y: number): boolean {
         if (this.mode !== 'game') return true;
         if (this.overlay.radialOpen) return true;
         if (this.overlay.groupAt(x, y) >= 0) return true;
-        for (const b of this.allButtons()) {
+        if (this.swAt(x, y)) return true;
+        for (const b of this.staticButtons()) {
             if (b.visible && Math.abs(x - b.cx) <= b.w / 2 && Math.abs(y - b.cy) <= b.h / 2) return true;
+        }
+        for (const b of this.actionButtons()) {
+            if (b.visible && b.enabled && Math.abs(x - b.cx) <= b.w / 2 && Math.abs(y - b.cy) <= b.h / 2) return true;
+        }
+        for (const b of this.tabBtns) {
+            if (Math.abs(x - b.cx) <= b.w / 2 && Math.abs(y - b.cy) <= b.h / 2) return true;
         }
         for (const c of this.cards) if (c.node.active && c.hit(x, y)) return true;
         const m = this.mmSize / 2 + 8;
@@ -857,8 +1099,17 @@ export class UI {
      */
     handleLongPress(x: number, y: number): boolean {
         const c = this.cardAt(x, y);
-        if (c && c.kind === 'unit' && this.game && this.game.selectedBuilding) {
-            this.hooks.onProduceBatch(this.game.selectedBuilding, c.id, QUEUE_MAX);
+        if (!c || !this.game) return false;
+        if (c.kind === 'unit') {
+            this.hooks.onProduce(this.tab, c.id, QUEUE_MAX);
+            return true;
+        }
+        // long press on a structure card cancels the queued / ready item
+        const q = this.game.human.queues.structure;
+        const idx = q.items.findIndex(it => it.defId === c.id);
+        if (idx >= 0) {
+            this.hooks.onCancelQueue('structure', idx);
+            this.toast('已取消建造并返还已投入晶体', 'info');
             return true;
         }
         return false;
@@ -866,17 +1117,31 @@ export class UI {
 
     onTap(x: number, y: number): boolean {
         if (this.mode === 'menu') {
-            for (const b of this.menuBtns) if (b.hit(x, y)) { b.onClick(); return true; }
+            for (const b of this.menuBtns) {
+                if (b.visible && Math.abs(x - b.cx) <= b.w / 2 && Math.abs(y - b.cy) <= b.h / 2) { b.onClick(); return true; }
+            }
             return true;
         }
         if (this.mode !== 'game') {
-            for (const b of this.modalBtns) if (b.hit(x, y)) { b.onClick(); return true; }
+            for (const b of this.modalBtns) {
+                if (b.visible && Math.abs(x - b.cx) <= b.w / 2 && Math.abs(y - b.cy) <= b.h / 2) { b.onClick(); return true; }
+            }
             return true;
         }
-        for (const b of this.allButtons()) if (b.hit(x, y)) { b.onClick(); return true; }
+        for (const b of this.staticButtons()) if (b.hit(x, y)) { b.onClick(); return true; }
+        for (const b of this.actionButtons()) if (b.hit(x, y)) { b.onClick(); return true; }
+        for (const b of this.tabBtns) {
+            if (Math.abs(x - b.cx) <= b.w / 2 && Math.abs(y - b.cy) <= b.h / 2) { b.onClick(); return true; }
+        }
+        const sw = this.swAt(x, y);
+        if (sw) { this.hooks.onSuperWeapon(sw); return true; }
         if (this.overlay.groupAt(x, y) >= 0) return true;
         const mmHalf = this.mmSize / 2;
         if (Math.abs(x - this.mmX) <= mmHalf && Math.abs(y - this.mmY) <= mmHalf) {
+            if (!this.game || !this.game.radarOnline(this.game.human)) {
+                this.toast('雷达离线：电力不足', 'warn');
+                return true;
+            }
             const wx = ((x - this.mmX + mmHalf) / this.mmSize) * MAP_SIZE - HALF;
             const wy = ((y - this.mmY + mmHalf) / this.mmSize) * MAP_SIZE - HALF;
             this.hooks.onMinimap(wx, wy);
@@ -884,9 +1149,16 @@ export class UI {
         }
         for (const c of this.cards) {
             if (!c.node.active || !c.hit(x, y)) continue;
-            if (!c.enabled) { this.toast('条件不足', 'warn'); return true; }
-            if (c.kind === 'build') this.hooks.onBuild(c.id);
-            else if (this.game?.selectedBuilding) this.hooks.onProduce(this.game.selectedBuilding, c.id);
+            if (!c.enabled) { this.toast(c.costL.string, 'warn'); return true; }
+            if (c.kind === 'build') {
+                const g = this.game;
+                if (!g) return true;
+                const ready = g.readyStructure(g.human);
+                if (ready && ready.defId === c.id) this.hooks.onPlace(c.id);
+                else this.hooks.onBuild(c.id);
+            } else {
+                this.hooks.onProduce(this.tab, c.id, 1);
+            }
             return true;
         }
         if (y > HH - 60 || y < -HH + 228) return true;
@@ -916,25 +1188,52 @@ export class UI {
 
         const selCount = g.selection.length;
         const hasB = !!g.selectedBuilding;
+        const hasHarvester = g.selection.some(u => u.isHarvester);
+        const hasCombat = g.selection.some(u => !u.isHarvester && !u.isEngineer && !u.isMcv);
+        const hasMcv = g.selection.some(u => u.isMcv);
         this.btnStop.setVisible(selCount > 0);
-        this.btnAttackMove.setVisible(selCount > 0);
-        this.btnHarvest.setVisible(g.selection.some(u => u.isHarvester));
+        this.btnAttackMove.setVisible(hasCombat);
+        this.btnStance.setVisible(hasCombat);
+        this.btnScatter.setVisible(selCount > 0 && !hasB);
+        this.btnHarvest.setVisible(hasHarvester);
+        this.btnRepair.setVisible(hasB);
         this.btnSell.setVisible(hasB);
-        this.btnCancelBuild.setVisible(!!g.buildMode);
+        this.btnDeploy.setVisible(hasMcv);
+        if (hasB) {
+            const b = g.selectedBuilding!;
+            this.btnRepair.setEnabled(b.done && b.hp < b.maxHp - 0.5);
+            this.btnSell.setEnabled(b.done);
+        }
+        this.btnCancelBuild.setVisible(!!g.placeMode || !!g.swTargeting);
+        this.btnAttackMove.setActive(this.attackMoveMode);
 
-        if (g.buildMode) {
-            this.hintL.string = `放置 ${BUILDINGS[g.buildMode].name} · 点地面连续放置 · 「取消建造」结束`;
+        // right-align the visible action buttons in a single row
+        const visible = this.actionButtons().filter(b => b.visible);
+        let ax = HW - 50;
+        for (const b of visible) {
+            b.setPosition(ax, -HH + 186);
+            ax -= b.w + 8;
+        }
+
+        if (g.swTargeting) {
+            this.hintL.string = `选择 ${SUPER_WEAPONS[g.swTargeting].name} 目标 · 点地面发射`;
+        } else if (g.placeMode) {
+            this.hintL.string = `放置 ${BUILDINGS[g.placeMode].name} · 点击地面确定`;
         } else if (hasB) {
             const b = g.selectedBuilding;
-            const q = b.queue.length ? ` · 队列 ${b.queue.length}/${QUEUE_MAX}` : '';
-            this.hintL.string = `${b.def.name}${q}${b.done ? '' : ` · 建造中 ${Math.round(b.progress * 100)}%`}`;
+            this.hintL.string = `${b.def.name} · ${Math.ceil(b.hp)}/${Math.round(b.maxHp)}${b.repairing ? ' · 维修中' : ''}`;
         } else if (selCount > 0) {
             const u = g.selection[0];
+            const lv = u.level > 0 ? (u.level >= 2 ? ' · 精锐' : ' · 老兵') : '';
+            const st = u.isHarvester || u.isEngineer || u.isMcv ? ''
+                : ` · ${u.stance === 'aggressive' ? '主动' : u.stance === 'hold' ? '坚守' : '警戒'}`;
             this.hintL.string = selCount === 1
-                ? `${u.def.name} · HP ${Math.ceil(u.hp)}/${u.def.hp}${u.isHarvester ? ` · 载货 ${Math.floor(u.cargo)}` : ''}`
-                : `已选中 ${selCount} 个单位${this.attackMoveMode ? ' · 攻击移动' : ''} · 长按呼出指令`;
+                ? `${u.def.name}${lv}${st} · HP ${Math.ceil(u.hp)}`
+                : `已选中 ${selCount} 个单位${g.waypointMode ? ' · 路径模式' : ''}`;
         } else {
-            this.hintL.string = '拖拽框选 · 点选单位 · 长按指令盘 · 双指平移缩放';
+            this.hintL.string = g.waypointMode
+                ? '路径模式：依次点击追加路径点 · 长按关闭'
+                : `部队 ${g.units.filter(u => u.owner === 0 && !u.isHarvester).length} · 建筑 ${g.buildings.filter(b => b.owner === 0).length} · 击毁 ${h.kills}`;
         }
 
         const counts: number[] = [];
@@ -942,7 +1241,9 @@ export class UI {
         this.overlay.refreshGroups(counts, this.activeGroup);
 
         this.refreshCards();
+        this.refreshSwButtons();
         this.refreshMinimap(dt);
+        this.refreshTabButtons();
 
         if (this.toastT > 0) {
             this.toastT -= dt;

@@ -8,6 +8,9 @@
 node_modules/
 *.log
 
+# 第三方参考资料（原版红警 Android 移植，GPL-3.0，仅本地对照，不入库）
+RedAlert2-Android-main/
+
 # 系统文件
 .DS_Store
 Thumbs.db

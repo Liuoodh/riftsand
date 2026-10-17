@@ -86,7 +86,6 @@ export function drawUnit(g: Graphics, def: UnitDef, faction: Faction) {
     g.clear();
     const tc = team(faction);
     const gc = glow(faction);
-    const r = def.radius;
 
     if (def.kind === 'infantry') {
         drawInfantry(g, def, faction, tc, gc);
@@ -100,31 +99,80 @@ export function drawUnit(g: Graphics, def: UnitDef, faction: Faction) {
         drawHarvester(g, def, faction, tc, gc);
         return;
     }
+    if (def.kind === 'mcv') {
+        drawMcv(g, def, faction, tc, gc);
+        return;
+    }
     drawVehicle(g, def, faction, tc, gc);
 }
 
 function drawInfantry(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Color) {
     const isRocket = def.id === 'breaker' || def.id === 'stinger';
-    shadowEllipse(g, 10, 4.5, 1, -1, 46);
+    const isEngineer = !!def.engineer;
+    const isStealth = !!def.cloak;
+    shadowEllipse(g, isStealth ? 9 : 10, 4.5, 1, -1, 46);
     // legs
     rr(g, -4, -2, 4, 7, 1.5, C.slateDark);
     rr(g, 1, -2, 4, 7, 1.5, C.slateDark);
+
+    if (isEngineer) {
+        // hi-vis vest and a tool pack instead of a rifle
+        poly(g, [[-6, 4], [5, 5], [7, 11], [-6, 11]], C.slate, C.slateLight, 1);
+        rr(g, -5, 6, 11, 3, 1, C.amber);
+        rr(g, -8, 2, 5, 7, 1.5, C.slateLight, C.slateDark, 0.8);
+        line(g, -7.5, 5, -3.5, 5, C.amber, 1.4);
+        circle(g, 1, 14, 4.2, HEX(PAL.amber, 230), C.slateDark, 1);
+        line(g, 2, 15, 5, 15, C.white, 1.6);
+        return;
+    }
+
     // torso
     poly(g, [[-6, 4], [5, 5], [7, 11], [-6, 11]], C.slate, C.slateLight, 1);
     // shoulder pads in team colour
     rr(g, -7, 8, 5, 4, 1.5, tc);
     // helmet
-    circle(g, 1, 14, 4.2, C.slateLight, C.slateDark, 1);
+    circle(g, 1, 14, isStealth ? 3.6 : 4.2, isStealth ? C.slateDark : C.slateLight, C.slateDark, 1);
     // visor
-    line(g, 2, 15, 5, 15, gc, 1.8);
-    // weapon
-    if (isRocket) {
+    line(g, 2, 15, 5, 15, isStealth ? HEX(PAL.violet, 220) : gc, 1.8);
+    if (isStealth) {
+        // folded cloak silhouette
+        g.moveTo(-8, 6);
+        g.quadraticCurveTo(-11, 2, -6, -1);
+        g.strokeColor = new Color(gc.r, gc.g, gc.b, 120);
+        g.lineWidth = 1.6;
+        g.stroke();
+        rr(g, 4, 7.5, 8, 2, 1, C.slateDark);
+        line(g, 11, 8.5, 13, 8.5, HEX(PAL.violet, 190), 1.4);
+    } else if (isRocket) {
         rr(g, 4, 7, 11, 3.4, 1.4, C.slateDark, C.slateLight, 0.8);
         line(g, 12, 8.7, 16, 8.7, C.amber, 2);
     } else {
         rr(g, 4, 7.5, 9, 2.2, 1, C.slateDark);
         line(g, 10, 8.6, 14, 8.6, C.slateLight, 1.6);
     }
+}
+
+/** mobile construction vehicle: a tracked hull carrying a folded command core */
+function drawMcv(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Color) {
+    const w = 40, h = 26;
+    shadowEllipse(g, w * 0.6, h * 0.5, 3, -4, 60);
+    rr(g, -w / 2, -h / 2 - 2, w, 6, 2.4, C.slateDark);
+    rr(g, -w / 2, h / 2 - 4, w, 6, 2.4, C.slateDark);
+    for (let i = -3; i <= 3; i++) {
+        line(g, i * 5.4, -h / 2 - 1.5, i * 5.4, -h / 2 + 2.5, C.ink, 1.1);
+        line(g, i * 5.4, h / 2 - 3.5, i * 5.4, h / 2 + 0.5, C.ink, 1.1);
+    }
+    rr(g, -w / 2 + 2, -h / 2 + 3, w - 4, h - 6, 3, C.slate, C.slateLight, 1.3);
+    // folded core module
+    poly(g, [[-9, -6], [8, -6], [10, 4], [0, 9], [-10, 3]], C.slateLight, C.slateDark, 1.2);
+    circle(g, 0, 0, 4.4, hexA(gc, 40), hexA(gc, 200), 1.4);
+    circle(g, 0, 0, 1.8, hexA(gc, 230));
+    // crane arm
+    line(g, -13, 2, -19, 11, C.slateDark, 2.6);
+    line(g, -19, 11, -12, 13, C.slateDark, 2);
+    circle(g, -12, 13, 1.8, C.amber);
+    neon(g, -w / 2 + 5, 4, -w / 2 + 5, h / 2 - 5, gc, 1.4);
+    rr(g, w / 2 - 12, -3, 8, 5, 1.2, tc);
 }
 
 function drawVehicle(g: Graphics, def: UnitDef, faction: Faction, tc: Color, gc: Color) {
@@ -264,6 +312,14 @@ export function drawBuilding(g: Graphics, def: BuildingDef, faction: Faction, pr
             break;
         case 'archive':
         case 'vault': buildTech(g, half, h, tc, gc, def.id === 'vault');
+            break;
+        case 'orbital': buildOrbital(g, half, tc, gc);
+            break;
+        case 'aegis': buildAegis(g, half, tc, gc);
+            break;
+        case 'storm': buildStorm(g, half, tc, gc);
+            break;
+        case 'mirage': buildMirage(g, half, tc, gc);
             break;
         default: break;
     }
@@ -478,6 +534,135 @@ function buildTech(g: Graphics, half: number, h: number, tc: Color, gc: Color, v
     rr(g, -half * 0.75, -half * 0.85, half * 1.5, half * 0.26, 3, C.slateDark, C.slateLight, 1);
     neon(g, -half * 0.7, -half * 0.72, half * 0.7, -half * 0.72, gc, 1.6);
 }
+
+/* ---------------- super weapon structures ---------------- */
+function buildOrbital(g: Graphics, half: number, tc: Color, gc: Color) {
+    // ground ring
+    g.ellipse(0, -half * 0.1, half * 0.8, half * 0.34);
+    g.strokeColor = new Color(gc.r, gc.g, gc.b, 110);
+    g.lineWidth = 2;
+    g.stroke();
+    // central emitter tower
+    poly(g, [[-half * 0.2, -half * 0.5], [half * 0.2, -half * 0.5], [half * 0.12, half * 0.4], [-half * 0.12, half * 0.4]],
+        C.slate, C.slateLight, 1.4);
+    circle(g, 0, half * 0.46, half * 0.16, C.slateLight, gc, 1.4);
+    circle(g, 0, half * 0.46, half * 0.07, hexA(gc, 210));
+    // three receiving dishes
+    for (let i = 0; i < 3; i++) {
+        const a = (i / 3) * Math.PI * 2 + 0.5;
+        const x = Math.cos(a) * half * 0.55;
+        const y = Math.sin(a) * half * 0.3 - half * 0.05;
+        g.ellipse(x, y, 10, 5);
+        g.fillColor = C.slateLight;
+        g.fill();
+        g.strokeColor = HEX(PAL.cyan, 160);
+        g.lineWidth = 1.2;
+        g.stroke();
+        line(g, x, y, x * 1.15, y + 8, C.slateDark, 1.6);
+        circle(g, x, y, 1.6, tc);
+    }
+    // uplink beam
+    neon(g, 0, half * 0.55, 0, half * 0.95, gc, 2.4);
+}
+
+function buildAegis(g: Graphics, half: number, tc: Color, gc: Color) {
+    poly(g, [[0, half * 0.72], [half * 0.42, half * 0.2], [half * 0.3, -half * 0.55],
+        [0, -half * 0.72], [-half * 0.3, -half * 0.55], [-half * 0.42, half * 0.2]],
+        C.slate, C.slateLight, 1.6);
+    for (let i = 1; i <= 2; i++) {
+        g.ellipse(0, 0, half * 0.22 * i, half * 0.22 * i);
+        g.strokeColor = hexA(gc, 150 - i * 30);
+        g.lineWidth = 1.6;
+        g.stroke();
+    }
+    circle(g, 0, 0, half * 0.1, hexA(gc, 220));
+    for (let i = 0; i < 4; i++) {
+        const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+        neon(g, Math.cos(a) * half * 0.3, Math.sin(a) * half * 0.3,
+            Math.cos(a) * half * 0.48, Math.sin(a) * half * 0.48, gc, 1.6);
+    }
+    rr(g, -half * 0.5, -half * 0.8, half, 6, 2, tc);
+}
+
+function buildStorm(g: Graphics, half: number, tc: Color, gc: Color) {
+    // funnel tower
+    poly(g, [[-half * 0.34, -half * 0.62], [half * 0.34, -half * 0.62],
+        [half * 0.16, half * 0.62], [-half * 0.16, half * 0.62]], C.slate, C.slateLight, 1.4);
+    for (let i = 0; i < 4; i++) {
+        const y = -half * 0.5 + i * half * 0.36;
+        const w = half * (0.3 - i * 0.05);
+        g.moveTo(-w, y);
+        g.quadraticCurveTo(0, y + 10, w, y + 3);
+        g.strokeColor = hexA(gc, 190 - i * 30);
+        g.lineWidth = 2.2;
+        g.stroke();
+    }
+    // vortex ring at the top
+    g.ellipse(0, half * 0.66, half * 0.4, half * 0.14);
+    g.strokeColor = HEX(PAL.violet, 200);
+    g.lineWidth = 2.4;
+    g.stroke();
+    g.ellipse(0, half * 0.66, half * 0.24, half * 0.08);
+    g.strokeColor = HEX(PAL.violet, 120);
+    g.lineWidth = 1.6;
+    g.stroke();
+    rr(g, -half * 0.55, -half * 0.78, half * 1.1, 7, 2, tc);
+}
+
+function buildMirage(g: Graphics, half: number, tc: Color, gc: Color) {
+    // prism crystal on a ring base
+    poly(g, [[0, half * 0.8], [half * 0.34, half * 0.1], [half * 0.18, -half * 0.62],
+        [-half * 0.18, -half * 0.62], [-half * 0.34, half * 0.1]], hexA(gc, 60), gc, 1.6);
+    poly(g, [[0, half * 0.8], [half * 0.1, half * 0.05], [0, -half * 0.5], [-half * 0.1, half * 0.05]],
+        hexA(gc, 120), null);
+    g.ellipse(0, -half * 0.55, half * 0.6, half * 0.2);
+    g.strokeColor = hexA(gc, 140);
+    g.lineWidth = 2;
+    g.stroke();
+    for (let i = 0; i < 3; i++) {
+        const a = (i / 3) * Math.PI * 2;
+        line(g, Math.cos(a) * half * 0.5, -half * 0.55 + Math.sin(a) * half * 0.14,
+            Math.cos(a) * half * 0.5, -half * 0.7 + Math.sin(a) * half * 0.14, C.slateDark, 2);
+        circle(g, Math.cos(a) * half * 0.5, -half * 0.7 + Math.sin(a) * half * 0.14, 1.8, tc);
+    }
+}
+
+/* ---------------- overlays ---------------- */
+
+/** veteran chevrons drawn above a unit: one for veteran, two for elite */
+export function drawChevron(g: Graphics, level: number, y: number, color: Color) {
+    if (level <= 0) return;
+    for (let i = 0; i < level; i++) {
+        const yy = y + i * 4.5;
+        g.moveTo(-5, yy);
+        g.lineTo(0, yy + 3.6);
+        g.lineTo(5, yy);
+        g.strokeColor = color;
+        g.lineWidth = 1.8;
+        g.stroke();
+    }
+}
+
+/** supply crate pickup */
+export function drawPickup(g: Graphics, kind: 'credits' | 'repair' | 'promote', bob: number) {
+    g.clear();
+    const y = Math.sin(bob * 2.4) * 2;
+    g.ellipse(2, -8, 15, 5);
+    g.fillColor = new Color(0, 0, 0, 60);
+    g.fill();
+    const col = kind === 'credits' ? HEX(PAL.cyan) : kind === 'repair' ? HEX(PAL.green) : HEX(PAL.violet);
+    rr(g, -12, y - 9, 24, 18, 3, C.slate, col, 1.6);
+    rr(g, -12, y - 2, 24, 5, 1, hexA(col, 200));
+    if (kind === 'credits') {
+        circle(g, 0, y + 4, 3.6, hexA(col, 230));
+    } else if (kind === 'repair') {
+        line(g, -5, y + 4, 5, y + 4, col, 2.4);
+        line(g, 0, y - 1, 0, y + 9, col, 2.4);
+    } else {
+        poly(g, [[0, y + 9], [4, y + 2], [0, y - 4], [-4, y + 2]], hexA(col, 230));
+    }
+}
+
 
 /* ================================================================== */
 /* TERRAIN PROPS                                                      */

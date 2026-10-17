@@ -5,16 +5,17 @@
  * a few times per second.
  */
 import {
-    Node, Graphics, Color, UITransform, Sprite, SpriteFrame, Texture2D, Rect, Layers, Vec3,
+    Node, Graphics, Color, UITransform, Sprite, SpriteFrame, Texture2D, Rect, Layers, Vec3, UIOpacity,
 } from 'cc';
 import {
-    BUILDINGS, UNITS, TILE, HALF, MAP_SIZE, MAP_TILES, PAL, HEX, Faction, makeRng, clamp,
+    BUILDINGS, UNITS, TILE, HALF, MAP_SIZE, MAP_TILES, PAL, HEX, Faction, FACTIONS, makeRng, clamp,
 } from '../core/Core';
 import { TerrainMap, TileKind } from '../world/Terrain';
 import { Game, PlayerState } from '../game/Game';
-import { Unit, Building, Entity, Projectile, Fx } from '../game/Entities';
+import { Unit, Building, Entity, Projectile, Fx, Zone, Crate } from '../game/Entities';
 import {
     drawUnit, drawBuilding, drawCrystal, drawRock, drawBush, drawCrate,
+    drawChevron, drawPickup,
 } from './Art';
 
 const hex = (h: string, a = 255) => HEX(h, a);
@@ -356,8 +357,15 @@ export class EntityView {
     body: Graphics;
     ring: Graphics;
     hp: Graphics;
+    chev: Graphics;
+    deco: Graphics;
+    private op: UIOpacity;
     private lastHp = -1;
     private lastProgress = -1;
+    private lastOwner = -2;
+    private lastLevel = -1;
+    private lastRepair = false;
+    private lastPrimary = false;
     private wasSelected = false;
     private hpTimer = 0;
 
@@ -367,23 +375,28 @@ export class EntityView {
         this.ring = gfxNode(this.node, 'ring');
         this.body = gfxNode(this.node, 'body');
         this.hp = gfxNode(this.node, 'hp');
+        this.chev = gfxNode(this.node, 'chev');
+        this.deco = gfxNode(this.node, 'deco');
+        this.op = this.body.node.addComponent(UIOpacity);
         if (e instanceof Unit) {
-            drawUnit(this.body, e.def, (e.owner === 0 ? gameFaction : otherFaction));
+            drawUnit(this.body, e.def, factionOf(e.owner));
             // world art is a touch small on phones; scale the body only so the
             // selection ring and hp bar keep their true footprint
             this.body.node.setScale(1.28, 1.28, 1);
         } else if (e instanceof Building) {
-            drawBuilding(this.body, e.def, e.def.faction, e.progress);
+            drawBuilding(this.body, e.def, factionOf(e.owner), e.progress);
         }
+        this.lastOwner = e.owner;
         this.node.setSiblingIndex(0);
     }
 
     redraw(selFaction: Faction) {
         if (this.e instanceof Unit) drawUnit(this.body, this.e.def, selFaction);
-        else if (this.e instanceof Building) drawBuilding(this.body, this.e.def, this.e.def.faction, (this.e as Building).progress);
+        else if (this.e instanceof Building) drawBuilding(this.body, this.e.def, selFaction, (this.e as Building).progress);
+        this.lastOwner = this.e.owner;
     }
 
-    update(dt: number, selected: boolean, faction: Faction, otherFaction: Faction) {
+    update(dt: number, selected: boolean, faction: Faction, otherFaction: Faction, cloaked = false, primary = false) {
         const e = this.e;
         if (e instanceof Unit) {
             const u = e;
@@ -396,10 +409,30 @@ export class EntityView {
                 this.node.setScale(flip ? -1 : 1, u.hitFlash > 0 ? 1.06 : 1, 1);
                 this.hp.node.setScale(flip ? -1 : 1, 1, 1);
             }
+            // own cloaked units read as a ghost so the player can still command them
+            const target = cloaked ? 120 : 255;
+            if (this.op.opacity !== target) this.op.opacity = target;
+            if (u.level !== this.lastLevel) {
+                this.lastLevel = u.level;
+                this.chev.clear();
+                if (u.level > 0) {
+                    drawChevron(this.chev, u.level, u.radius + (air ? 30 : 20), HEX(PAL.amber, 235));
+                }
+            }
         } else if (e instanceof Building) {
-            if (Math.abs((e as Building).progress - this.lastProgress) > 0.02) {
-                this.lastProgress = (e as Building).progress;
-                drawBuilding(this.body, (e as Building).def, (e as Building).def.faction, (e as Building).progress);
+            const b = e as Building;
+            if (b.owner !== this.lastOwner) this.redraw(factionOf(b.owner));
+            if (Math.abs(b.progress - this.lastProgress) > 0.02) {
+                this.lastProgress = b.progress;
+                drawBuilding(this.body, b.def, factionOf(b.owner), b.progress);
+            }
+            if (b.repairing !== this.lastRepair) {
+                this.lastRepair = b.repairing;
+                this.drawRepair(b);
+            }
+            if (primary !== this.lastPrimary) {
+                this.lastPrimary = primary;
+                this.drawPrimary(b);
             }
         }
 
@@ -437,6 +470,53 @@ export class EntityView {
         }
     }
 
+    private drawRepair(b: Building) {
+        const g = this.chev;
+        g.clear();
+        if (!b.repairing) return;
+        const y = b.radius + 8;
+        // little wrench + cross above the roof
+        g.circle(0, y, 7);
+        g.fillColor = new Color(10, 16, 20, 190);
+        g.fill();
+        g.strokeColor = HEX(PAL.green, 230);
+        g.lineWidth = 1.5;
+        g.stroke();
+        g.moveTo(-3.4, y - 3.4);
+        g.lineTo(3.4, y + 3.4);
+        g.strokeColor = HEX(PAL.green, 240);
+        g.lineWidth = 1.8;
+        g.stroke();
+        g.circle(-3.6, y - 3.6, 2.1);
+        g.strokeColor = HEX(PAL.green, 240);
+        g.lineWidth = 1.4;
+        g.stroke();
+    }
+
+    /** small star on the structure that actually trains units */
+    private drawPrimary(b: Building) {
+        const g = this.deco;
+        g.clear();
+        if (!this.lastPrimary) return;
+        const x = b.radius * 0.62;
+        const y = b.radius * 0.62;
+        g.circle(x, y, 6.5);
+        g.fillColor = new Color(10, 16, 20, 190);
+        g.fill();
+        g.strokeColor = HEX(PAL.amber, 235);
+        g.lineWidth = 1.2;
+        g.stroke();
+        for (let i = 0; i < 5; i++) {
+            const a = -Math.PI / 2 + (i / 5) * Math.PI * 2;
+            const a2 = a + Math.PI / 5;
+            g.moveTo(x + Math.cos(a) * 4.4, y + Math.sin(a) * 4.4);
+            g.lineTo(x + Math.cos(a2) * 1.8, y + Math.sin(a2) * 1.8);
+        }
+        g.strokeColor = HEX(PAL.amber, 230);
+        g.lineWidth = 1.3;
+        g.stroke();
+    }
+
     private drawHp(ratio: number, selected: boolean) {
         const g = this.hp;
         g.clear();
@@ -465,6 +545,7 @@ export class EntityView {
 /** Set by WorldRenderer so EntityView can pick faction colours on first draw */
 let gameFaction: Faction = 'BU';
 let otherFaction: Faction = 'DS';
+const factionOf = (owner: number): Faction => (owner === 1 ? otherFaction : gameFaction);
 
 /* ================================================================== */
 /* WORLD RENDERER                                                     */
@@ -472,8 +553,11 @@ let otherFaction: Faction = 'DS';
 export class WorldRenderer {
     root: Node;
     terrainLayer: Node;
+    rallyLayer: Node;
+    crateLayer: Node;
     buildingLayer: Node;
     unitLayer: Node;
+    zoneLayer: Node;
     projLayer: Node;
     fxLayer: Node;
     fogLayer: Node;
@@ -481,24 +565,33 @@ export class WorldRenderer {
     terrain: TerrainView;
     fog: FogView;
 
+    private rallyG: Graphics;
     views = new Map<number, EntityView>();
     projViews = new Map<Projectile, Node>();
     fxViews = new Map<Fx, Graphics>();
+    zoneViews = new Map<Zone, Graphics>();
+    crateViews = new Map<Crate, Graphics>();
 
     private tmpColor = new Color();
+    private primIds = new Set<number>();
+    private primTimer = 0;
 
     constructor(canvas: Node, public game: Game) {
         this.root = plainNode(canvas, 'WorldRoot');
         this.terrainLayer = plainNode(this.root, 'L0_Terrain');
-        this.buildingLayer = plainNode(this.root, 'L1_Buildings');
-        this.unitLayer = plainNode(this.root, 'L2_Units');
-        this.projLayer = plainNode(this.root, 'L3_Projectiles');
-        this.fxLayer = plainNode(this.root, 'L4_Fx');
-        this.fogLayer = plainNode(this.root, 'L5_Fog');
+        this.rallyLayer = plainNode(this.root, 'L1_Rally');
+        this.crateLayer = plainNode(this.root, 'L2_Crates');
+        this.buildingLayer = plainNode(this.root, 'L2_Buildings');
+        this.unitLayer = plainNode(this.root, 'L3_Units');
+        this.zoneLayer = plainNode(this.root, 'L4_Zones');
+        this.projLayer = plainNode(this.root, 'L5_Projectiles');
+        this.fxLayer = plainNode(this.root, 'L6_Fx');
+        this.fogLayer = plainNode(this.root, 'L7_Fog');
 
         gameFaction = game.human.faction;
         otherFaction = game.enemy.faction;
 
+        this.rallyG = gfxNode(this.rallyLayer, 'rally');
         this.terrain = new TerrainView(this.terrainLayer, game.terrain, game.human.faction);
         this.fog = new FogView(this.fogLayer);
 
@@ -544,6 +637,15 @@ export class WorldRenderer {
             g.strokeColor = new Color(255, 160, 80, Math.floor(120 * (1 - k)));
             g.lineWidth = 3;
             g.stroke();
+            // debris streaks make a big strike read as an explosion, not a disc
+            for (let i = 0; i < 8; i++) {
+                const a = (i / 8) * Math.PI * 2 + k * 0.6;
+                g.moveTo(Math.cos(a) * r * 0.62, Math.sin(a) * r * 0.62);
+                g.lineTo(Math.cos(a) * r * (1.25 + k * 0.5), Math.sin(a) * r * (1.25 + k * 0.5));
+            }
+            g.strokeColor = new Color(255, 205, 130, Math.floor(160 * (1 - k)));
+            g.lineWidth = 2;
+            g.stroke();
         } else if (f.kind === 'muzzle') {
             const r = (5 + k * 9) * f.scale;
             g.circle(0, 0, r);
@@ -560,6 +662,20 @@ export class WorldRenderer {
             g.strokeColor = new Color(63, 217, 236, Math.floor(180 * (1 - k)));
             g.lineWidth = 2;
             g.stroke();
+        } else if (f.kind === 'target') {
+            // incoming orbital strike: shrinking crosshair
+            const r = 110 * (1 - k * 0.55);
+            g.circle(0, 0, r);
+            g.strokeColor = new Color(255, 90, 70, Math.floor(220 * (0.4 + 0.6 * k)));
+            g.lineWidth = 2.4;
+            g.stroke();
+            g.moveTo(-r * 1.15, 0); g.lineTo(-r * 0.5, 0);
+            g.moveTo(r * 0.5, 0); g.lineTo(r * 1.15, 0);
+            g.moveTo(0, -r * 1.15); g.lineTo(0, -r * 0.5);
+            g.moveTo(0, r * 0.5); g.lineTo(0, r * 1.15);
+            g.strokeColor = new Color(255, 140, 100, Math.floor(220 * (0.5 + 0.5 * k)));
+            g.lineWidth = 2;
+            g.stroke();
         } else if (f.kind === 'spawn') {
             const r = (8 + k * 26) * f.scale;
             g.ellipse(0, 0, r, r * 0.55);
@@ -574,10 +690,121 @@ export class WorldRenderer {
         }
     }
 
+    private drawRally(game: Game) {
+        const g = this.rallyG;
+        g.clear();
+        const b = game.selectedBuilding;
+        if (!b || b.dead || !b.rally) return;
+        const tx = b.rally.x;
+        const ty = b.rally.y;
+        // dashed line from the structure edge to the flag
+        const dx = tx - b.x;
+        const dy = ty - b.y;
+        const len = Math.hypot(dx, dy);
+        if (len < 8) return;
+        const ux = dx / len;
+        const uy = dy / len;
+        const start = b.radius * 0.75;
+        for (let d = start; d < len; d += 14) {
+            const a = d / len;
+            const b2 = Math.min(1, (d + 7) / len);
+            g.moveTo(b.x + ux * (d), b.y + uy * (d));
+            g.lineTo(b.x + ux * (len * b2), b.y + uy * (len * b2));
+        }
+        g.strokeColor = HEX(PAL.cyan, 120);
+        g.lineWidth = 1.4;
+        g.stroke();
+        g.circle(tx, ty, 9);
+        g.strokeColor = HEX(PAL.cyan, 190);
+        g.lineWidth = 1.6;
+        g.stroke();
+        g.circle(tx, ty, 2.5);
+        g.fillColor = HEX(PAL.cyan, 220);
+        g.fill();
+        g.moveTo(tx, ty);
+        g.lineTo(tx, ty + 18);
+        g.strokeColor = HEX(PAL.white, 200);
+        g.lineWidth = 1.6;
+        g.stroke();
+        g.moveTo(tx, ty + 18);
+        g.lineTo(tx + 12, ty + 13);
+        g.lineTo(tx, ty + 8);
+        g.close();
+        g.fillColor = HEX(PAL.cyan, 210);
+        g.fill();
+    }
+
+    private drawZone(g: Graphics, z: Zone) {
+        g.clear();
+        const c = HEX(z.color);
+        const fade = z.t < 0.6 ? z.t / 0.6 : (1 - z.k) < 0.2 ? (1 - z.k) / 0.2 : 1;
+        const a = (v: number) => Math.max(0, Math.min(255, Math.round(v * fade)));
+        g.circle(0, 0, z.r);
+        g.fillColor = new Color(c.r, c.g, c.b, a(z.kind === 'sandstorm' ? 46 : 26));
+        g.fill();
+        g.circle(0, 0, z.r);
+        g.strokeColor = new Color(c.r, c.g, c.b, a(210));
+        g.lineWidth = 2.4;
+        g.stroke();
+
+        if (z.kind === 'sandstorm') {
+            for (let i = 0; i < 4; i++) {
+                const rr = z.r * (0.35 + i * 0.17);
+                const spin = z.t * (1.1 + i * 0.25) + i;
+                for (let k = 0; k < 3; k++) {
+                    const a0 = spin + (k / 3) * Math.PI * 2;
+                    g.moveTo(Math.cos(a0) * rr, Math.sin(a0) * rr * 0.6);
+                    g.quadraticCurveTo(
+                        Math.cos(a0 + 0.5) * rr * 1.2, Math.sin(a0 + 0.5) * rr * 0.7,
+                        Math.cos(a0 + 0.9) * rr, Math.sin(a0 + 0.9) * rr * 0.55,
+                    );
+                    g.strokeColor = new Color(c.r, c.g, c.b, a(150 - i * 22));
+                    g.lineWidth = 2.2;
+                    g.stroke();
+                }
+            }
+        } else if (z.kind === 'aegis') {
+            for (let i = 0; i < 2; i++) {
+                const rr = z.r * (0.62 + i * 0.3) + Math.sin(z.t * 2 + i) * 4;
+                g.circle(0, 0, rr);
+                g.strokeColor = new Color(c.r, c.g, c.b, a(150 - i * 50));
+                g.lineWidth = 1.8;
+                g.stroke();
+            }
+            for (let i = 0; i < 6; i++) {
+                const ang = (i / 6) * Math.PI * 2 + z.t * 0.3;
+                g.moveTo(Math.cos(ang) * z.r * 0.7, Math.sin(ang) * z.r * 0.7);
+                g.lineTo(Math.cos(ang) * z.r, Math.sin(ang) * z.r);
+                g.strokeColor = new Color(c.r, c.g, c.b, a(110));
+                g.lineWidth = 1.4;
+                g.stroke();
+            }
+        } else {
+            for (let i = 0; i < 5; i++) {
+                const rr = z.r * (0.3 + i * 0.16);
+                const a0 = z.t * 0.8 + i * 1.1;
+                g.arc(0, 0, rr, a0, a0 + 1.1, false);
+                g.strokeColor = new Color(c.r, c.g, c.b, a(120 - i * 15));
+                g.lineWidth = 2;
+                g.stroke();
+            }
+        }
+    }
+
     sync(dt: number, cameraBounds: { x0: number; y0: number; x1: number; y1: number }) {
         const g = this.game;
         const human = g.human;
         const sel = g.selection;
+
+        this.primTimer -= dt;
+        if (this.primTimer <= 0) {
+            this.primTimer = 1;
+            this.primIds.clear();
+            for (const cat of ['structure', 'infantry', 'vehicle', 'aircraft'] as const) {
+                const f = g.primaryFactory(human, cat);
+                if (f) this.primIds.add(f.id);
+            }
+        }
 
         // entities
         for (const [id, v] of this.views) {
@@ -593,7 +820,39 @@ export class WorldRenderer {
                 ? g.selectedBuilding === e
                 : sel.indexOf(e as Unit) >= 0;
             if (!selected && !inView) continue;
-            v.update(dt, selected, human.faction, g.enemy.faction);
+            const cloaked = e instanceof Unit && e.owner === human.id && e.cloaked;
+            v.update(dt, selected, human.faction, g.enemy.faction, cloaked, this.primIds.has(e.id));
+        }
+
+        // rally marker for the selected structure
+        this.drawRally(g);
+
+        // super weapon fields
+        for (const z of g.zones) {
+            let gg = this.zoneViews.get(z);
+            if (!gg) {
+                gg = gfxNode(this.zoneLayer, 'zone');
+                this.zoneViews.set(z, gg);
+            }
+            gg.node.setPosition(z.x, z.y, 0);
+            this.drawZone(gg, z);
+        }
+        for (const [z, gg] of this.zoneViews) {
+            if (z.dead || g.zones.indexOf(z) < 0) { gg.node.destroy(); this.zoneViews.delete(z); }
+        }
+
+        // supply crates
+        for (const c of g.crates) {
+            let gg = this.crateViews.get(c);
+            if (!gg) {
+                gg = gfxNode(this.crateLayer, 'crate');
+                this.crateViews.set(c, gg);
+            }
+            gg.node.setPosition(c.x, c.y, 0);
+            drawPickup(gg, c.kind, c.t);
+        }
+        for (const [c, gg] of this.crateViews) {
+            if (c.dead || g.crates.indexOf(c) < 0) { gg.node.destroy(); this.crateViews.delete(c); }
         }
 
         // projectiles

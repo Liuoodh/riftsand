@@ -27,9 +27,11 @@ export class CameraRig {
 
     focus(x: number, y: number, immediate = false) {
         this.tx = x; this.ty = y;
+        this.clampCam();
         if (immediate) {
-            this.x = x; this.y = y;
-            this.clampCam();
+            // snap to the clamped target, never outside the map rim
+            this.x = this.tx;
+            this.y = this.ty;
             this.apply();
         }
     }
