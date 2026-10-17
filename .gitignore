@@ -1,6 +1,9 @@
 # 本地验证产物（headless 截图、临时探测脚本）
 .shots/
 
+# 本地工作区数据（AI 协作笔记、缓存）
+.workbuddy/
+
 # 依赖与日志
 node_modules/
 *.log
