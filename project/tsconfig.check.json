@@ -1,0 +1,11 @@
+{
+  "extends": "./temp/tsconfig.cocos.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "target": "ES2017",
+    "isolatedModules": false
+  },
+  "include": ["assets/scripts/**/*.ts"]
+}

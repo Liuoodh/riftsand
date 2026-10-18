@@ -6,7 +6,7 @@
 - 引擎：Cocos Creator 3.8.8
 - 语言：TypeScript
 - 仓库：https://github.com/Liuoodh/riftsand
-- 当前版本：**v0.20.0-dev — 摇晃根因：图集行方向反了（整行上下镜像）**
+- 当前版本：**v0.21.0-dev — 寻路 / 碰撞 / 让路整套改为原版移植（逐行对应）**
 
 ![主菜单](docs/shots/menu.png)
 
@@ -160,6 +160,56 @@ frameIndex = startFrame + facingMult * facingIndex + animFrame
 
 等距下屏幕矩形对应世界**菱形**，把两个角反投影成世界 AABB 必然漏选。
 现在框选是「逐单位投影到屏幕再判断是否在矩形内」——这是等距下唯一正确的做法。
+
+## v0.21：碰撞与寻路整套改成原版移植
+
+前几版一直在给「别扭感」打补丁：逐帧转向、互相推开、被堵状态链、重新规划、找车位……
+补丁越多越不像原版。这一版把整套换成**原版逐行移植**，并删掉了所有自造的手感修正。
+
+新增 `project/assets/scripts/sim/`（约 2400 行），与原版文件一一对应：
+
+| 原版 | 移植 |
+|---|---|
+| `map/pathFinder/PathFinder.ts` | `sim/Graph.ts`（A*、二叉堆、状态池） |
+| `map/Terrain.ts` | `sim/Passability.ts`（通行图、`computePath`、`findObstacles`） |
+| `map/TileOccupation.ts` | `sim/TileOccupation.ts`（一格一车 / 三步兵） |
+| `gameobject/trait/MoveTrait.ts` | `sim/MoveTrait.ts`（四态机） |
+| `locomotor/DriveLocomotor.ts` / `FootLocomotor.ts` | `sim/Locomotor.ts` |
+| `task/move/MoveTask.ts`（1037 行） | `sim/MoveTask.ts` |
+| `task/move/MoveAsideTask.ts` | `sim/MoveAsideTask.ts` |
+| `unit/FacingUtil.ts`、`TurnTask`、`WaitTicksTask` | `sim/Math2.ts`、`sim/Task.ts` |
+
+**删掉的东西**（这是"别扭"的来源）：
+
+- `Unit.moveStep`：逐帧算前视点、按最短弧转向、轴分离滑步
+- `Game.separateHulls` / `spreadInfantry` / `driftTo`：把重叠单位推开
+- `Game.handleBlocked`：等待/绕行/推人/找车位的 300 行状态链
+- `Game.repathAround` / `parkNear` / `pickParkingSpot` / `failMove` / `syncCell`
+- `Game.resolveWorldCollision`：把卡墙的单位"吸"出来
+- `world/Path.ts`（旧的独立 A* 与拉直平滑）
+- 单位不再有 `path / speedCur / blockT / waitT / repath` 这类并行状态，只有 `moveTrait`
+
+**现在的规则**（全部来自原版）：
+
+1. 一个订单就是一条 `MoveTask`：规划 → 逐格检查 → 等待 / 喊让 / 绕行 / 就近停车。
+2. 朝向只在换段时确定一次（`TurnTask`），直线行驶的航向变化是 **0**。
+3. 没有任何"推开"：站着的兵位移 0px（movetest 断言）。
+4. 目的地被占 → `findRelocationTile` 在 5 格内选格停车，不是原地打转。
+5. 迎面相遇 → 双方停车，超时后把冲突格标为不可通行重新规划，自己绕开。
+6. 固定 60Hz 任务驱动，与渲染帧率解耦。
+
+调试中踩到并修掉的三个真问题：
+
+- **`ignoredBlockers` 过滤写反**：`indexOf(...) === -1` 在未设置时返回 false，把**所有**障碍都滤掉了
+  —— 于是两辆坦克直接对穿。原版写法是 `!?.includes(...)`。
+- **`u.face` 越界**：朝向换算成渲染弧度时未归一化，270° 变成 -360°，贴图索引算出负数。
+- **任务未开始就被取消**：`onEnd` 里 `targetOffset` 还是 undefined，攻击/接管时每帧刷新订单会崩。
+
+文档：`docs/MOVE-PORT.md`（逐行对应表 + 适配说明）。
+
+回归：movetest 18/18、crowdtest 7/7、phystest 10/10、pathsim 停滞 0/27、harvesttest 6/6、
+maptest 21/21、menutest 11/11、assettest 20/20、inputtest 20/20、speedtest 12/12、
+featuretest 13/14（阵营切换为既有 UI 问题）、6 分钟对战 0 报错。
 
 ## v0.20：摇晃的根因是图集「行方向反了」（整行上下镜像）
 

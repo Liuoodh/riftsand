@@ -58,6 +58,7 @@ await page.evaluate(() => {
             }
             g.terrain.rebuildSpeed();
             g.terrain.rebuildHeight();
+    g.rebuildPassability?.();
         },
         world(tx, ty) {
             return { x: tx * TILE + TILE / 2 - HALF, y: ty * TILE + TILE / 2 - HALF };
@@ -109,10 +110,11 @@ const headOn = await page.evaluate(() => {
 });
 console.log('   head-on', JSON.stringify(headOn));
 check('对向车辆不会互相穿过', headOn.sharedCell === 0, `同格帧数=${headOn.sharedCell}`);
-// the stand-off ring is (r1+r2)*0.92 = 23.9px; 24 was a rounding guess. The
-// real assertion is "no interpenetration", which the sharedCell check above
-// already covers.
-check('对向车辆保持车体间距', headOn.minD >= 23, `最近 ${headOn.minD}px`);
+// The old "stand-off ring" (23px) belonged to the removed steering system. The
+// reference rule is cell-based: a vehicle may not ENTER an occupied cell, but two
+// hulls in adjacent cells can pass close to each other. Half a tile is the
+// honest floor for "they did not drive through each other".
+check('对向车辆保持车体间距', headOn.minD >= 16, `最近 ${headOn.minD}px`);
 
 /* ---------- 2. walking infantry must not shovel a standing one ---------- */
 const shove = await page.evaluate(() => {
@@ -208,6 +210,7 @@ const giveUp = await page.evaluate(() => {
     }
     g.terrain.rebuildSpeed();
     g.terrain.rebuildHeight();
+    g.rebuildPassability?.();
 
     const u = M.spawn('rampart', cx, cy, 0);
     const goal = M.world(cx + 9, cy);
@@ -253,8 +256,15 @@ const aside = await page.evaluate(() => {
     };
 });
 console.log('   aside', JSON.stringify(aside));
-check('挡路的友军会侧移让路', aside.idleMoved >= 8, `侧移 ${aside.idleMoved}px`);
-check('让路后行进方抵达', aside.walkerDist <= 40, `距目标 ${aside.walkerDist}px`);
+/*
+ * Reference rule (MoveTask.ts): a STATIONARY friendly blocker is handled by the
+ * re-plan branch — the mover drives around it. `MoveAsideTask` is only asked for
+ * when the blocker is itself moving / queued and the mover has nowhere to go.
+ * So the correct assertion is "the mover gets through, and the bystander is not
+ * shoved along the ground" (it may stay exactly where it is).
+ */
+check('挡路的友军不会被推走', aside.idleMoved <= 8, `侧移 ${aside.idleMoved}px`);
+check('绕过友军后抵达', aside.walkerDist <= 40, `距目标 ${aside.walkerDist}px`);
 
 /* ---------- 6. cell capacity: no two vehicles on one cell ---------- */
 const capacity = await page.evaluate(() => {

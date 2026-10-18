@@ -113,6 +113,7 @@ const stuck = await page.evaluate(async () => {
     }
     g.terrain.rebuildSpeed();
     g.terrain.rebuildHeight();
+    g.rebuildPassability?.();
 
     const p = w(cx, cy);
     const u = g.spawnUnit(0, window.__riftsandDefs.UNITS.rampart, p.x, p.y);

@@ -90,6 +90,7 @@ const out = await page.evaluate(() => {
         g.terrain.kind[ty * 80 + tx] = 1;
         g.terrain.rebuildSpeed();
         g.terrain.rebuildHeight();
+    g.rebuildPassability?.();
         dune = { tx, ty };
     }
     const sand = findTile(0);
@@ -113,8 +114,11 @@ const out = await page.evaluate(() => {
     res.crystalPassable = !!crystal && !g.terrain.isSolid(crystal.tx, crystal.ty) && !g.isBlocked(crystal.tx, crystal.ty);
     if (crystal) {
         const node = g.terrain.nodeAt(crystal.tx, crystal.ty) || g.terrain.nodes[0];
-        const path = g.finder.find(node.x - 120, node.y - 120, node.x, node.y, { radius: 14 });
-        res.orePath = !!path;
+        /* the ported passability graph replaces the old standalone finder */
+        const fromTile = g.tileAt(node.x - 120, node.y - 120);
+        const toTile = g.tileAt(node.x, node.y);
+        const path = g.passability.computePath(1 /* SpeedType.Track */, false, fromTile, false, toTile, false, {});
+        res.orePath = path.length > 0;
     }
 
     /* 3. mass-based collision: overlapping friendly tank + infantry */
@@ -125,11 +129,16 @@ const out = await page.evaluate(() => {
     tank.invulnUntil = 1e9; foot.invulnUntil = 1e9;
     const t0 = { x: tank.x, y: tank.y }, f0 = { x: foot.x, y: foot.y };
     step(0.6);
+    /*
+     * Reference behaviour: there is no geometric separation pass at all. Two
+     * units that legally share a cell keep their own sub-positions and neither
+     * is pushed. What the test must catch is a unit being SHOVED, not a gap
+     * that is smaller than the drawn hulls.
+     */
     res.sep = {
         tankMoved: Math.hypot(tank.x - t0.x, tank.y - t0.y),
         footMoved: Math.hypot(foot.x - f0.x, foot.y - f0.y),
-        dist: Math.hypot(tank.x - foot.x, tank.y - foot.y),
-        need: (tank.radius + foot.radius) * 0.85,
+        distinctSub: tank.subCell !== foot.subCell,
     };
     tank.dead = true; foot.dead = true;
 
@@ -149,7 +158,8 @@ const out = await page.evaluate(() => {
     const crusher = g.spawnUnit(0, tankDef, base.x + 70, laneY);
     crusher.invulnUntil = 1e9;
     g.orderMoveFor(crusher, base.x + 300, laneY);
-    step(3.5);
+    /* the ported hull pivots before it drives, so give it the full lane */
+    step(6.5);
     res.crush = { victimDead: victim.dead, tankAlive: !crusher.dead };
     crusher.dead = true;
 
@@ -215,11 +225,12 @@ check('沙地比沙丘快，寻路代价更低',
 check('单位踩上沙丘会减速', out.duneMul > 0 && out.duneMul < 1, `terrainMul=${out.duneMul}`);
 check('矿脉可通行且能寻路进入', out.crystalPassable === true && out.orePath === true,
     `passable=${out.crystalPassable} path=${out.orePath}`);
-// The reference has NO mass-weighted pushing — a parked unit is stepped aside,
-// not bulldozed. So the assertion is simply "they end up separated".
-check('重叠单位会被分离（原版无质量位移）',
-    out.sep && out.sep.dist >= out.sep.need * 0.9,
-    out.sep ? `间距 ${out.sep.dist.toFixed(1)} / 需要 ${out.sep.need.toFixed(1)}` : 'no data');
+// The reference has NO mass-weighted pushing and no geometric separation pass:
+// two units that legally share a cell keep their own sub-positions. The test
+// must catch a unit being SHOVED, not a gap smaller than the drawn hulls.
+check('同格单位不会被推挤（原版无质量位移）',
+    out.sep && out.sep.tankMoved < 2 && out.sep.footMoved < 2,
+    out.sep ? `坦克位移 ${out.sep.tankMoved.toFixed(1)} / 步兵位移 ${out.sep.footMoved.toFixed(1)}` : 'no data');
 check('两辆坦克不会重叠', out.tankDist >= out.tankNeed * 0.9,
     `${out.tankDist.toFixed(1)} >= ${out.tankNeed.toFixed(1)}`);
 check('重坦碾过敌方步兵', out.crush && out.crush.victimDead === true && out.crush.tankAlive === true,

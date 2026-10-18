@@ -80,13 +80,20 @@ for (const id of MAPS) {
         };
         const spawns = [stand(g.baseTile[0]), stand(g.baseTile[1])];
         const from = (s) => { const p = w(s.tx, s.ty); return p; };
-        const link = g.finder.find(from(spawns[0]).x, from(spawns[0]).y,
-            from(spawns[1]).x, from(spawns[1]).y, { radius: r });
+        /* reachability now comes from the ported passability graph */
+        const reach = (ax, ay, bx, by) => {
+            const a = g.tileAt(ax, ay);
+            const b = g.tileAt(bx, by);
+            return g.passability.computePath(1 /* Track */, false, a, false, b, false, {}).length > 0;
+        };
+        const link = reach(from(spawns[0]).x, from(spawns[0]).y, from(spawns[1]).x, from(spawns[1]).y);
         const ore = g.terrain.nodes.map((n) => {
             const p = w(n.tx, n.ty);
-            const a = g.finder.find(from(spawns[0]).x, from(spawns[0]).y, p.x, p.y, { radius: r });
-            const b = g.finder.find(from(spawns[1]).x, from(spawns[1]).y, p.x, p.y, { radius: r });
-            return { id: n.id, reach0: !!a, reach1: !!b };
+            return {
+                id: n.id,
+                reach0: reach(from(spawns[0]).x, from(spawns[0]).y, p.x, p.y),
+                reach1: reach(from(spawns[1]).x, from(spawns[1]).y, p.x, p.y),
+            };
         });
         const bases = [0, 1].map((pid) => {
             const b = g.players[pid] ? g.buildings.find((x) => x.owner === pid && x.def.isCore) : null;

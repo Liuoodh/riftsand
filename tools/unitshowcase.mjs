@@ -48,6 +48,7 @@ const staging = await page.evaluate(() => {
     }
     g.terrain.rebuildSpeed();
     g.terrain.rebuildHeight();
+    g.rebuildPassability?.();
     app.renderer.fog.update(g.human, 99);
 
     const spawn = (id, tx, ty, owner) => {

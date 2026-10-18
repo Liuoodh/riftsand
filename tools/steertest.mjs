@@ -47,6 +47,7 @@ const out = await page.evaluate(() => {
         }
         g.terrain.rebuildSpeed();
         g.terrain.rebuildHeight();
+    g.rebuildPassability?.();
     };
     const drop = (u) => {
         u.dead = true;

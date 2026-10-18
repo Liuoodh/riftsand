@@ -64,6 +64,7 @@ const rows = await page.evaluate(async () => {
     }
     g.terrain.rebuildSpeed();
     g.terrain.rebuildHeight();
+    g.rebuildPassability?.();
 
     const atlasIndex = (sf) => {
         const t = sf.texture, r = sf.rect;

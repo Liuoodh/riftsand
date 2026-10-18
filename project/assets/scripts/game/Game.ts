@@ -18,10 +18,17 @@ import {
     BUILD_RADIUS_TILES, makeRng, PROJ_PHYSICS, gameSpeedMul, GAME_SPEED_MAX, BUILDUP_TIME, MAPS, mapById, colorById, setActiveTeamColor,
 } from '../core/Core';
 import { TerrainMap, CrystalNode } from '../world/Terrain';
-import { PathFinder } from '../world/Path';
-import { TileOccupation } from '../world/TileOccupation';
+import { TileCollection, MapBounds, Tile } from '../sim/Tiles';
+import { TileOccupation } from '../sim/TileOccupation';
+import { Passability, MovementZone, SpeedType } from '../sim/Passability';
+import { MoveTask } from '../sim/MoveTask';
+import { MoveTrait, MoveState, MoveResult, TICK } from '../sim/MoveTrait';
+import { facingToRad } from '../sim/Math2';
+import { SimWorld } from '../sim/World';
+import { Position } from '../sim/Position';
+import { UnitOrders } from '../sim/Task';
 import { AUTHORED } from '../world/Maps';
-import { Unit, Building, Projectile, Fx, Entity, SpatialGrid, PlayerId, Zone, Crate, Decal, setWorldBlocked, setUnitBlocked, setRoomCheck } from './Entities';
+import { Unit, Building, Projectile, Fx, Entity, SpatialGrid, PlayerId, Zone, Crate, Decal } from './Entities';
 import { AIController } from './AI';
 
 export type Difficulty = 'easy' | 'normal' | 'hard';
@@ -101,9 +108,17 @@ const REPAIR_SECONDS = 24;
 
 export class Game {
     terrain: TerrainMap;
-    finder: PathFinder;
-    /** who stands on which cell — see world/TileOccupation.ts */
-    occupancy: TileOccupation;
+    /** cell grid the sim reasons about (reference: game.map.tiles) */
+    tiles!: TileCollection;
+    mapBounds!: MapBounds;
+    /** passability graph + A* (reference: game.map.terrain) */
+    passability!: Passability;
+    /** who stands on which cell — see sim/TileOccupation.ts */
+    occupancy!: TileOccupation;
+    /** adapter handed to MoveTask / locomotors */
+    simWorld!: SimWorld;
+    /** fixed-timestep accumulator (the reference runs at ticks, not frames) */
+    private simAcc = 0;
     /** non-blocking rubble left behind by destroyed structures */
     ruins: Array<{ x: number; y: number; size: number; seed: number }> = [];
     /**
@@ -188,19 +203,35 @@ export class Game {
         } else {
             this.terrain.generate(map.seed, map);
         }
-        this.finder = new PathFinder(
-            (tx, ty) => this.isBlocked(tx, ty),
-            (tx, ty) => this.pathCostFor(tx, ty),
-        );
-        this.occupancy = new TileOccupation(MAP_TILES);
-        // movement asks the world directly (see Entities.setWorldBlocked): a unit
-        // must never step into a cell it does not fit in
-        setWorldBlocked((x, y, r) => this.worldBlockedAt(x, y, r));
-        setUnitBlocked((u, x, y) => this.stepBlockedByUnit(u, x, y));
-        // capacity-only test for the CloseEnough rule (reference canStopAtTile)
-        setRoomCheck((u, x, y) => this.occupancy.hasRoomFor(
-            u, Math.floor((x + HALF) / TILE), Math.floor((y + HALF) / TILE),
-        ));
+        /*
+         * Simulation world.
+         *
+         * The reference keeps a `GameMap` object with tiles / bounds / terrain /
+         * tileOccupation; MoveTask and the locomotors only ever talk to that
+         * object. We build the same thing here, backed by the existing
+         * TerrainMap, so the ported code needs no special cases.
+         */
+        this.tiles = new TileCollection(MAP_TILES);
+        this.mapBounds = new MapBounds(MAP_TILES, MAP_TILES);
+        this.syncTiles();
+        this.occupancy = new TileOccupation(MAP_TILES, this.tiles);
+        this.passability = new Passability({
+            tiles: this.tiles,
+            mapBounds: this.mapBounds,
+            tileOccupation: this.occupancy,
+            speedAt: (rx, ry, isInfantry, hover) => this.terrain.speedAt(rx, ry, isInfantry, hover),
+        });
+        // a structure appearing / disappearing changes passability
+        this.occupancy.onChange = (tiles, obj) => this.passability.handleTileOccupationUpdate(tiles, obj);
+        this.simWorld = {
+            terrain: this.passability,
+            tiles: this.tiles,
+            mapBounds: this.mapBounds,
+            tileOccupation: this.occupancy,
+            currentTick: 0,
+            areFriendly: (a, b) => a.owner === b.owner,
+            crushObject: (victim, by) => this.crush(victim, by),
+        };
         this.difficulty = difficulty;
         this.events = events;
         this.rng = makeRng(seed ^ 0x9e3779b9);
@@ -324,6 +355,9 @@ export class Game {
         b.status = instant ? 'ready' : 'buildup';
         b.buildDur = instant ? 0 : BUILDUP_TIME;
         b.buildT = b.buildDur;
+        b.tile = this.tiles.getByMapCoords(tx, ty)!;
+        // the passability graph learns about the footprint before anybody paths
+        this.occupancy.occupyTileRange(b.tile, b);
         this.buildings.push(b);
         this.events.onSpawn?.(b);
         if (!instant) this.events.onSfx?.('place', b.x, b.y);
@@ -333,9 +367,7 @@ export class Game {
     spawnUnit(owner: PlayerId, def: UnitDef, x: number, y: number): Unit {
         let px = clamp(x, -HALF + 20, HALF - 20);
         let py = clamp(y, -HALF + 20, HALF - 20);
-        // A unit must never appear inside a wall or a structure footprint: the
-        // reference resolves the building's exit cell before spawning, so do the
-        // geometric equivalent here instead of letting the physics untangle it.
+        // never appear inside a wall or a structure footprint
         if (this.worldBlockedAt(px, py, def.radius)) {
             const spot = this.nearestStandable(
                 Math.floor((px + HALF) / TILE), Math.floor((py + HALF) / TILE), def.radius, 5,
@@ -343,29 +375,48 @@ export class Game {
             if (spot) { px = spot.x; py = spot.y; }
         }
         const u = new Unit(def, owner, px, py);
-        u.owner = owner;
-        let stx = Math.floor((px + HALF) / TILE);
-        let sty = Math.floor((py + HALF) / TILE);
-        // A cell holds one vehicle or three infantry; place the new unit on a
-        // cell that can actually take it (reference: ExitFactoryTask searches
-        // the factory's exit cells before spawning).
-        if (!this.occupancy.hasRoomFor(u, stx, sty)) {
+
+        /*
+         * Reference state machine wiring.
+         *
+         * A fresh unit owns a MoveTrait (velocity / reservation / state), an
+         * order queue and a Position adapter; the tile occupation table learns
+         * about it before the first tick, exactly like spawn in the reference.
+         */
+        u.tile = this.tileAt(px, py);
+        u.moveTrait = new MoveTrait(u, this.occupancy);
+        u.moveTrait.onTileChange = (oldTile, newTile) => this.onUnitTileChange(u, oldTile, newTile);
+        u.orders = new UnitOrders();
+        u.position = new Position(u, this.tiles);
+
+        let stx = u.tile.rx;
+        let sty = u.tile.ry;
+        const occupiedHere = this.occupancy.getGroundObjectsOnTile(u.tile);
+        const room = def.kind === 'infantry'
+            ? occupiedHere.filter((o: any) => o.isInfantry()).length < 3
+            : occupiedHere.filter((o: any) => o.isUnit()).length === 0;
+        if (!room) {
             const spot = this.findSpawnCell(u, stx, sty, 4);
-            if (spot) { px = spot.x; py = spot.y; stx = spot.tx; sty = spot.ty; u.x = px; u.y = py; u.prevX = px; u.prevY = py; }
-        } else if (def.kind !== 'infantry' && this.occupancy.at(stx, sty)) {
-            /*
-             * A cell can legally hold two harvesters, so `hasRoomFor` says yes
-             * even when someone is already parked there. Spawning on top of that
-             * unit produced two trucks drawn as one sprite; move to a free cell
-             * unless the map is genuinely packed.
-             */
-            const spot = this.findSpawnCell(u, stx, sty, 3);
-            if (spot) { px = spot.x; py = spot.y; stx = spot.tx; sty = spot.ty; u.x = px; u.y = py; u.prevX = px; u.prevY = py; }
+            if (spot) {
+                px = spot.x; py = spot.y;
+                u.x = px; u.y = py; u.prevX = px; u.prevY = py;
+                u.tile = this.tileAt(px, py);
+            }
         }
-        u.cellX = stx;
-        u.cellY = sty;
-        this.occupancy.add(u, stx, sty);
-        if (def.kind === 'infantry') u.subCell = this.occupancy.claimSubCell(u, stx, sty);
+        if (def.kind === 'infantry') {
+            // three men per cell on SUB_CELLS [2,4,3]
+            const used = this.occupancy
+                .getGroundObjectsOnTile(u.tile)
+                .filter((o: any) => o !== u && o.isInfantry())
+                .map((o: any) => o.position.desiredSubCell);
+            const free = [2, 4, 3].find((k) => used.indexOf(k) === -1) ?? 0;
+            u.subCell = free;
+            u.desiredSubCell = free;
+            const off = u.position.computeSubCellOffset(free);
+            u.x = u.tile.rx * TILE + off.x - HALF;
+            u.y = u.tile.ry * TILE + off.y - HALF;
+        }
+        this.occupancy.occupySingleTile(u.tile, u);
         this.units.push(u);
         this.players[owner].built++;
         this.events.onSpawn?.(u);
@@ -421,21 +472,43 @@ export class Game {
         const refineries = this.buildings.filter((b) => !b.dead && b.owner === owner && b.def.dropoff);
         const core = this.buildings.find((b) => !b.dead && b.owner === owner && b.def.isCore);
         if (!refineries.length && !core) return false;
-        this.virtualBlock = { tx, ty, size: def.size };
+        /*
+         * Ask the *passability graph* whether the base would still reach its
+         * income, not a separate geometric test. The hypothetical footprint is
+         * inserted into the occupation table for the duration of the query, so
+         * the graph sees exactly what it would see after placement.
+         */
+        const ghostTile = this.tiles.getByMapCoords(tx, ty);
+        if (!ghostTile) return false;
+        const ghost: any = {
+            isBuilding: true,
+            dead: false,
+            size: def.size,
+            tile: ghostTile,
+            art: { foundation: { width: def.size, height: def.size } },
+            rules: {},
+        };
+        this.occupancy.occupyTileRange(ghostTile, ghost);
         let sealed = false;
-        for (const r of refineries) {
-            const node = this.nearestNode(r.x, r.y);
-            if (!node) continue;
-            const path = this.finder.find(r.x, r.y, node.x, node.y, { radius: 12 });
-            if (!path || path.length === 0) { sealed = true; break; }
-        }
-        if (!sealed && core) {
+        try {
+            const reach = (ax: number, ay: number, bx: number, by: number) => {
+                const a = this.tileAt(ax, ay);
+                const b = this.tileAt(bx, by);
+                return this.passability.computePath(SpeedType.Track, false, a, false, b, false, { bestEffort: false }).length > 0;
+            };
             for (const r of refineries) {
-                const path = this.finder.find(core.x, core.y, r.x, r.y, { radius: 12 });
-                if (!path || path.length === 0) { sealed = true; break; }
+                const node = this.nearestNode(r.x, r.y);
+                if (!node) continue;
+                if (!reach(r.x, r.y, node.x, node.y)) { sealed = true; break; }
             }
+            if (!sealed && core) {
+                for (const r of refineries) {
+                    if (!reach(core.x, core.y, r.x, r.y)) { sealed = true; break; }
+                }
+            }
+        } finally {
+            this.occupancy.unoccupyTileRange(ghostTile, ghost);
         }
-        this.virtualBlock = null;
         return sealed;
     }
 
@@ -456,8 +529,14 @@ export class Game {
                         if (r > 0 && Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
                         const nx = tx + dx, ny = ty + dy;
                         if (nx < 0 || ny < 0 || nx >= MAP_TILES || ny >= MAP_TILES) continue;
-                        if (pass === 0 && this.occupancy.at(nx, ny)) continue;
-                        if (!this.occupancy.hasRoomFor(u, nx, ny)) continue;
+                        const tile = this.tiles.getByMapCoords(nx, ny);
+                        if (!tile) continue;
+                        const here = this.occupancy.getGroundObjectsOnTile(tile);
+                        if (pass === 0 && here.length) continue;
+                        const room = u.def.kind === 'infantry'
+                            ? here.filter((o: any) => o.isInfantry()).length < 3
+                            : here.filter((o: any) => o.isUnit()).length === 0;
+                        if (!room) continue;
                         const wx = nx * TILE + TILE / 2 - HALF;
                         const wy = ny * TILE + TILE / 2 - HALF;
                         if (this.worldBlockedAt(wx, wy, u.radius)) continue;
@@ -825,6 +904,7 @@ export class Game {
      */
     private removeBuilding(b: Building, leaveRuin: boolean) {
         b.dead = true;
+        this.occupancy.unoccupyTileRange(b.tile, b);
         if (leaveRuin) {
             this.ruins.push({
                 x: b.x, y: b.y, size: b.size,
@@ -835,9 +915,15 @@ export class Game {
         // free anything standing inside the footprint so nothing is embedded
         for (const u of this.units) {
             if (u.dead || u.isAir) continue;
-            if (!b.occupies(u.cellX, u.cellY)) continue;
-            const spot = this.nearestStandable(u.cellX, u.cellY, u.radius, 4);
-            if (spot) { u.x = spot.x; u.y = spot.y; this.syncCell(u); }
+            if (!b.occupies(u.tile.rx, u.tile.ry)) continue;
+            const spot = this.nearestStandable(u.tile.rx, u.tile.ry, u.radius, 4);
+            if (spot) {
+                this.occupancy.unoccupySingleTile(u.tile, u);
+                u.x = spot.x;
+                u.y = spot.y;
+                u.tile = this.tileAt(spot.x, spot.y);
+                this.occupancy.occupySingleTile(u.tile, u);
+            }
         }
         this.events.onDeath?.(b);
     }
@@ -1115,6 +1201,7 @@ export class Game {
         const b = this.place(coreDef, u.owner, tx, ty, false);
         b.progress = 0.35;
         b.hp = b.maxHp * 0.35;
+        this.occupancy.unoccupySingleTile(u.tile, u);
         u.dead = true;
         this.events.onDeath?.(u);
         this.pushFx(b.x, b.y, 'build', 1.0, coreDef.size);
@@ -1141,6 +1228,7 @@ export class Game {
             else this.events.onMessage?.('我方建筑被敌方工兵接管', 'warn');
             this.events.onSfx?.('capture');
         }
+        this.occupancy.unoccupySingleTile(u.tile, u);
         u.dead = true;
         u.hp = 0;
         this.events.onDeath?.(u);
@@ -1176,285 +1264,142 @@ export class Game {
         u.order = { k: 'idle' };
     }
 
+    /* ------------------------------------------------------------ */
+    /* movement — everything below goes through the ported MoveTask   */
+    /* ------------------------------------------------------------ */
+
+    /** height level + land kind for every cell, refreshed after map load */
+    private syncTiles() {
+        this.tiles.syncFrom(
+            (rx, ry) => this.terrain.levelAt(rx, ry),
+            (rx, ry) => this.terrain.kind[this.terrain.idx(rx, ry)],
+        );
+    }
+
+    tileAt(x: number, y: number): Tile {
+        const tx = clamp(Math.floor((x + HALF) / TILE), 0, MAP_TILES - 1);
+        const ty = clamp(Math.floor((y + HALF) / TILE), 0, MAP_TILES - 1);
+        return this.tiles.getByMapCoords(tx, ty)!;
+    }
+
     /**
-     * Path to a firing position around a target.
+     * Test / editor hook: the terrain arrays were edited in place.
      *
-     * Returns false when there is no route. The caller must not retry every
-     * frame in that case: alternating between two "nearest reachable" points is
-     * exactly what used to make units wobble back and forth in front of a wall.
+     * The passability graph is cached per speed type, so a direct write to
+     * `terrain.kind` / `terrain.solid` (which is what the probe scripts do to
+     * sculpt a test arena) has to invalidate it or the next path query still
+     * believes the old map.
      */
-    private pathToEntity(u: Unit, target: Entity): boolean {
-        const edge = target.isBuilding ? target.radius + 20 : target.radius + 12;
+    rebuildPassability() {
+        this.syncTiles();
+        (this.passability as any).passabilityGraphs.clear();
+        (this.passability as any).invalidatedTiles.clear();
+    }
+
+    tileOf(tx: number, ty: number): Tile | undefined {
+        return this.tiles.getByMapCoords(tx, ty);
+    }
+
+    /**
+     * Cancel the current order and start a reference MoveTask.
+     *
+     * This replaces the old "compute a polyline, then steer along it" model.
+     * The task owns the whole journey: it plans, re-plans when blocked, waits,
+     * pushes the blocker aside, or parks next to an occupied destination.
+     */
+    private startMove(u: Unit, tile: Tile | undefined, options?: {
+        closeEnoughTiles?: number;
+        strictCloseEnough?: boolean;
+        forceWaitOnPathBlocked?: boolean;
+    }) {
+        if (!tile) return;
+        u.stop();
+        const task = new MoveTask(this.simWorld, tile, false, options);
+        u.orders.addTask(task);
+    }
+
+    /**
+     * Stand-off cell for shooting at `target`.
+     *
+     * Reference: MoveInWeaponRangeTask / AttackMoveTargetTask walk to the nearest
+     * cell from which the weapon can hit. We aim at a point just outside the
+     * target's hull along the current bearing, which is the same cell the retail
+     * approach picks, and let MoveTask handle the rest.
+     */
+    private approachTile(u: Unit, target: Entity): Tile {
+        if (target.isBuilding) {
+            /*
+             * A structure is a footprint, not a point: aiming at
+             * `centre + radius` puts the destination INSIDE the building for the
+             * diagonal approaches (a 3x3 core already extends 1.5 tiles), and the
+             * move task then relocates the unit somewhere useless. Scan the ring
+             * of cells around the footprint and take the closest driveable one.
+             */
+            const b = target as Building;
+            let best: Tile | null = null;
+            let bestD = Infinity;
+            for (let ty = b.ty - 1; ty <= b.ty + b.size; ty++) {
+                for (let tx = b.tx - 1; tx <= b.tx + b.size; tx++) {
+                    const onRing = tx === b.tx - 1 || ty === b.ty - 1 || tx === b.tx + b.size || ty === b.ty + b.size;
+                    if (!onRing) continue;
+                    const t = this.tiles.getByMapCoords(tx, ty);
+                    if (!t) continue;
+                    if (!this.passability.getPassableSpeed(t, u.rules.speedType, u.isInfantry())) continue;
+                    const wx = tx * TILE + TILE / 2 - HALF;
+                    const wy = ty * TILE + TILE / 2 - HALF;
+                    const d = Math.hypot(wx - u.x, wy - u.y);
+                    if (d < bestD) { bestD = d; best = t; }
+                }
+            }
+            if (best) return best;
+        }
+        const edge = target.isBuilding ? target.radius + TILE : target.radius + TILE * 0.6;
         const a = Math.atan2(u.y - target.y, u.x - target.x);
-        const gx = target.x + Math.cos(a) * edge;
-        const gy = target.y + Math.sin(a) * edge;
-        if (u.isAir) { u.path = [{ x: gx, y: gy }]; u.repath = 0; return true; }
-        const path = this.findPath(u, gx, gy, 48);
-        if (path) {
-            u.path = path;
-            u.repath = 3;
-            u.repathTry = 0;
+        return this.tileAt(target.x + Math.cos(a) * edge, target.y + Math.sin(a) * edge);
+    }
+
+    private pathToEntity(u: Unit, target: Entity): boolean {
+        if (u.isAir) {
+            u.stop();
+            const task = new MoveTask(this.simWorld, this.tileAt(target.x, target.y), false, { closeEnoughTiles: 2 });
+            u.orders.addTask(task);
             return true;
         }
-        // no route: retarget at the closest reachable spot, then stop asking
-        this.relocateTo(u, gx, gy, false);
-        u.repathHold = 1.5;
-        return false;
-    }
-
-    /**
-     * Path to a point, or null when the route does not really reach it.
-     *
-     * `PathFinder.find` falls back to `bestEffort`, which happily returns a path
-     * that ends at the unit's OWN cell when nothing is reachable. Treating that
-     * as success is what left trucks "moving" on a one-node path to nowhere: the
-     * waypoint was under 3px away, got popped, and the order restarted forever.
-     */
-    private findPath(u: Unit, gx: number, gy: number, tolerance = 44): { x: number; y: number }[] | null {
-        if (u.isAir) return [{ x: gx, y: gy }];
-        const path = this.findFor(u, gx, gy);
-        if (!path || path.length === 0) return null;
-        if (this.finder.lastFound) return path;
-        // Defensive: with bestEffort off this cannot happen, but a truncated
-        // result must never be mistaken for an arrival.
-        const end = path[path.length - 1];
-        const lg = this.finder.lastGoal;
-        return Math.hypot(end.x - lg.x, end.y - lg.y) <= tolerance ? path : null;
-    }
-
-    /**
-     * Run a path query on behalf of `u`.
-     *
-     * The cost function needs to know whose route is being planned: tiles that
-     * already hold other units are more expensive, so a group ordered onto one
-     * point fans out instead of all committing to the same straight line and
-     * then shoving each other. Reference: MoveTask plans against
-     * `reservedPathNodes` + `findObstacles`, both of which see other units.
-     */
-    private findFor(u: Unit, gx: number, gy: number, opts?: { radius?: number }) {
-        const prev = this.pathingFor;
-        this.pathingFor = u;
-        try {
-            return this.finder.find(u.x, u.y, gx, gy, { radius: opts?.radius ?? u.steerRadius });
-        } finally {
-            this.pathingFor = prev;
-        }
-    }
-
-    /**
-     * Terrain cost plus a crowd penalty.
-     *
-     * Hard-blocking occupied tiles deadlocks a continuous-movement engine (the
-     * block table goes stale the moment anybody accelerates), so this is a soft
-     * penalty: the planner still has a route, it just prefers the emptier one.
-     * A tile holding three tanks costs six times a clear one, which is enough to
-     * make the second and third tank pick a lane of their own.
-     */
-    private pathCostFor(tx: number, ty: number): number {
-        const base = this.terrain.costAt(tx, ty);
-        const set = this.occupancy ? this.occupancy.at(tx, ty) : null;
-        if (!set || set.size === 0) return base;
-        const me = this.pathingFor;
-        let others = 0;
-        for (const o of set) {
-            if (o === me || o.dead) continue;
-            others++;
-        }
-        return others === 0 ? base : base * (1 + Math.min(5, others * 1.6));
-    }
-
-    /**
-     * Retarget an order at the closest cell this unit can actually stand on.
-     *
-     * Reference: MoveTask.findRelocationTile + updateTarget — the move task
-     * never abandons a destination just because the exact tile is blocked, it
-     * relocates to the nearest reachable one. `PathFinder.relocate` does the
-     * flood fill, so the returned point is guaranteed reachable *from where the
-     * unit is standing* (the old `findFreeNear` only checked "is it free").
-     */
-    private relocateTo(u: Unit, gx: number, gy: number, retarget = true): boolean {
-        if (u.isAir) { u.path = [{ x: gx, y: gy }]; u.repath = 4; return true; }
-        const prevFor = this.pathingFor;
-        this.pathingFor = u;
-        const path = this.finder.relocate(u.x, u.y, gx, gy, { radius: u.steerRadius });
-        this.pathingFor = prevFor;
-        if (!path || path.length === 0) return false;
-        u.path = path;
-        u.repath = 4;
-        const lg = this.finder.lastGoal;
-        if (retarget && (u.order.k === 'move' || u.order.k === 'attackmove')) {
-            u.order.x = lg.x;
-            u.order.y = lg.y;
-        }
+        const tile = this.approachTile(u, target);
+        this.startMove(u, tile, { closeEnoughTiles: 1, forceWaitOnPathBlocked: false });
         return true;
-    }
-
-    /**
-     * A reachable parking spot around a structure.
-     *
-     * The retail dock is a set of cells on one side of the refinery; if that side
-     * is walled in the truck simply cannot unload. Trying all eight sides is the
-     * cheap equivalent, and it also spreads trucks out instead of having them
-     * queue on a single point.
-     */
-    private findDock(u: Unit, drop: Building): { x: number; y: number }[] | null {
-        /*
-         * Dock = any free cell touching the refinery footprint.
-         *
-         * Reference: the refinery's dock cells are the tiles around its
-         * foundation. Approximating that with "a point at radius+22 in the
-         * approach direction" put the target in a wall whenever the base grew
-         * around the building; enumerating the ring and taking the nearest
-         * reachable cell is both simpler and robust.
-         */
-        const ring: Array<{ tx: number; ty: number; d: number }> = [];
-        const x0 = drop.tx - 1, y0 = drop.ty - 1;
-        const x1 = drop.tx + drop.size, y1 = drop.ty + drop.size;
-        for (let ty = y0; ty <= y1; ty++) {
-            for (let tx = x0; tx <= x1; tx++) {
-                const onRing = tx === x0 || ty === y0 || tx === x1 || ty === y1;
-                if (!onRing) continue;
-                if (tx < 0 || ty < 0 || tx >= MAP_TILES || ty >= MAP_TILES) continue;
-                if (this.isBlocked(tx, ty)) continue;
-                if (!this.occupancy.hasRoomFor(u, tx, ty)) continue;
-                const wx = tx * TILE + TILE / 2 - HALF;
-                const wy = ty * TILE + TILE / 2 - HALF;
-                if (this.worldBlockedAt(wx, wy, u.steerRadius)) continue;
-                // spread trucks over the apron instead of stacking them on one
-                // cell: a cell accepts two harvesters, the third has to queue
-                let crowd = 0;
-                const here = this.occupancy.at(tx, ty);
-                if (here) for (const o of here) if (o !== u && !o.dead && o.isHarvester) crowd++;
-                ring.push({ tx, ty, d: Math.hypot(wx - u.x, wy - u.y) + crowd * 70 });
-            }
-        }
-        ring.sort((a, b) => a.d - b.d);
-        for (const c of ring.slice(0, 4)) {
-            const wx = c.tx * TILE + TILE / 2 - HALF;
-            const wy = c.ty * TILE + TILE / 2 - HALF;
-            const path = this.findPath(u, wx, wy, 26);
-            if (path) return path;
-        }
-        return null;
-    }
-
-    /** is this unit standing beside the structure's footprint? */
-    private atFootprint(u: Unit, b: Building): boolean {
-        const half = (b.size * TILE) / 2;
-        const cx = clamp(u.x, b.x - half, b.x + half);
-        const cy = clamp(u.y, b.y - half, b.y + half);
-        return Math.hypot(u.x - cx, u.y - cy) < TILE * 0.95;
-    }
-
-    /** the point this unit is currently trying to reach */
-    private orderGoal(u: Unit): { x: number; y: number } | null {
-        const o = u.order;
-        if (o.k === 'move' || o.k === 'attackmove') return { x: o.x, y: o.y };
-        if (o.k === 'harvest') return o.node ? { x: o.node.x, y: o.node.y } : null;
-        if (o.k === 'attack' && o.target && !o.target.dead) return { x: o.target.x, y: o.target.y };
-        return null;
-    }
-
-    /**
-     * Spiral outward from a point looking for ground a unit can actually stand on.
-     *
-     * Kept only for the AI's structure placement (a "is this spot clear" test).
-     * Unit movement must use `relocateTo`: a free cell is worthless if the unit
-     * cannot drive to it, and assuming otherwise was a silent-stall bug.
-     */
-    private findFreeNear(x: number, y: number, maxR: number): { x: number; y: number } | null {
-        const T = TILE;
-        for (let r = 0; r <= maxR; r += T * 0.5) {
-            const steps = r < 1 ? 1 : Math.max(8, Math.ceil((Math.PI * 2 * r) / (T * 0.55)));
-            for (let i = 0; i < steps; i++) {
-                const a = (i / steps) * Math.PI * 2;
-                const px = x + Math.cos(a) * r;
-                const py = y + Math.sin(a) * r;
-                if (px < -HALF + 24 || py < -HALF + 24 || px > HALF - 24 || py > HALF - 24) continue;
-                const tx = Math.floor((px + HALF) / T);
-                const ty = Math.floor((py + HALF) / T);
-                if (this.terrain.isSolid(tx, ty)) continue;
-                if (this.isBlocked(tx, ty)) continue;
-                return { x: px, y: py };
-            }
-        }
-        return null;
-    }
-
-    /** recompute a path without touching the current order (retry must not drift it) */
-    private repathTo(u: Unit, x: number, y: number) {
-        if (u.isAir) {
-            u.path = [{ x, y }];
-        } else {
-            const p = this.findPath(u, x, y, 60);
-            if (p) u.path = p;
-            else if (!this.relocateTo(u, x, y, false)) u.path = [];
-        }
-        u.repath = 4;
-    }
-
-    /** the reference gives up after 5 unreachable targets; do the same */
-    /**
-     * The order could not be completed.
-     *
-     * `reason` matters for the player-facing message: only a missing ROUTE means
-     * "unreachable". Being squeezed by friendly traffic ends the order too, but
-     * telling the player "无法抵达目标" there is a lie — and it was the message
-     * they saw on an empty flat map.
-     */
-    private giveUpOrder(u: Unit, reason: 'nopath' | 'blocked' = 'nopath') {
-        const wasMoving = u.order.k !== 'idle';
-        u.retry = 0;
-        u.stuck = 0;
-        u.waitT = 0;
-        u.stallT = 0;
-        u.blockT = 0;
-        u.repathTry = 0;
-        u.progGoalD = 0;
-        u.stop();
-        u.order = { k: 'idle' };
-        if (wasMoving && u.owner === 0 && reason === 'nopath') {
-            /*
-             * Only a real "there is no route" earns a message.
-             *
-             * Retail never tells the player anything when a unit gives up a tile
-             * to its friends — it just parks. Printing "blocked by friendly
-             * units, standing by" made a normal crowd read as a bug, and the
-             * player quite reasonably asked why friends cannot swap places.
-             */
-            this.events.onMessage?.('无法抵达目标，已取消行进', 'warn');
-        }
     }
 
     private moveUnitTo(u: Unit, x: number, y: number, keepOrder: boolean) {
         x = clamp(x, -HALF + 24, HALF - 24);
         y = clamp(y, -HALF + 24, HALF - 24);
         if (!keepOrder) u.order = { k: 'move', x, y };
-        u.retry = 0;
-        u.waitT = 0;
-        u.blockT = 0;
-        u.repathTry = 0;
-        u.parkTry = 0;
-        u.parkX = NaN;
-        u.parkY = NaN;
-        u.repathHold = 0;
-        if (u.isAir) {
-            u.path = [{ x, y }];
-            u.repath = 4;
-            return;
+        this.startMove(u, this.tileAt(x, y), { closeEnoughTiles: 0 });
+    }
+
+    /** a cell next to a structure where a truck can unload */
+    private dockTile(u: Unit, drop: Building): Tile | undefined {
+        const ring: Tile[] = [];
+        const x0 = drop.tx - 1, y0 = drop.ty - 1;
+        const x1 = drop.tx + drop.size, y1 = drop.ty + drop.size;
+        for (let ty = y0; ty <= y1; ty++) {
+            for (let tx = x0; tx <= x1; tx++) {
+                const onRing = tx === x0 || ty === y0 || tx === x1 || ty === y1;
+                if (!onRing) continue;
+                const t = this.tiles.getByMapCoords(tx, ty);
+                if (!t) continue;
+                if (!this.passability.getPassableSpeed(t, SpeedType.Track, false)) continue;
+                if (this.occupancy.getGroundObjectsOnTile(t).length) continue;
+                ring.push(t);
+            }
         }
-        const path = this.findPath(u, x, y);
-        if (path) {
-            u.path = path;
-            u.repath = 4;
-            return;
-        }
-        /*
-         * Unreachable: retarget at the nearest reachable cell (reference:
-         * findRelocationTile). Only when literally nowhere is reachable does the
-         * order end — that is `MoveResult.Fail`.
-         */
-        if (!this.relocateTo(u, x, y)) this.giveUpOrder(u, 'nopath');
+        if (!ring.length) return this.tileAt(drop.x, drop.y);
+        ring.sort((a, b) => {
+            const da = Math.hypot(a.rx + 0.5 - (u.x + HALF) / TILE, a.ry + 0.5 - (u.y + HALF) / TILE);
+            const db = Math.hypot(b.rx + 0.5 - (u.x + HALF) / TILE, b.ry + 0.5 - (u.y + HALF) / TILE);
+            return da - db;
+        });
+        return ring[0];
     }
 
     private startHarvest(u: Unit, node: CrystalNode | null) {
@@ -1728,7 +1673,7 @@ export class Game {
         this.updateBuildings(dt);
         this.tickProduction(dt);
         this.updateUnits(dt);
-        this.resolveCollisions(dt);
+        this.tickMovement(dt);
         this.updateProjectiles(dt);
         this.updateFx(dt);
         this.tickZones(dt);
@@ -1953,18 +1898,7 @@ export class Game {
             u.cloakT += dt;
             u.calm += dt;
             if (u.scan > 0) u.scan -= dt;
-            /*
-             * The turret lock is rebuilt from the unit's persistent focus, not
-             * from a timer.
-             *
-             * Reference: TurretTrait.desiredFacing is rewritten every tick by
-             * whoever owns the unit's attention — DriveLocomotor points it at the
-             * current attack target (AttackTrait.currentTarget, which survives
-             * between target scans) or at the move bearing, and MoveTrait points
-             * it at the hull only when there is neither. Nothing expires. Our old
-             * 2.2 s timer, plus clearing the aim whenever the scan cooldown was
-             * running, made the barrel swing back and re-acquire over and over.
-             */
+
             if (!u.focus || u.focus.dead) {
                 u.focus = null;
                 u.turretAim = null;
@@ -1977,9 +1911,8 @@ export class Game {
             if (u.slowUntil > -1 && this.time > u.slowUntil) u.slowUntil = -1;
             if (u.invulnUntil > -1 && this.time > u.invulnUntil) u.invulnUntil = -1;
             if (u.recoil > 0) u.recoil -= dt;
-            u.blockedNow = false;
 
-            // sample the ground under the unit: dunes and ore slow it down
+            // terrain multiplier sampled under the unit (dust / visuals)
             if (!u.isAir) {
                 const tx = Math.floor((u.x + HALF) / TILE);
                 const ty = Math.floor((u.y + HALF) / TILE);
@@ -1994,14 +1927,10 @@ export class Game {
                 u.hp = Math.min(u.maxHp, u.hp + u.maxHp * 0.012 * dt);
             }
 
-            if (u.isHarvester) {
-                this.updateHarvester(u, dt);
-            } else {
-                this.updateCombatant(u, dt);
-            }
+            if (u.isHarvester) this.updateHarvester(u, dt);
+            else this.updateCombatant(u, dt);
+
             // the order above decided what the turret is interested in; swing it
-            // now so the 8-way image is right on the same frame. A living focus
-            // keeps the barrel on it even between target scans.
             if (u.focus && !u.focus.dead) u.aimAt(u.focus.x, u.focus.y);
             u.aimTurret(dt, u.turretAim);
 
@@ -2016,7 +1945,7 @@ export class Game {
             }
 
             // dust kicked up by tracks and hover skirts
-            if (!u.isAir && u.def.kind !== 'infantry' && u.speedCur > 26 && u.path.length > 0) {
+            if (!u.isAir && u.def.kind !== 'infantry' && u.speedCur > 26 && u.moveTrait?.isMoving()) {
                 u.dustT -= dt;
                 if (u.dustT <= 0) {
                     u.dustT = 0.2 + Math.random() * 0.14;
@@ -2027,13 +1956,54 @@ export class Game {
                     );
                 }
             }
+        }
+    }
 
-            if (u.speedCap > 0 && u.path.length === 0) u.speedCap = 0;
+    /* ------------------------------------------------------------ */
+    /* reference movement tick                                       */
+    /* ------------------------------------------------------------ */
 
-            // periodic re-path toward a moving attack target
-            if (u.path.length > 0 && u.repath > 0) {
-                u.repath -= dt;
+    /**
+     * Fixed 60 Hz movement loop.
+     *
+     * The reference runs tasks at a fixed tick rate; the render loop does not.
+     * Running MoveTask in fixed steps is what makes the collision decisions
+     * frame-rate independent (and reproducible in the probe scripts).
+     */
+    private tickMovement(dt: number) {
+        this.simAcc += dt;
+        let steps = 0;
+        while (this.simAcc >= TICK && steps < 6) {
+            this.simAcc -= TICK;
+            steps++;
+            this.simWorld.currentTick++;
+            for (const u of this.units) {
+                if (u.dead) continue;
+                u.orders.tick(u);
+                // Idle bookkeeping — reference MoveTrait[NotifyTick.onTick]
+                if (u.moveTrait.moveState !== MoveState.Idle && u.moveTrait.collisionState === 1 && !u.orders.hasTasks()) {
+                    u.moveTrait.resetIdle();
+                    if (!u.focus && u.hasTurret) u.turretAim = null;
+                }
             }
+        }
+        // one visual sync per frame: hull heading in radians, speed for the view
+        for (const u of this.units) {
+            if (u.dead) continue;
+            u.face = facingToRad(u.direction);
+            u.speedCur = u.moveTrait.velocity.length() * 60;
+        }
+    }
+
+    /** tile entry hook — reference MoveTrait.handleTileChange crush pass */
+    private onUnitTileChange(u: Unit, _oldTile: any, newTile: any): void {
+        if (u.dead || !newTile) return;
+        if (!u.canCrush) return;
+        for (const other of this.occupancy.getGroundObjectsOnTile(newTile)) {
+            if (other === u || (other as any).dead) continue;
+            if (!(other as any).isInfantry?.()) continue;
+            if ((other as any).owner === u.owner) continue;
+            this.crush(other as Unit, u);
         }
     }
 
@@ -2045,16 +2015,15 @@ export class Game {
             const t = o.target;
             if (!t || t.dead) { this.advanceOrder(u); return; }
             if (u.isEngineer) { this.advanceOrder(u); return; }
+            u.attackTarget = t;
             const d = dist(u.x, u.y, t.x, t.y);
             const range = (w ? w.range : 90) * 0.92 + (t.isBuilding ? t.radius * 0.7 : t.radius);
             if (d > range) {
-                if (u.repathHold <= 0 && (u.path.length === 0 || u.repath <= 0)) this.pathToEntity(u, t);
-                if (u.path.length > 0) u.moveStep(dt, 1);
+                if (!u.orders.hasTasks()) this.pathToEntity(u, t);
             } else {
                 u.stop();
                 u.focus = t;
                 u.aimAt(t.x, t.y);
-                // swing on the same tick so aimReady() judges the new bearing
                 u.aimTurret(dt, u.turretAim);
                 if (w && u.cd <= 0 && u.aimReady()) { this.fire(u, w, t); u.cd = w.cd * u.rofMul; }
             }
@@ -2065,9 +2034,16 @@ export class Game {
             const t = o.target as Building;
             if (!t || t.dead || !u.isEngineer) { this.advanceOrder(u); return; }
             const d = dist(u.x, u.y, t.x, t.y);
-            if (d > t.radius + 22) {
-                if (u.path.length === 0 || u.repath <= 0) this.pathToEntity(u, t);
-                u.moveStep(dt, 1);
+            /*
+             * The engineer walks to a cell on the ring around the footprint, so
+             * "close enough to capture" has to be measured from the FOOTPRINT,
+             * not from the sprite radius: a 2x2 structure's ring cell centre is
+             * 48px out, which is further than radius + 22 and used to leave the
+             * engineer standing next to the wall forever, re-issuing the same
+             * one-cell move task.
+             */
+            if (d > t.radius + TILE) {
+                if (!u.orders.hasTasks()) this.pathToEntity(u, t);
             } else {
                 u.stop();
                 this.resolveEngineer(u, t);
@@ -2092,35 +2068,33 @@ export class Game {
                     return;
                 }
             }
-            if (u.path.length > 0) u.moveStep(dt, 1);
-            else this.advanceOrder(u);
+            if (!u.orders.hasTasks()) this.advanceOrder(u);
             return;
         }
 
         if (o.k === 'move') {
-            if (u.path.length > 0) u.moveStep(dt, 1);
-            else this.advanceOrder(u);
+            if (!u.orders.hasTasks()) this.advanceOrder(u);
             return;
         }
 
         // idle: stance decides how far a unit will pick fights on its own
+        u.attackTarget = u.focus;
         if (w && u.stance !== 'hold' && u.scan <= 0) {
             u.scan = 0.22 + Math.random() * 0.12;
             const acq = w.range * (u.stance === 'aggressive' ? 1.4 : 0.98);
             const t = this.findTargetFor(u, w, u.x, u.y, acq);
             if (t) {
                 u.focus = t;
+                u.attackTarget = t;
                 const d = dist(u.x, u.y, t.x, t.y);
                 if (u.cd <= 0 && d <= w.range * 1.02) { this.fire(u, w, t); u.cd = w.cd * u.rofMul; }
-                if (u.stance === 'aggressive' && d > w.range * 0.85 && u.path.length === 0) {
+                if (u.stance === 'aggressive' && d > w.range * 0.85 && !u.orders.hasTasks()) {
                     this.pathToEntity(u, t);
                 }
             } else if (u.focus && Math.hypot(u.focus.x - u.x, u.focus.y - u.y) > w.range * 1.35) {
-                // the lock is only dropped when the target really left the fight
                 u.focus = null;
             }
         }
-        if (u.path.length > 0) u.moveStep(dt, 1);
     }
 
     private updateHarvester(u: Unit, dt: number) {
@@ -2128,8 +2102,7 @@ export class Game {
         let o = u.order;
         // a direct move order always wins; once it finishes the truck returns to work
         if (o.k === 'move') {
-            if (u.path.length > 0) u.moveStep(dt, 1);
-            else this.advanceOrder(u);
+            if (!u.orders.hasTasks()) this.advanceOrder(u);
             return;
         }
         if (o.k !== 'harvest') {
@@ -2145,18 +2118,14 @@ export class Game {
                 order.node = node;
                 u.mineNode = node;
                 if (!node) { u.order = { k: 'idle' }; return; }
-                const pth = this.findPath(u, node.x, node.y, TILE * 1.2);
-                if (!pth) {
-                    // No route: cool the field and look for another one. Falling
-                    // back to "walk straight at it" is what used to drive trucks
-                    // into the refinery wall over and over.
-                    this.coolNode(node, 10);
-                    order.node = null;
-                    order.timer = 0.4;
-                    u.order = { k: 'harvest', node: null, phase: 'seek', timer: 0.4 };
-                    return;
-                }
-                u.path = pth;
+                /*
+                 * Reference: the truck gets a MoveTask to the ore cell with
+                 * closeEnoughTiles, and MoveTask itself relocates to a free cell
+                 * when the ore is crowded. No "is it reachable" pre-check: an
+                 * unreachable target ends the task with MoveResult.Fail, and the
+                 * phase machine below reacts to exactly that.
+                 */
+                this.startMove(u, this.tileAt(node.x, node.y), { closeEnoughTiles: 1 });
                 order.phase = 'toMine';
                 order.timer = 0;
                 break;
@@ -2165,80 +2134,29 @@ export class Game {
                 const node = order.node;
                 if (!node || node.amount <= 0 || this.buildingAt(node.tx, node.ty)) { order.phase = 'seek'; return; }
                 const d = dist(u.x, u.y, node.x, node.y);
-                if (d < TILE * 1.35) {
+                if (d < TILE * 1.45) {
                     order.phase = 'mining';
                     order.timer = u.def.mineTime || 3;
                     u.stop();
                     break;
                 }
-                if (u.path.length > 0) {
-                    u.moveStep(dt, 1);
-                    if (u.blockedNow) {
-                        order.timer += dt;
-                        /*
-                         * Two trucks converging on one ore cell deadlock: the cell
-                         * takes one vehicle, so each waits for the other and
-                         * neither ever mines. After a moment, ask whoever is in
-                         * the way to move, then give the field a rest and pick
-                         * another one.
-                         */
-                        if (order.timer > 1.2) {
-                            order.timer = 0;
-                            const blocker = this.blockerAt(u) || this.nearestBlocker(u);
-                            if (blocker && blocker.owner === u.owner && !blocker.isHarvester) {
-                                this.requestAside(blocker, u);
-                            } else if (blocker && blocker.isHarvester) {
-                                // truck vs truck: one of them has to reverse
-                                this.backOff(u);
-                            } else {
-                                this.coolNode(node, 5);
-                                order.node = null;
-                                order.phase = 'seek';
-                            }
-                        }
-                    } else {
-                        // decay instead of reset: two trucks wedged against each
-                        // other flicker in and out of "blocked" every frame, and a
-                        // hard reset meant the timeout never fired
-                        order.timer = Math.max(0, order.timer - dt * 0.4);
-                    }
-                } else {
-                    /*
-                     * The path ran out before the truck was close enough.
-                     *
-                     * Re-path a couple of times before giving up on the field:
-                     * the old code cooled the node the instant the path emptied,
-                     * which on a busy ore field happened constantly (a second
-                     * truck temporarily occupying the target cell is enough).
-                     */
-                    const again = this.findPath(u, node.x, node.y, TILE * 0.9);
-                    if (again) {
-                        u.path = again;
+                if (!u.orders.hasTasks()) {
+                    const result = u.moveTrait.lastMoveResult;
+                    if (result === MoveResult.Fail) {
+                        this.coolNode(node, 8);
+                        order.node = null;
+                        order.phase = 'seek';
                         order.timer = 0;
                     } else {
-                        order.timer += dt;
-                        if (order.timer > 2.2) {
-                            this.coolNode(node, 8);
-                            order.node = null;
-                            order.phase = 'seek';
-                            order.timer = 0;
-                        }
+                        // stopped next to a full cell: mine from here
+                        order.phase = 'mining';
+                        order.timer = u.def.mineTime || 3;
                     }
                 }
                 break;
             }
             case 'mining': {
                 const node = order.node!;
-                /*
-                 * No refinery = no work.
-                 *
-                 * With the dropoff destroyed the truck used to keep mining: cargo
-                 * hit its cap, the unload branch found no dropoff, the phase fell
-                 * back to 'seek', and the loop ate the whole ore field without a
-                 * single credit reaching the player (measured: income frozen at
-                 * 6806 for 120s while two trucks sat on a field chewing it).
-                 * The retail harvester simply waits until a refinery exists.
-                 */
                 const drop = this.nearestDropoff(p, u.x, u.y);
                 if (!drop) {
                     u.order = { k: 'idle' };
@@ -2254,9 +2172,7 @@ export class Game {
                     if (node.amount < 0) node.amount = 0;
                 }
                 if (order.timer <= 0 || u.cargo >= cargo || !node || node.amount <= 0) {
-                    const pth = this.findDock(u, drop)
-                        || this.findFor(u, drop.x, drop.y);
-                    u.path = pth || [];
+                    this.startMove(u, this.dockTile(u, drop), { closeEnoughTiles: 1 });
                     order.phase = 'toBase';
                     order.timer = 0;
                 }
@@ -2266,47 +2182,22 @@ export class Game {
                 const drop = this.nearestDropoff(p, u.x, u.y);
                 if (!drop) { order.phase = 'seek'; return; }
                 const dd = dist(u.x, u.y, drop.x, drop.y);
-                // "Beside the refinery" is what counts, not an exact point: the
-                // retail dock is a set of cells around the foundation. A base can
-                // also wall in its own refinery, in which case a truck parks as
-                // close as it can and unloads there rather than shuttling ore
-                // forever.
-                if (this.atFootprint(u, drop) || dd < drop.radius + 34
-                    || (u.path.length === 0 && dd < drop.radius + 74)) {
+                /*
+                 * "Beside the refinery" is what counts, not an exact point: the
+                 * retail dock is a set of cells around the foundation. A base can
+                 * also wall in its own refinery, in which case a truck parks as
+                 * close as it can and unloads there rather than shuttling forever.
+                 */
+                const insideFootprint = u.tile.rx >= drop.tx && u.tile.rx < drop.tx + drop.size
+                    && u.tile.ry >= drop.ty && u.tile.ry < drop.ty + drop.size;
+                if (insideFootprint || dd < drop.radius + 40
+                    || (!u.orders.hasTasks() && dd < drop.radius + 80)) {
                     order.phase = 'unload';
                     order.timer = UNLOAD_TIME;
                     u.stop();
                     break;
                 }
-                if (u.path.length > 0) {
-                    u.moveStep(dt, 1);
-                    if (u.blockedNow) order.timer += dt;
-                    if (order.timer > 1.2) {
-                        /*
-                         * Truck-vs-truck deadlock on the way home.
-                         *
-                         * Two trucks meeting in a one-cell corridor (refinery on
-                         * one side, ore field on the other) both want the same
-                         * middle cell. Re-pathing does not help — the corridor has
-                         * exactly one lane — so the slower answer is the right one:
-                         * back off a cell and let the other pass, exactly what the
-                         * mining phase already does.
-                         */
-                        order.timer = 0;
-                        const blocker = this.blockerAt(u) || this.nearestBlocker(u);
-                        if (blocker && blocker.owner === u.owner && blocker.isHarvester) {
-                            this.backOff(u);
-                        } else {
-                            const pth = this.findDock(u, drop);
-                            if (pth) u.path = pth;
-                        }
-                    }
-                } else {
-                    const pth = this.findDock(u, drop)
-                        || this.findFor(u, drop.x, drop.y);
-                    if (pth && pth.length > 1) u.path = pth;
-                    else order.phase = 'seek';
-                }
+                if (!u.orders.hasTasks()) this.startMove(u, this.dockTile(u, drop), { closeEnoughTiles: 1 });
                 break;
             }
             case 'unload': {
@@ -2594,7 +2485,7 @@ export class Game {
     kill(e: Entity, killer: PlayerId, source: Unit | null = null) {
         if (e.dead) return;
         e.dead = true;
-        if (e instanceof Unit) this.occupancy.remove(e, e.cellX, e.cellY);
+        if (e instanceof Unit) this.occupancy.unoccupySingleTile(e.tile, e);
         e.hp = 0;
         this.players[e.owner].lost++;
         if (killer !== e.owner) this.players[killer].kills++;
@@ -2658,1120 +2549,19 @@ export class Game {
     }
 
     /**
-     * Per-frame collision pass.
+     * Crush — reference: MoveTrait.handleTileChange.
      *
-     * The reference engine has **no positional resolution between units**: cell
-     * reservation (TileOccupation) plus MoveTask's wait / move-aside / re-path
-     * chain is the entire mechanism. We used to split overlaps and push both
-     * bodies apart, which is what let a walking soldier shovel a standing one
-     * across the map, and what let two enemies slide through each other because
-     * the shove was capped per frame.
-     *
-     * What is left here is only what the simulation genuinely needs:
-     *   - get a hull out of solid ground it somehow ended up inside,
-     *   - spread infantry that share a cell onto their sub-positions,
-     *   - re-register units on the occupancy table (which also runs crush),
-     *   - drive the blocked-unit chain (aside / re-route / give up).
+     * Called the moment a crusher's hull enters a cell: every hostile infantry
+     * on it dies. There is no speed test in the reference and there is none
+     * here; a tank crawling through a crowd flattens it just the same.
      */
-    private resolveCollisions(dt: number) {
-        for (const u of this.units) {
-            if (u.dead) continue;
-            // a unit with no path has stopped driving: bleed off the residual
-            // speed, otherwise it keeps reporting "moving" forever (which used
-            // to suppress the sub-cell spread and the idle animations)
-            if (u.path.length === 0 && u.speedCur > 0) {
-                u.speedCur = Math.max(0, u.speedCur - u.accel * 5 * dt);
-            }
-            if (!u.isAir) this.resolveWorldCollision(u, dt);
-            u.x = clamp(u.x, -HALF + 12, HALF - 12);
-            u.y = clamp(u.y, -HALF + 12, HALF - 12);
-            this.syncCell(u);
-        }
-        this.spreadInfantry(dt);
-        this.separateHulls(dt);
-        this.handleBlocked(dt);
-    }
-
-    /**
-     * Push apart two hulls that already share a tile.
-     *
-     * The movement rule only ever *refuses* a step that would close the gap; it
-     * has no way to undo an overlap that already exists. Two tanks can end up
-     * inside each other's stand-off ring through a spawn, a relocation, or a
-     * follower entering a leader's tile just before the leader stopped — and once
-     * that happens the pair is welded: every step either hull wants to take is
-     * vetoed by the other, which is the pile-up in the screenshot (two selection
-     * rings on one tile, neither moving).
-     *
-     * A tiny symmetric shove, clamped by the terrain test and capped per frame,
-     * lets them come apart without any of the old "one unit shoves another" mass
-     * behaviour.
-     */
-    private separateHulls(dt: number) {
-        for (const a of this.units) {
-            if (a.dead || a.isAir || a.def.kind === 'infantry') continue;
-            this.grid.query(a.x, a.y, a.radius + 30, this.tmp);
-            for (const e of this.tmp) {
-                const b = e as Unit;
-                if (b === a || b.dead || b.isAir || !b.def || b.def.kind === 'infantry') continue;
-                if (b.id < a.id) continue;                 // handle each pair once
-                /*
-                 * Only separate hulls that are BOTH standing still.
-                 *
-                 * A mover approaching a parked friend generates exactly the
-                 * overlap this pass is meant to undo, and pushing the parked one
-                 * out of the way turns separation into the old "a tank shoves
-                 * another tank down the road" behaviour — measured 147 px of
-                 * displacement, straight onto the mover's destination tile, which
-                 * is why the mover then parked 1.5 tiles short. Movement is
-                 * already prevented from creating new overlaps by
-                 * `stepBlockedByUnit`; this pass only repairs a pair that is
-                 * already welded together and going nowhere.
-                 */
-                if (a.speedCur > 4 || b.speedCur > 4) continue;
-                const share = a.isHarvester && b.isHarvester ? 0.46 : 0.92;
-                /*
-                 * Separate to a full tile, not just to the stand-off ring.
-                 *
-                 * `minD` is only the "do the sprites intersect" distance (~24 px).
-                 * Two hulls resting exactly at `minD` are still inside the same
-                 * 32 px tile — which is what the screenshot shows: two selection
-                 * rings on one tile. Pushing to a full tile guarantees they
-                 * register on different cells, so neither one's next step is
-                 * vetoed by the other's presence in its own cell.
-                 */
-                const minD = Math.max((a.radius + b.radius) * share, TILE * 1.12);
-                let dx = b.x - a.x, dy = b.y - a.y;
-                let d = Math.hypot(dx, dy);
-                if (d >= minD - 0.4) continue;
-                if (d < 0.01) {
-                    // exactly concentric: split along the hull's flank
-                    dx = Math.cos(a.face + Math.PI / 2);
-                    dy = Math.sin(a.face + Math.PI / 2);
-                    d = 1;
-                }
-                const push = Math.min((minD - d) * 0.5, 40 * dt);
-                const nx = dx / d, ny = dy / d;
-                const ax = a.x - nx * push, ay = a.y - ny * push;
-                if (!this.worldBlockedAt(ax, ay, a.steerRadius)) { a.x = ax; a.y = ay; }
-                const bx = b.x + nx * push, by = b.y + ny * push;
-                if (!this.worldBlockedAt(bx, by, b.steerRadius)) { b.x = bx; b.y = by; }
-            }
-        }
-    }
-
-    /**
-     * Infantry sharing a cell stand on separate sub-positions (0..2).
-     * Bounded to a few pixels and clamped inside the cell, so this can never
-     * turn into the old "push" — it is a visual tidy-up, not a collision solver.
-    /**
-     * Infantry sharing a cell stand on distinct sub-positions.
-     *
-     * Reference: `ObjectPosition.computeSubCellOffset()` — sub-cell `n` is
-     * `± TILE/4` from the cell centre on each axis (`(0,0)`, `(-8,-8)`,
-     * `(+8,-8)`, `(-8,+8)`, `(+8,+8)`), and `MoveTask.canStopAtTile` allows at
-     * most three infantry on one tile, each on a different sub-cell.
-     *
-     * We used to nudge neighbours apart until they were 11px away from each
-     * other, which is *closer* than the retail layout and made a squad read as
-     * one blob (the "兵和兵叠在一起" report). Driving each man to his own fixed
-     * sub-cell point gives the retail spacing (16px diagonal) and stops the
-     * pairwise jitter, because every unit now has a stable target instead of a
-     * reaction to its neighbours.
-     */
-    private spreadInfantry(dt: number) {
-        const T = TILE;
-        const q = T * 0.25;             // reference: LEPTONS_PER_TILE / 4
-        for (const a of this.units) {
-            if (a.dead || a.speedCur > 4) continue;
-            const here = this.occupancy.at(a.cellX, a.cellY);
-            if (!here || here.size < 2) continue;
-
-            if (a.def.kind === 'infantry') {
-                const sc = a.subCell;
-                const ox = sc ? (((sc - 1) % 2) * 2 - 1) * q : 0;
-                const oy = sc ? (2 * Math.floor((sc - 1) / 2) - 1) * q : 0;
-                this.driftTo(a, ox, oy, 26 * dt);
-                continue;
-            }
-
-            /*
-             * Two vehicles can share a cell (harvesters at the dock need it, and
-             * a cell holds two of them by design). Standing on the exact same
-             * pixel makes them read as one broken sprite, so they get a small
-             * fixed offset pair — the vehicle equivalent of infantry sub-cells.
-             * Kept well inside the cell so neither can be pushed out of it.
-             */
-            const mates: Unit[] = [];
-            for (const o of here) if (!o.dead && o.def.kind !== 'infantry') mates.push(o);
-            if (mates.length < 2) continue;
-            mates.sort((x, y) => x.id - y.id);
-            const idx = mates.indexOf(a);
-            if (idx < 0) continue;
-            const off = T * 0.22;
-            this.driftTo(a, idx === 0 ? -off : off, idx === 0 ? -off : off, 22 * dt);
-        }
-    }
-
-    /** ease a unit toward cell centre + (ox, oy) without ever leaving the cell */
-    private driftTo(u: Unit, ox: number, oy: number, maxStep: number) {
-        const T = TILE;
-        const tx = u.cellX * T + T / 2 - HALF + ox;
-        const ty = u.cellY * T + T / 2 - HALF + oy;
-        const dx = tx - u.x, dy = ty - u.y;
-        const d = Math.hypot(dx, dy);
-        if (d < 0.4) return;
-        const step = Math.min(d, maxStep);
-        const x0 = u.cellX * T - HALF + 1, x1 = x0 + T - 2;
-        const y0 = u.cellY * T - HALF + 1, y1 = y0 + T - 2;
-        u.x = clamp(u.x + (dx / d) * step, x0, x1);
-        u.y = clamp(u.y + (dy / d) * step, y0, y1);
-    }
-
-    /**
-     * Blocked-unit chain, mirroring MoveTask.onTick's obstacle branch.
-     *
-     *   0.18s  ask a friendly bystander to step aside (MoveAsideTask)
-     *   0.55s  re-route around the blocker (blockedPathNodes)
-     *   twice  widen: aim at the nearest reachable cell to the goal
-     *   then   MoveResult.Fail — stop asking, hold position
-     */
-    private handleBlocked(dt: number) {
-        for (const u of this.units) {
-            if (u.dead) continue;
-            if (u.repathHold > 0) u.repathHold -= dt;
-            if (u.asideT > 0) u.asideT -= dt;
-
-            /*
-             * Watchdog: a live move order with an empty path must never stall
-             * silently.
-             *
-             * This was the shape of the "there is obviously a road" report: the
-             * relocation helper picked a free cell the unit could not reach, the
-             * path came back empty, and `handleBlocked` skipped every unit whose
-             * path was empty — so the unit stood there for the rest of the match
-             * with a `move` order and no failure message. Nothing in the old
-             * chain could recover from it. A stall is now retried once and then
-             * ends the order, which at least tells the player.
-             */
-            const wantsMove = u.order.k === 'move' || u.order.k === 'attackmove';
-            if (!u.isAir && u.path.length === 0 && wantsMove) {
-                const goal = this.orderGoal(u);
-                const dg = goal ? Math.hypot(goal.x - u.x, goal.y - u.y) : 0;
-                /*
-                 * CloseEnough is a success, not a stall.
-                 *
-                 * `moveStep` empties the path when the destination tile is full
-                 * and the unit is within 1.5 tiles of it — that is the retail
-                 * CloseEnough bail-out. The watchdog used to treat any empty path
-                 * more than 18 px from the goal as a stall: it re-planned from a
-                 * tile that was one step from the destination, the unit twitched
-                 * toward it, hit the same full tile, and repeated for 2.4 s before
-                 * cancelling. That twitch is the "units keep shuffling after they
-                 * arrive" report, and it also poisoned pathsim with fake stalls.
-                 * Only a unit that is genuinely far from its goal needs rescuing.
-                 */
-                if (dg > TILE * 1.8) {
-                    const prev = u.stallT;
-                    u.stallT += dt;
-                    if (prev < 0.6 && u.stallT >= 0.6) {
-                        if (!this.relocateTo(u, goal!.x, goal!.y) ) u.stallT = 2.4;
-                    } else if (u.stallT >= 2.4) {
-                        u.stallT = 0;
-                        this.giveUpOrder(u, 'blocked');
-                    }
-                } else {
-                    /*
-                     * Empty path, still holding a move order, already close.
-                     *
-                     * Every branch of `handleBlocked` below skips units with an
-                     * empty path, so this state had no exit: the hull stood there
-                     * for the rest of the match with `order = 'move'` and nothing
-                     * moving it. It is a finished order whatever the exact
-                     * distance — the path ran out within two tiles of the goal,
-                     * which is exactly the CloseEnough bail-out.
-                     */
-                    u.stop();
-                    u.stallT = 0;
-                    u.blockT = 0;
-                    u.waitT = 0;
-                    if (u.order.k === 'move' || u.order.k === 'attackmove') u.order = { k: 'idle' };
-                    continue;
-                }
-            } else {
-                u.stallT = 0;
-            }
-
-            /*
-             * Harvesters are driven by their own state machine (ore cooldown,
-             * alternative dock cells, back-off). Running the generic chain on
-             * top of it fought with those decisions, so they are exempt here —
-             * their blockers are handled where the phase timers live.
-             */
-            if (u.order.k === 'harvest') { u.blockT = 0; u.trafficT = 0; continue; }
-
-            /*
-             * CloseEnough: near the goal and down to the last leg.
-             *
-             * This is the single biggest cause of "the hull keeps swinging while
-             * it drives". A unit that has almost arrived, whose last waypoint is
-             * occupied by a friend, used to go round the whole blocked-unit
-             * chain: wait 0.35 s, re-plan a detour, drive 20 px the new way,
-             * get blocked again, re-plan again — measured as a hull changing
-             * heading by 90-140 degrees three times in four seconds, which the
-             * player reads as the body wobbling. Retail checks
-             * `isCloseEnoughToDest` before it ever considers a detour and simply
-             * parks; a crowd around a destination is normal, not an obstruction.
-             */
-            if (u.path.length <= 1) {
-                const g0 = this.orderGoal(u);
-                const gtx = g0 ? Math.floor((g0.x + HALF) / TILE) : -1;
-                const gty = g0 ? Math.floor((g0.y + HALF) / TILE) : -1;
-                /*
-                 * CloseEnough only when the destination tile is genuinely full.
-                 *
-                 * Parking merely because the unit is "close" stops it 2.5 tiles
-                 * short of an empty destination — movetest caught exactly that
-                 * (`距目标 78.4px`). The distance test is a guard against
-                 * shuffling around a crowd; it is not a licence to give up on an
-                 * empty tile.
-                 */
-                const destFull = g0 ? !this.occupancy.hasRoomFor(u, gtx, gty) : false;
-                /*
-                 * Already relocated and standing on (or beside) that spot: the
-                 * order is done. Retail's move task ends on reaching the
-                 * relocation tile; searching again would pick a different tile and
-                 * swing the hull at it.
-                 */
-                if (g0 && !Number.isNaN(u.parkX)
-                    && Math.hypot(u.x - u.parkX, u.y - u.parkY) < TILE * 1.4) {
-                    u.stop();
-                    u.blockT = 0;
-                    u.waitT = 0;
-                    if (u.order.k === 'move' || u.order.k === 'attackmove') u.order = { k: 'idle' };
-                    continue;
-                }
-                if (g0 && destFull && Math.hypot(g0.x - u.x, g0.y - u.y) < TILE * 2.5) {
-                    /*
-                     * Prefer a nearer free tile over parking here.
-                     *
-                     * CloseEnough is the last resort, not the first: a unit 1.5
-                     * tiles out that finds its destination occupied should take the
-                     * free tile next door (32 px away) rather than stop where it
-                     * stands (measured 49.8 px short in movetest). Only when
-                     * relocation has already been tried do we accept the current
-                     * spot.
-                     */
-                    if (Number.isNaN(u.parkX) && this.parkNear(u, g0.x, g0.y, 5)) {
-                        u.parkTry++;
-                        u.blockT = 0;
-                        continue;
-                    }
-                    u.stop();
-                    u.blockT = 0;
-                    u.waitT = 0;
-                    if (u.order.k === 'move' || u.order.k === 'attackmove') u.order = { k: 'idle' };
-                    continue;
-                }
-                /*
-                 * Last leg and the destination is taken: relocate once
-                 * (findRelocationTile). It has to run *now*, not after the
-                 * ten-round give-up chain — a tank three tiles from the click with
-                 * `path.length === 1` is not blocked by traffic, it simply has
-                 * nowhere to stand. Waiting eight seconds first left four of six
-                 * tanks milling around the destination for the rest of the match.
-                 */
-                if (g0 && destFull && Number.isNaN(u.parkX) && this.parkNear(u, g0.x, g0.y, 5)) {
-                    u.parkTry++;
-                    u.blockT = 0;
-                    continue;
-                }
-                /*
-                 * We already relocated and are not there yet: keep driving to the
-                 * spot. If it stays unreachable, `failMove` parks the unit after
-                 * the wait budget instead of cancelling here — cancelling on the
-                 * first blocked frame is what turned a crowd into nine dead tanks.
-                 */
-            }
-
-            /*
-             * Watchdog 2: a route but no movement.
-             *
-             * `blockedNow` only covers "the step I tried was refused". A unit can
-             * also sit still while *not* trying to step: the hull-first rule stops
-             * it while it turns, and a path that ends on a tile a friend occupies
-             * leaves nothing to drive into. Those states never reach the chain
-             * below, so the unit held a move order for the rest of the match
-             * (pathsim: units parked 500 px from their goal with pathLeft 1,
-             * blockT 0, repathTry 0).
-             *
-             * Anything that has a route and has not moved for 1.5 s gets the same
-             * remedies as a blocked unit: detour, then relocate, then park.
-             */
-            if (!u.isAir && u.path.length > 0 && u.waitT <= 0) {
-                if (u.speedCur < 2) u.stillT += dt; else u.stillT = 0;
-                if (u.stillT > 1.5) {
-                    u.stillT = 0;
-                    const blk = this.blockerAt(u) || this.nearestBlocker(u);
-                    if (!this.repathAround(u, blk)) {
-                        const g2 = this.orderGoal(u);
-                        if (!g2 || !this.relocateTo(u, g2.x, g2.y)) this.failMove(u);
-                    }
-                }
-            }
-
-            if (u.isAir || u.path.length === 0 || u.waitT > 0) {
-                u.trafficT = 0;
-                u.blockT = 0;
-                u.progT = 0;
-                u.progX = u.x;
-                u.progY = u.y;
-                continue;
-            }
-
-            /*
-             * Stuck is "this tick produced no progress", sampled continuously.
-             *
-             * Reference: MoveTask only advances `inPlanningForTicks` while the
-             * unit sits in MoveState.PlanMove — i.e. while it cannot drive at
-             * all. A unit that is merely accelerating, turning or crawling
-             * across ore is NOT planning, and the counter does not move.
-             *
-             * The old code added dt every frame regardless, so a tank that was
-             * still spinning up from standstill collected 0.3s of "blocked" in
-             * the first quarter second, burned all four re-path attempts and
-             * cancelled its own order — on an empty desert, one second after
-             * being told to move. That is the single biggest source of the
-             * "cannot reach a target that is plainly reachable" reports.
-             *
-             * A hard reset on the first moving tick would reintroduce the
-             * flicker problem (a wedged hull gains a pixel, resets, wedges
-             * again), so the timer decays instead of snapping to zero.
-             */
-            if (!u.blockedNow) {
-                u.blockT = Math.max(0, u.blockT - dt * 3);
-                u.trafficT = Math.max(0, u.trafficT - dt);
-                u.progT = 0;
-                continue;
-            }
-
-            const ahead = this.blockerAt(u) || this.nearestBlocker(u);
-            /*
-             * Traffic, not a wall: if the thing in front is driving off, the
-             * correct response is patience (reference: MoveTask `break`s out of
-             * the obstacle loop the moment the blocker has velocity — it does not
-             * start a timer and re-plan after 2.6 s).
-             *
-             * The old 2.6 s cap was a re-plan generator: in a column of tanks the
-             * leader is *always* moving, so every follower re-planned its route
-             * every three seconds, and every re-plan pointed the nose somewhere
-             * new. That is the hull "swinging" the player still sees: measured 5
-             * heading changes and 9 sprite swaps on one tank in 45 s, all of them
-             * caused by detours around a friend who was already leaving.
-             *
-             * Eight seconds is the safety valve for a genuine deadlock (a ring of
-             * tanks all waiting on each other), not a normal-traffic timer.
-             */
-            if (ahead && ahead.speedCur > 6 && ahead.path.length > 0 && u.trafficT < 8) {
-                u.trafficT += dt;
-                u.blockT = Math.max(0, u.blockT - dt * 2);
-                continue;
-            }
-
-            u.blockT += dt;
-            /*
-             * Wait before touching the route.
-             *
-             * Reference: WaitTicksTask(40) is 2.7 s at 15 tps before a blocked
-             * unit even looks for an alternative. 0.35 s meant a column of tanks
-             * re-planned each other's routes four times a second — every re-plan
-             * pointed the nose somewhere new, which is the other half of the
-             * "body keeps swinging" report. One second is a compromise between
-             * retail patience and how long a mobile player will wait.
-             */
-            if (u.blockT < 1.0) continue;
-
-            if (this.moveDebug) {
-                this.moveLog.push({
-                    t: +this.time.toFixed(1), id: u.id, phase: (u.order as any).phase,
-                    cell: [u.cellX, u.cellY], want: [u.blockTx, u.blockTy],
-                    blocker: ahead ? { id: ahead.id, cell: [ahead.cellX, ahead.cellY], kind: ahead.def.kind } : null,
-                    rt: u.repathTry, path: u.path.length,
-                });
-                if (this.moveLog.length > 60) this.moveLog.shift();
-            }
-
-            /*
-             * Order of remedies, same as MoveTask's obstacle branch:
-             *
-             *   1. re-plan a short path to the nearest waypoint that is actually
-             *      free (retail: freeWaypointIndex + computePath with 15 nodes)
-             *   2. swap sub-cells (infantry vs infantry)
-             *   3. push a completely idle friend aside (MoveAsideTask)
-             *   4. wait (WaitTicksTask) — being queued behind friends is not a
-             *      failure, and it must not cancel the order
-             *
-             * Pushing used to come before re-routing, so a column of tanks spent
-             * its time shoving each other instead of driving around the jam.
-             */
-            // 1. local detour
-            if (this.repathAround(u, ahead)) {
-                u.blockT = 0;
-                u.repathTry++;
-                continue;
-            }
-            // 2. infantrymen trade sub-positions instead of standing off
-            if (ahead && u.def.kind === 'infantry' && ahead.def.kind === 'infantry'
-                && u.asideT <= 0 && this.sidestepInfantry(u, ahead)) {
-                u.asideT = 1.2;
-                u.blockT = 0;
-                continue;
-            }
-            // 3. a standing friendly is asked to step out of the lane
-            if (ahead && ahead.owner === u.owner && u.asideT <= 0 && this.requestAside(ahead, u)) {
-                u.asideT = 1.2;
-                u.blockT = 0;
-                u.repathTry++;
-                continue;
-            }
-
-            u.blockT = 0;
-            u.repathTry++;
-            /*
-             * 4. wait.
-             *
-             * Reference: WaitTicksTask(40) ≈ 2.7 s at 15 tps, and the planning
-             * counter only bails after MAX_PLANNING_TICKS (200 ≈ 13 s) — or after
-             * five unreachable targets in a row. Our chain used to run out after
-             * four attempts (about two seconds) and cancel the order, which is
-             * why a ten-tank group lost five of its ten orders on open ground.
-             */
-            if (u.repathTry <= 6) {
-                u.waitT = 0.45;
-                continue;
-            }
-            // 5. MoveResult.Fail: park on the nearest tile that is free
-            this.failMove(u);
-        }
-    }
-
-    /** nearest unit physically in front of this one, when the cell lookup misses */
-    private nearestBlocker(u: Unit): Unit | null {
-        const ux = Math.cos(u.face), uy = Math.sin(u.face);
-        this.grid.query(u.x, u.y, u.radius + 34, this.tmp);
-        let best: Unit | null = null;
-        let bestD = Infinity;
-        for (const e of this.tmp) {
-            const o = e as Unit;
-            if (o === u || o.dead || !o.def || o.isAir) continue;
-            const dx = o.x - u.x, dy = o.y - u.y;
-            const d = Math.hypot(dx, dy);
-            // close enough to actually be touching, and roughly ahead
-            if (d < 0.001 || d > u.radius + o.radius + 3) continue;
-            if ((dx * ux + dy * uy) / d < 0.15) continue;   // behind us
-            if (d < bestD) { bestD = d; best = o; }
-        }
-        return best;
-    }
-
-    /**
-     * Can `u` step to (x, y) as far as other units are concerned?
-     *
-     * Two rules, both from the reference:
-     *   1. cell capacity — one vehicle, or three infantry on distinct sub-cells
-     *      (TileOccupation / MoveTask.canStopAtTile);
-     *   2. no interpenetration — a step that brings two hulls closer than their
-     *      combined radius is refused if it is closing an already-touching pair.
-     *      Cell occupancy alone lets two tanks sit 1px apart either side of a
-     *      cell border, which reads as driving through each other.
-     *
-     * Rule 2 only refuses steps that make the overlap worse, so a unit that
-     * somehow starts overlapped can always drive out of it.
-     */
-    private stepBlockedByUnit(u: Unit, x: number, y: number): boolean {
-        const tx = Math.floor((x + HALF) / TILE);
-        const ty = Math.floor((y + HALF) / TILE);
-        /*
-         * Traffic is not a wall.
-         *
-         * Reference: MoveTask's obstacle loop only treats a unit as an obstacle
-         * when it is *stationary* (`blocker.moveTrait.moveState === Idle`), a
-         * building, or mid-collision; when the blocker still has velocity the
-         * loop `break`s and the unit keeps driving. That rule is what lets a
-         * column of tanks follow each other — and its absence is why a tank
-         * column used to lock up: our capacity test rejected the leader's cell
-         * even while the leader was driving out of it, so every follower queued
-         * behind a moving tank forever, ran out of re-path attempts and cancelled
-         * its order ("cannot reach" on an empty plane).
-         */
-        /*
-         * One vehicle per cell. Always.
-         *
-         * There used to be a "vacating" exemption here: if the cell was held by a
-         * vehicle that was rolling out of it, the moving one was allowed in. The
-         * idea came from the reference's obstacle loop, which ignores a blocker
-         * that still has velocity — but the reference also *reserves* the tile
-         * (`reservedPathNodes`), so two hulls never end up registered on it. With
-         * the exemption and no reservation, the follower entered while the leader
-         * was still inside, the leader then stopped inside the same cell, and the
-         * pair sat 24 px apart with both of their next steps vetoed by the other.
-         * That is the two-selection-rings-on-one-tile screenshot.
-         *
-         * A follower now waits for the cell to actually clear (about 0.7 s at tank
-         * speed), which is exactly what retail does and what keeps a column
-         * visibly separated.
-         */
-        if (!this.occupancy.hasRoomFor(u, tx, ty)) return true;
-
-        this.grid.query(x, y, u.radius + 42, this.tmp);
-        for (const e of this.tmp) {
-            const o = e as Unit;
-            if (o === u || o.dead || !o.def || o.isAir) continue;
-            /*
-             * Crushers ignore hostile infantry entirely — that is how a tank
-             * drives onto a cell and flattens whoever is standing there
-             * (MoveTask: `obstacle.obj.rules.crushable` + unit.crusher =>
-             * continue). Without this the tank is politely stopped by the man it
-             * is supposed to run over.
-             */
-            if (u.canCrush && o.owner !== u.owner && o.def.kind === 'infantry') continue;
-            /*
-             * Interpenetration only matters between two hulls.
-             *
-             * Infantry are handled by cell capacity + sub-positions: a vehicle is
-             * allowed to drive onto a cell that holds infantry (it scatters or
-             * crushes them), and infantry are stopped by the vehicle's cell rather
-             * than by a radius. Applying a radius test here made a lone rifleman
-             * standing beside a parked truck wedge it permanently.
-             */
-            if (u.def.kind === 'infantry' || o.def.kind === 'infantry') continue;
-            /*
-             * Hull stand-off is a whole tile, not just "sprites are not
-             * concentric".
-             *
-             * `(r1 + r2) * 0.92` is 24 px for two tanks: they can legally park
-             * nose to tail 8 px apart either side of a cell border, where the
-             * sprites (86 px wide) are almost completely on top of each other.
-             * The player reads that as "two tanks stuck in one blob" even though
-             * the cell table is perfectly correct. Retail keeps a cell between
-             * hulls because it reserves waypoints, so a tile is the right target.
-             */
-            const share = u.isHarvester && o.isHarvester ? 0.62 : 0.95;
-            const minD = Math.max((u.radius + o.radius) * share, TILE * 0.95);
-            const dNew = Math.hypot(o.x - x, o.y - y);
-            if (dNew >= minD) continue;
-            const dCur = Math.hypot(o.x - u.x, o.y - u.y);
-            /*
-             * Inside the stand-off ring: only a step that genuinely opens the gap
-             * is allowed.
-             *
-             * The tolerance used to be +1.0 px, which meant two hulls already
-             * closer than the ring could not separate either — a step that opened
-             * the gap by 0.4 px was refused, the axis-slide fallback produced
-             * exactly such a step, and the pair stayed welded together for the
-             * rest of the match. 0.05 px still refuses any step that closes or
-             * holds the distance (including the sideways shuffle that let a
-             * head-on pair walk through each other) while letting a wedged pair
-             * drive apart.
-             */
-            if (dNew < dCur + 0.05) return true;
-        }
-        return false;
-    }
-
-    /**
-     * Reverse one cell out of a deadlock.
-     *
-     * Two trucks that want the same ore cell lock nose to nose: neither can
-     * enter, neither will give up, and the timer just re-picks the same field.
-     * Backing off is what a driver does, and it breaks the symmetry immediately.
-     */
-    private backOff(u: Unit): boolean {
-        const bx = u.x - Math.cos(u.face) * TILE * 1.25;
-        const by = u.y - Math.sin(u.face) * TILE * 1.25;
-        const tx = Math.floor((bx + HALF) / TILE);
-        const ty = Math.floor((by + HALF) / TILE);
-        if (tx < 0 || ty < 0 || tx >= MAP_TILES || ty >= MAP_TILES) return false;
-        if (this.isBlocked(tx, ty) || !this.occupancy.hasRoomFor(u, tx, ty)) return false;
-        if (this.worldBlockedAt(bx, by, u.steerRadius)) return false;
-        u.path = [{ x: bx, y: by }];
-        u.asideT = 1.4;
-        return true;
-    }
-
-    /** hop sideways around another infantryman (reference: relocateToSubCell) */
-    private sidestepInfantry(u: Unit, blocker: Unit): boolean {
-        const ang = Math.atan2(u.y - blocker.y, u.x - blocker.x) || 0;
-        const hop = (u.radius + blocker.radius) * 0.75;
-        for (const s of [1, -1]) {
-            const a = ang + (s * Math.PI) / 2;
-            const px = u.x + Math.cos(a) * hop;
-            const py = u.y + Math.sin(a) * hop;
-            if (!u.canStepTo(px, py)) continue;
-            u.path.unshift({ x: px, y: py });
-            u.asideT = 0.55;
-            return true;
-        }
-        return false;
-    }
-
-    /** closest unit occupying the cell this one is trying to enter */
-    private blockerAt(u: Unit): Unit | null {
-        let tx = u.blockTx, ty = u.blockTy;
-        // The hint is only written when a step is refused; after the unit moves on
-        // it can be several cells out of date. Recompute from the current facing.
-        if (tx < 0 || ty < 0 || Math.abs(tx - u.cellX) > 2 || Math.abs(ty - u.cellY) > 2) {
-            const look = Math.min(20, u.radius + 6);
-            tx = Math.floor((u.x + Math.cos(u.face) * look + HALF) / TILE);
-            ty = Math.floor((u.y + Math.sin(u.face) * look + HALF) / TILE);
-            u.blockTx = tx;
-            u.blockTy = ty;
-        }
-        const set = this.occupancy.at(tx, ty);
-        if (!set || set.size === 0) return null;
-        let best: Unit | null = null;
-        let bestD = Infinity;
-        for (const o of set) {
-            if (o === u || o.dead || o.isAir) continue;
-            const d = Math.hypot(o.x - u.x, o.y - u.y);
-            if (d < bestD) { bestD = d; best = o; }
-        }
-        return best;
-    }
-
-    /**
-     * Ask a standing friendly unit to step out of the way.
-     * Reference: MoveTask pushes `MoveAsideTask(game, pushDirection)` onto the
-     * blocker's order queue once, then waits a tick. It never edits coordinates.
-     */
-    private requestAside(blocker: Unit, by: Unit): boolean {
-        if (blocker.asideT > 0 || blocker.dead || blocker.isAir) return false;
-        if (blocker.order.k !== 'idle' || blocker.path.length > 0) return false;
-        if (blocker.speedCur > 6) return false;
-
-        const dx = by.x - blocker.x, dy = by.y - blocker.y;
-        const d = Math.hypot(dx, dy) || 1;
-        const fx = dx / d, fy = dy / d;              // towards the caller
-        /*
-         * Try every sidestep, not just the two perpendicular ones.
-         *
-         * Reference: MoveAsideTask walks the blocker toward the push direction
-         * and keeps looking while the tile is taken. Two candidates meant a
-         * blocker wedged against a wall (or against a third tank) simply refused,
-         * the caller fell through to "give up", and the player saw two friendlies
-         * deadlocked. Eight headings at two distances, caller-side first, gives
-         * the blocker somewhere to go in every case that has anywhere to go.
-         */
-        const dirs: Array<{ x: number; y: number }> = [
-            { x: -fy, y: fx }, { x: fy, y: -fx },
-            /*
-             * Sideways only — never straight ahead.
-             *
-             * The list used to include `{-fx,-fy}`, i.e. "move away from the
-             * caller along the caller's own approach line". That looks harmless
-             * for one step, but `requestAside` fires again as soon as the caller
-             * catches up, so the bystander is nudged another tile ahead, and
-             * another: measured 147 px of travel that ended exactly on the
-             * caller's destination tile. The caller then has nowhere to go and
-             * parks 1.5 tiles short. Diagonal candidates keep the sidestep
-             * sideways while still working for a hull wedged against a wall.
-             */
-            { x: (-fx - fy) * 0.7071, y: (-fy + fx) * 0.7071 },
-            { x: (-fx + fy) * 0.7071, y: (-fy - fx) * 0.7071 },
-        ];
-        for (const reach of [TILE * 1.15, TILE * 2.0]) {
-            for (const dir of dirs) {
-                const c = { x: blocker.x + dir.x * reach, y: blocker.y + dir.y * reach };
-                const tx = Math.floor((c.x + HALF) / TILE);
-                const ty = Math.floor((c.y + HALF) / TILE);
-                if (tx < 0 || ty < 0 || tx >= MAP_TILES || ty >= MAP_TILES) continue;
-                if (this.isBlocked(tx, ty)) continue;
-                if (!this.occupancy.hasRoomFor(blocker, tx, ty)) continue;
-                if (this.worldBlockedAt(c.x, c.y, blocker.steerRadius)) continue;
-                const path = this.findFor(blocker, c.x, c.y);
-                if (!path || path.length === 0) continue;
-                blocker.asideT = 1.4;
-                blocker.order = { k: 'move', x: c.x, y: c.y };
-                blocker.path = path;
-                blocker.repath = 0;
-                blocker.repathTry = 0;
-                blocker.waitT = 0;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Re-plan to the nearest *free* waypoint on the remaining path.
-     *
-     * Reference: MoveTask finds `freeWaypointIndex` (the last obstacle-free
-     * waypoint before the blocker) and calls `computePath` to exactly that tile
-     * with `maxExpandedNodes: 15` and the blocked tiles excluded. Two things
-     * matter and both were missing here:
-     *
-     *   - the anchor is a waypoint on our own route, not the final destination,
-     *     so the query is short and succeeds even when the destination is full
-     *     of tanks;
-     *   - the detour replaces the path instead of being rejected as "no route",
-     *     which is what turned a traffic jam into a cancelled order.
-     *
-     * Returns false when even the near waypoints are unreachable, in which case
-     * the caller waits or pushes instead of failing.
-     */
-    private repathAround(u: Unit, blocker: Unit | null): boolean {
-        if (u.path.length < 2) return false;
-        const avoid = new Set<number>();
-        if (blocker) {
-            for (let dy = -1; dy <= 1; dy++) {
-                for (let dx = -1; dx <= 1; dx++) {
-                    const tx = blocker.cellX + dx, ty = blocker.cellY + dy;
-                    if (tx < 0 || ty < 0 || tx >= MAP_TILES || ty >= MAP_TILES) continue;
-                    /*
-                     * Never exclude the cells around our own position: the unit
-                     * has to be able to leave the cell it is standing in. Doing so
-                     * made A* fail immediately, the truck kept its old path, and
-                     * two trucks facing each other deadlocked for the whole match.
-                     */
-                    if (Math.abs(tx - u.cellX) <= 1 && Math.abs(ty - u.cellY) <= 1) continue;
-                    avoid.add(ty * MAP_TILES + tx);
-                }
-            }
-        }
-        this.finder.avoid = avoid;
-        try {
-            /*
-             * Walk backwards from the destination: the far anchor gives the
-             * widest detour, so it is the most likely to succeed when a crowd is
-             * bunched up near the front of the column.
-             */
-            for (let i = u.path.length - 1; i >= 1; i--) {
-                const node = u.path[i];
-                const tx = Math.floor((node.x + HALF) / TILE);
-                const ty = Math.floor((node.y + HALF) / TILE);
-                if (tx < 0 || ty < 0 || tx >= MAP_TILES || ty >= MAP_TILES) continue;
-                if (this.isBlocked(tx, ty)) continue;
-                // a full tile is useless as an anchor; somebody will block it again
-                if (!this.occupancy.hasRoomFor(u, tx, ty)) continue;
-                const p = this.findFor(u, node.x, node.y);
-                if (p && p.length > 1) {
-                    /*
-                     * Refuse a detour that points the hull somewhere completely
-                     * different from where it was already going.
-                     *
-                     * A* is free to come back with a route that leaves in the
-                     * opposite direction, and the hull has to physically turn
-                     * around to follow it — 140 degrees, four times a second,
-                     * while the column shuffles. If the first leg of the detour
-                     * is more than ~50 degrees off the first leg of the current
-                     * path, this anchor is not a useful detour; try the next one.
-                     */
-                    const a0 = Math.atan2(u.path[0].y - u.y, u.path[0].x - u.x);
-                    const a1 = Math.atan2(p[0].y - u.y, p[0].x - u.x);
-                    let dd = a1 - a0;
-                    while (dd > Math.PI) dd -= Math.PI * 2;
-                    while (dd < -Math.PI) dd += Math.PI * 2;
-                    if (Math.abs(dd) > (50 * Math.PI) / 180) continue;
-                    u.path = p.concat(u.path.slice(i + 1));
-                    u.repath = 2;
-                    return true;
-                }
-            }
-        } finally {
-            this.finder.avoid = null;
-        }
-        return false;
-    }
-
-    /**
-     * Park on the nearest tile this unit can actually stand on and reach.
-     *
-     * Reference: MoveTask.findRelocationTile — RadialTileFinder from the target
-     * tile, radius 0..5, filtered by `canStopAtTile` (tile capacity) and by the
-     * island map (reachability). Ten tanks ordered onto one tile cannot all
-     * occupy it; retail keeps every order alive and fans them out around the
-     * destination. Our chain cancelled nine of the ten orders instead, which is
-     * exactly the "friendly units jam each other" report.
-     */
-    private parkNear(u: Unit, cx: number, cy: number, maxR = 5): boolean {
-        /*
-         * Rank candidates, then verify reachability.
-         *
-         * The scan-order version (nearest ring first, row by row) took whichever
-         * tile came first, which is often *behind* the hull — the unit then swung
-         * 150 degrees to park and the player saw the body turn around for no
-         * reason. pickParkingSpot scores by distance plus a turn penalty, so a
-         * spot two tiles further along the direction of travel wins over one
-         * behind us. A* is then run only on the winner; if it turns out to be
-         * unreachable, that tile is excluded and the next best is tried.
-         */
-        const skip = new Set<number>();
-        for (let attempt = 0; attempt < 6; attempt++) {
-            const spot = this.pickParkingSpot(u, cx, cy, maxR, skip);
-            if (!spot) break;
-            const p = this.findFor(u, spot.x, spot.y);
-            /*
-             * A one-node path is legal: smooth() collapses a clear line of sight
-             * into a single point. What must be rejected is bestEffort, which
-             * returns a path ending at the unit's own cell — lastFound tells the
-             * two apart.
-             */
-            if (p && p.length > 0 && this.finder.lastFound) {
-                u.path = p;
-                u.repath = 2;
-                u.parkX = spot.x;
-                u.parkY = spot.y;
-                return true;
-            }
-            const tx = Math.floor((spot.x + HALF) / TILE);
-            const ty = Math.floor((spot.y + HALF) / TILE);
-            skip.add(ty * MAP_TILES + tx);
-        }
-        (this as any).__parkFail = skip.size ? 'unreachable' : 'no-spot';
-        return false;
-    }
-
-    /**
-     * Pick the best parking tile, then verify it is reachable.
-     *
-     * Scan order alone (nearest ring first, row by row) picks whichever tile
-     * happens to come first, which is often *behind* the hull: the unit then has
-     * to swing 150 degrees to park, and the player sees the body turn around for
-     * no reason. Scoring candidates by `distance + 30 x |turn|` prefers a spot a
-     * couple of tiles further along the direction of travel — the same preference
-     * retail's MovePositionHelper expresses.
-     */
-    private pickParkingSpot(u: Unit, cx: number, cy: number, maxR = 5, skip?: Set<number>): { x: number; y: number } | null {
-        const ctx = Math.floor((cx + HALF) / TILE);
-        const cty = Math.floor((cy + HALF) / TILE);
-        const curD = Math.hypot(u.x - cx, u.y - cy);
-        const out: Array<{ x: number; y: number; score: number }> = [];
-        for (let r = 0; r <= maxR; r++) {
-            for (let dy = -r; dy <= r; dy++) {
-                for (let dx = -r; dx <= r; dx++) {
-                    if (r > 0 && Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
-                    const tx = ctx + dx, ty = cty + dy;
-                    if (tx < 0 || ty < 0 || tx >= MAP_TILES || ty >= MAP_TILES) continue;
-                    if (skip && skip.has(ty * MAP_TILES + tx)) continue;
-                    if (this.isBlocked(tx, ty)) continue;
-                    if (!this.occupancy.hasRoomFor(u, tx, ty)) continue;
-                    if (this.cellClaimedBy(tx, ty, u)) continue;
-                    const wx = tx * TILE + TILE / 2 - HALF;
-                    const wy = ty * TILE + TILE / 2 - HALF;
-                    const candD = Math.hypot(wx - cx, wy - cy);
-                    if (candD > curD + TILE * 0.5) continue;
-                    if (this.worldBlockedAt(wx, wy, u.steerRadius)) continue;
-                    let turn = Math.atan2(wy - u.y, wx - u.x) - u.face;
-                    while (turn > Math.PI) turn -= Math.PI * 2;
-                    while (turn < -Math.PI) turn += Math.PI * 2;
-                    out.push({ x: wx, y: wy, score: candD + Math.abs(turn) * 30 });
-                }
-            }
-        }
-        if (out.length === 0) return null;
-        out.sort((a, b) => a.score - b.score);
-        return out[0];
-    }
-
-    /**
-     * Has another unit already reserved this parking tile?
-     *
-     * See parkNear: without this, a group relocating in the same tick picks the
-     * same empty tile and fights over it forever.
-     */
-    private cellClaimedBy(tx: number, ty: number, self: Unit): boolean {
-        for (const o of this.units) {
-            if (o === self || o.dead || Number.isNaN(o.parkX)) continue;
-            if (Math.floor((o.parkX + HALF) / TILE) === tx && Math.floor((o.parkY + HALF) / TILE) === ty) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** MoveResult.Fail: park nearby, or end the order if there is genuinely nowhere */
-    private failMove(u: Unit) {
-        u.blockedNow = false;
-        u.blockT = 0;
-        u.repathTry = 0;
-        u.repathHold = 0.6;
-        u.stallT = 0;
-        if (u.order.k === 'move' || u.order.k === 'attackmove') {
-            const goal = this.orderGoal(u);
-            /*
-             * Relocation already happened in handleBlocked, once per order, the
-             * moment the last leg turned out to be occupied. Repeating the search
-             * here used a different anchor after `parkX` had been recorded, and
-             * the two fought each other — measured as four of ten tanks cancelling
-             * as "unreachable" while standing three tiles from the goal.
-             */
-            const near = goal ? Math.hypot(goal.x - u.x, goal.y - u.y) : 0;
-            /*
-             * One last direct query before parking.
-             *
-             * The give-up chain can conclude "stuck" after a friend that has just
-             * sidestepped, at which point the route to the goal is actually clear
-             * again — but every re-route so far was anchored at a detour waypoint,
-             * not at the destination. Asking once for the destination itself is
-             * cheap and recovers the common "a blocker moved out of the way"
-             * case (measured: a walker parking 48.7 px short of an empty tile).
-             */
-            if (goal && near <= TILE * 6) {
-                const direct = this.findPath(u, goal.x, goal.y);
-                if (direct) {
-                    u.path = direct;
-                    u.repathTry = 0;
-                    u.blockedNow = false;
-                    return;
-                }
-            }
-            /*
-             * Nowhere to stand within five tiles of the goal.
-             *
-             * Retail reports CloseEnough here, which is a *success*: the unit
-             * parks where it is and the order simply ends. Only a destination
-             * that is still far away after the radial search has failed is
-             * treated as genuinely unreachable, because that is the only case
-             * where "no route" is the honest answer.
-             */
-            if (goal && near > TILE * 6) {
-                this.giveUpOrder(u, 'nopath');
-                return;
-            }
-            u.stop();
-            if (u.order.k === 'move' || u.order.k === 'attackmove') u.order = { k: 'idle' };
-        }
-        // A harvester keeps its destination: the ore field is still where it
-        // wants to go, it just cannot get there this second. Clearing the node
-        // here is what made trucks ping-pong between the same two fields forever.
-    }
-
-    /**
-     * Register the unit on its new cell and run the crush check.
-     *
-     * Reference: game/gameobject/trait/MoveTrait.ts:240 — when a crusher enters a
-     * tile it destroys every crushable enemy on it. There is no speed test: a
-     * tank crawling forward still flattens infantry. Our old rule (speed > 24)
-     * meant a tank stuck in traffic stopped crushing, which looked wrong.
-     */
-    private syncCell(u: Unit) {
-        const tx = Math.floor((u.x + HALF) / TILE);
-        const ty = Math.floor((u.y + HALF) / TILE);
-        if (tx === u.cellX && ty === u.cellY) {
-            if (u.def.kind === 'infantry') u.subCell = this.occupancy.claimSubCell(u, tx, ty);
-            return;
-        }
-        this.occupancy.move(u, u.cellX, u.cellY, tx, ty);
-        u.cellX = tx;
-        u.cellY = ty;
-        if (u.def.kind === 'infantry') u.subCell = this.occupancy.claimSubCell(u, tx, ty);
-
-        const here = this.occupancy.at(tx, ty);
-        if (!here || here.size === 0) return;
-        for (const other of here) {
-            if (other === u || other.dead) continue;
-            if (other.def.kind !== 'infantry') continue;
-            if (other.owner !== u.owner) {
-                if (u.canCrush) this.crush(other, u);
-                continue;
-            }
-            // A friendly soldier caught under a track is scattered, not crushed
-            // (reference: MoveTask issues ScatterTask to friendly crushables).
-            if (u.canCrush) this.scatterInfantry(other);
-        }
-    }
-
-    /** send a friendly infantryman one cell out of a vehicle's path */
-    private scatterInfantry(inf: Unit) {
-        if (inf.dead || inf.asideT > 0) return;
-        for (let r = 1; r <= 2; r++) {
-            for (let dy = -r; dy <= r; dy++) {
-                for (let dx = -r; dx <= r; dx++) {
-                    if (Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
-                    const tx = inf.cellX + dx, ty = inf.cellY + dy;
-                    if (tx < 0 || ty < 0 || tx >= MAP_TILES || ty >= MAP_TILES) continue;
-                    if (!this.occupancy.hasRoomFor(inf, tx, ty)) continue;
-                    const wx = tx * TILE + TILE / 2 - HALF;
-                    const wy = ty * TILE + TILE / 2 - HALF;
-                    if (this.worldBlockedAt(wx, wy, inf.radius)) continue;
-                    inf.asideT = 1.2;
-                    inf.order = { k: 'move', x: wx, y: wy };
-                    inf.path = [{ x: wx, y: wy }];
-                    inf.repath = 0;
-                    inf.repathTry = 0;
-                    return;
-                }
-            }
-        }
-    }
-
     private crush(victim: Unit, by: Unit) {
         if (victim.dead) return;
         victim.hp = 0;
-        this.occupancy.remove(victim, victim.cellX, victim.cellY);
         this.kill(victim, by.owner, by);
         this.pushFx(victim.x, victim.y, 'dust', 0.55, 1.1);
         this.events.onSfx?.('scatter', victim.x, victim.y);
         if (this.players[by.owner].isHuman) this.events.onMessage?.(`${by.def.name} 碾过 ${victim.def.name}`, 'info');
-    }
-
-    /** push a unit out of a solid tile or a building footprint */
-    /**
-     * Safety net for a hull that is *already* inside solid ground (spawned on top
-     * of a structure, or shoved there by separation).
-     *
-     * The old version snapped the unit to a free cell centre up to 3 tiles away,
-     * which is what made a harvester look like it "kept resetting" at match
-     * start: it walked into the corner of the refinery, got snapped back a tile,
-     * walked in again, forever. Now it walks out under its own power at a capped
-     * speed, so the motion reads as shrugging off a wall.
-     */
-    private resolveWorldCollision(u: Unit, dt: number) {
-        if (u.isAir) return;
-        // NOTE: do not touch u.blockedNow here. That flag is set by moveStep when
-        // a step is refused, and clearing it from this pass silently disabled the
-        // entire wait/aside/re-path chain — a unit pressed against a parked hull
-        // would sit there forever with blockedNow = false.
-        if (!this.worldBlockedAt(u.x, u.y, u.steerRadius)) return;
-        if ((this as any).dbgOn) {
-            ((this as any).dbgResolve ||= []).push({
-                t: +this.time.toFixed(1), id: u.id, k: u.order.k, ph: (u.order as any).phase,
-                x: +u.x.toFixed(1), y: +u.y.toFixed(1), r: u.radius,
-            });
-        }
-        const tx = Math.floor((u.x + HALF) / TILE);
-        const ty = Math.floor((u.y + HALF) / TILE);
-        /*
-         * The rescue must use the SAME radius as the movement test.
-         *
-         * `canStepTo` refuses a step only when the *steering* disc does not fit
-         * (see Unit.steerRadius: the drawn hull is allowed to overhang a wall by
-         * a few pixels, exactly like a retail sprite). Testing the rescuer with
-         * the full visual radius made it disagree: a legal step landed the unit
-         * in a spot the rescuer called "inside a wall", so it teleported the unit
-         * back to prevX/prevY — every tick, forever, at full throttle. That was
-         * the residual "cannot reach, it just vibrates in place" report, and it
-         * showed up most around cliffs and along building edges.
-         */
-        const spot = this.nearestStandable(tx, ty, u.steerRadius, 3);
-        if (!spot) {
-            u.x = u.prevX;
-            u.y = u.prevY;
-            return;
-        }
-        const dx = spot.x - u.x;
-        const dy = spot.y - u.y;
-        const d = Math.hypot(dx, dy);
-        if (d < 0.6) {
-            u.x = spot.x;
-            u.y = spot.y;
-            return;
-        }
-        const step = Math.min(d, 110 * dt);
-        u.x += (dx / d) * step;
-        u.y += (dy / d) * step;
-        // the current path starts inside a wall; ask for a fresh one soon
-        if (u.path.length > 0 && u.repath <= 0) u.repath = 0.3;
     }
 
     /* ------------------------------------------------------------ */

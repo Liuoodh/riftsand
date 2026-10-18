@@ -42,13 +42,21 @@ await page.evaluate(() => window.__riftsandArtReady);
 await page.evaluate(() => {
     const g = window.__riftsandGame;
     g.aiEnabled = false;
+    /*
+     * The old give-up chain (failMove / giveUpOrder / relocateTo) is gone: the
+     * ported MoveTask reports the outcome itself via MoveResult
+     * (Success / CloseEnough / Fail / Cancel). Count what the units actually
+     * report instead of instrumenting removed helpers.
+     */
     window.__events = { fail: 0, giveUp: 0, relocate: 0 };
-    const of = g.failMove.bind(g);
-    g.failMove = (u) => { window.__events.fail++; return of(u); };
-    const og = g.giveUpOrder.bind(g);
-    g.giveUpOrder = (u) => { window.__events.giveUp++; return og(u); };
-    const or = g.relocateTo.bind(g);
-    g.relocateTo = (...a) => { window.__events.relocate++; return or(...a); };
+    setInterval(() => {
+        for (const u of g.units) {
+            if (u.dead || !u.moveTrait) continue;
+            const r = u.moveTrait.lastMoveResult;
+            if (r === 3) window.__events.fail++;
+            else if (r === 2) window.__events.relocate++;
+        }
+    }, 500);
 });
 
 const out = await page.evaluate((COUNT) => {

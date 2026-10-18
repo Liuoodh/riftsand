@@ -43,43 +43,22 @@ const out = await page.evaluate((ROUNDS) => {
     const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
     const world = (tx, ty) => ({ x: tx * TILE + TILE / 2 - HALF, y: ty * TILE + TILE / 2 - HALF });
 
-    /* ---- instrument the give-up exits ---- */
+    /* ---- outcome bookkeeping (the ported MoveTask reports MoveResult) ---- */
     const fails = [];
-    /* who is nudging units outside moveStep: the wall rescue pass */
-    const rwHits = new Map();
-    const origRW = g.resolveWorldCollision.bind(g);
-    g.resolveWorldCollision = function (u, dt) {
-        const bx = u.x, by = u.y;
-        origRW(u, dt);
-        if (Math.abs(u.x - bx) > 0.01 || Math.abs(u.y - by) > 0.01) {
-            rwHits.set(u.id, (rwHits.get(u.id) || 0) + 1);
+    const lastResult = new Map();
+    function noteResult(u) {
+        const r = u.moveTrait && u.moveTrait.lastMoveResult;
+        if (r === undefined) return;
+        if (lastResult.get(u.id) === r) return;
+        lastResult.set(u.id, r);
+        if (r === 3 /* Fail */) {
+            fails.push({
+                why: 'MoveResult.Fail', unit: u.def.id, order: u.order.k,
+                pathLeft: u.path.length, cell: [u.cellX, u.cellY],
+                target: u.moveTrait.currentWaypoint ? u.moveTrait.currentWaypoint.tile.id : null,
+            });
         }
-    };
-    const origFail = g.failMove.bind(g);
-    g.failMove = function (u) {
-        const goal = g.orderGoal(u);
-        const bc = [u.blockTx, u.blockTy];
-        const occ = g.occupancy.at(bc[0], bc[1]);
-        fails.push({
-            why: 'failMove', unit: u.def.id, order: u.order.k, rt: u.repathTry,
-            distToGoal: goal ? +Math.hypot(goal.x - u.x, goal.y - u.y).toFixed(0) : -1,
-            pathLeft: u.path.length, blockCell: bc,
-            thatCellBlocked: g.isBlocked(bc[0], bc[1]),
-            unitsOnThatCell: occ ? occ.length : 0,
-            blocker: g.blockerAt(u) ? g.blockerAt(u).def.id : null,
-        });
-        return origFail(u);
-    };
-    const origGiveUp = g.giveUpOrder.bind(g);
-    g.giveUpOrder = function (u) {
-        const goal = g.orderGoal(u);
-        fails.push({
-            why: 'giveUpOrder', unit: u.def.id, order: u.order.k, rt: -1,
-            distToGoal: goal ? +Math.hypot(goal.x - u.x, goal.y - u.y).toFixed(0) : -1,
-            pathLeft: u.path.length,
-        });
-        return origGiveUp(u);
-    };
+    }
 
     /* passable cells, giant component from the human base */
     const passable = new Uint8Array(N * N);
@@ -138,6 +117,7 @@ const out = await page.evaluate((ROUNDS) => {
         const lastGain = us.map(() => 0);
         while (t < budget) {
             g.update(0.05); t += 0.05;
+            for (const u of us) noteResult(u);
             let done = true;
             for (let k = 0; k < us.length; k++) {
                 const d = Math.hypot(us[k].x - target.x, us[k].y - target.y);
@@ -155,30 +135,31 @@ const out = await page.evaluate((ROUNDS) => {
             results[kind]++;
             results.total++;
             if (kind === 'stuck' && stalls.length < 8) {
+                /* the ported MoveTask keeps tile nodes, not world points */
                 const wp = u.path[0];
-                const wc = wp ? [Math.floor((wp.x + HALF) / TILE), Math.floor((wp.y + HALF) / TILE)] : null;
+                const wc = wp ? [wp.tile.rx, wp.tile.ry] : null;
+                const wpWorld = wc ? { x: wc[0] * TILE + TILE / 2 - HALF, y: wc[1] * TILE + TILE / 2 - HALF } : null;
                 stalls.push({
                     unit: unitId, d: +d.toFixed(0), best: +best[k].toFixed(0),
                     t: +t.toFixed(1), sinceGain: +(t - lastGain[k]).toFixed(1),
                     order: u.order.k, pathLeft: u.path.length,
-                    blockT: +u.blockT.toFixed(2), rt: u.repathTry,
                     cell: [u.cellX, u.cellY],
                     speed: +u.speedCur.toFixed(1), blk: u.blockedNow,
-                    waitT: +u.waitT.toFixed(2), terrainMul: +u.terrainMul.toFixed(2),
-                    defSpeed: u.def.speed, face: +(u.face * 57.3).toFixed(0),
-                    faceTarget: +(u.faceTarget * 57.3).toFixed(0), hold: +u.repathHold.toFixed(2),
+                    terrainMul: +u.terrainMul.toFixed(2), defSpeed: u.def.speed,
+                    face: +(u.face * 57.3).toFixed(0),
+                    dir: u.direction,
+                    moveState: u.moveTrait.moveState,
+                    collisionState: u.moveTrait.collisionState,
+                    task: u.orders.hasTasks(),
                     harv: !!u.isHarvester,
                     pos: [+u.x.toFixed(1), +u.y.toFixed(1)],
-                    prev: [+u.prevX.toFixed(1), +u.prevY.toFixed(1)],
                     accel: u.accel, speedCap: u.speedCap, slowed: u.slowed,
-                    wp: wp ? [+wp.x.toFixed(0), +wp.y.toFixed(0)] : null,
+                    wp: wpWorld ? [+wpWorld.x.toFixed(0), +wpWorld.y.toFixed(0)] : null,
                     wpCell: wc,
                     wpTerrainBlocked: wc ? g.isBlocked(wc[0], wc[1]) : null,
                     wpHasRoom: wp ? g.occupancy.hasRoomFor(u, wc[0], wc[1]) : null,
-                    wpWorldBlocked: wp ? g.worldBlockedAt(wp.x, wp.y, u.steerRadius) : null,
-                    rwHits: rwHits.get(u.id) || 0,
-                    inWallNow: g.worldBlockedAt(u.x, u.y, u.steerRadius),
-                    dWp: wp ? +Math.hypot(wp.x - u.x, wp.y - u.y).toFixed(0) : null,
+                    inWallNow: g.worldBlockedAt(u.x, u.y, u.radius),
+                    dWp: wpWorld ? +Math.hypot(wpWorld.x - u.x, wpWorld.y - u.y).toFixed(0) : null,
                 });
             }
             return { d: +d.toFixed(0), kind, order: u.order.k };
@@ -191,10 +172,12 @@ const out = await page.evaluate((ROUNDS) => {
         }
     }
 
+    /* the squad / other-hull runs scale with ROUNDS so a quick pass is quick */
+    const sub = Math.max(1, Math.round(ROUNDS / 4));
     for (let r = 0; r < ROUNDS; r++) runOne('rampart', 1);
-    for (let r = 0; r < 6; r++) runOne('pebble', 5);
-    for (let r = 0; r < 4; r++) runOne('hourglass', 1);
-    for (let r = 0; r < 4; r++) runOne('lizard', 1);
+    for (let r = 0; r < Math.min(6, sub + 1); r++) runOne('pebble', 5);
+    for (let r = 0; r < sub; r++) runOne('hourglass', 1);
+    for (let r = 0; r < sub; r++) runOne('lizard', 1);
 
     return {
         map: g.options.mapId,
@@ -206,6 +189,8 @@ const out = await page.evaluate((ROUNDS) => {
     };
 }, ROUNDS);
 
+console.log('SUMMARY', JSON.stringify(out.results), 'stuckRate', out.stuckRate, 'fails', out.failCount);
+console.log('STALLS', JSON.stringify(out.stalls.slice(0, 4)));
 console.log(JSON.stringify(out, null, 2));
 console.log('ERRORS', errors.length, errors.slice(0, 2).join(' | '));
 await browser.close();

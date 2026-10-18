@@ -45,7 +45,10 @@ export const FACINGS = 8;
  * Byte-for-byte the reference formula.
  */
 export function facingIndex(deg: number, facings = FACINGS) {
-    return Math.round((((deg - 45 + 360) % 360) / 360) * facings) % facings;
+    // normalise first: the raw formula returns a negative index for bearings
+    // below -315 degrees, which used to index past the start of the sheet
+    const d = ((deg % 360) + 360) % 360;
+    return Math.round((((d - 45 + 360) % 360) / 360) * facings) % facings;
 }
 
 /** the direction each facing index points at: index i is (i + 1) * 45 degrees */
@@ -69,7 +72,8 @@ export function facingIndexSticky(deg: number, prev: number, facings = FACINGS) 
     if (prev === undefined || prev === null || prev < 0 || prev >= facings) return facingIndex(deg, facings);
     const step = 360 / facings;
     const center = facingDeg(prev, facings);
-    const delta = ((deg - center + 540) % 360) - 180;
+    const d = ((deg % 360) + 360) % 360;
+    const delta = ((d - center + 540) % 360) - 180;
     if (Math.abs(delta) <= step / 2 - step * 0.14) return prev;
     return facingIndex(deg, facings);
 }
