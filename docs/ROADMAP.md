@@ -75,7 +75,51 @@
 - [x] **损伤表现**：残血建筑冒烟/起火，残血车辆拖烟，履带扬尘、步兵起伏、飞机倾斜
 - [x] 自动回归：`phystest` 10 项 + `inputtest` 20 项 + 6 分钟对局
 
-## v0.14 行驶观感 / 队列不堵 / 停下就停（当前）
+## v0.15 车体航向 / 友军互堵 / 炮塔锁定 / 144px 素材（已完成）
+
+用户四点反馈：**① 坦克行走时身体不断转向摇晃；② 仍然卡死，还提示被友军挡住，原版被挡住就走不了吗；
+③ 炮塔一直转复位再转；④ 素材像素感太浓**。
+
+前三条都是"症状反复出现"，说明前几版改的是表现而不是机制。这一版先写了 `tools/steertest.mjs`
+把三件事量出来（直线航向翻转次数、炮塔回退次数、10 车同点到达率），再逐条对到原版的具体代码。
+
+### 四条根因
+
+| 症状 | 原版做法 | 我们的错误 | 修法 |
+|---|---|---|---|
+| 车体摇晃 | `DriveLocomotor.onNewWaypoint` 算一次航向 + `TurnTask`；直线段 `tick()` 不写 `direction` | 每帧 `atan2(路点-位置)` 再追，20px 路点抖一格就是 3° | `faceTarget` 只在路点对象变化时重算；转向改成"余量小于一步就吸附" |
+| 贴图抖动 | `direction` 是离散值，天然不抖 | `Math.round` 在 22.5° 边界上两帧一跳 | `facingIndexSticky()`：6° 滞回 |
+| 被友军堵死 | 先绕行到最近无障碍路点（保留后续路线）→ 步兵换子格 → 等待 2.7s → 空闲友军 `MoveAsideTask` → `findRelocationTile`（5 格）；5 次 unreachable 才 Fail | 顺序反了（先推人），绕行是"绕到最终目标"，4 轮就取消订单并弹提示 | 按原版重排；`repathAround` 保留尾部；`parkNear` 代替放弃；只有 > 6 格才报不可达 |
+| 炮塔回正 | `TurretTrait.desiredFacing` 每 tick 被写，`currentTarget` 跨 tick 存活，**没有超时** | `turretAim + 2.2s 倒计时`，且索敌 0.22s 冷却期间不写目标 | 持久 `focus` 目标，无倒计时 |
+
+### 顺带修掉的三处
+
+- **寻路代价加单位密度惩罚**：原版用 `reservedPathNodes` 硬占格；连续移动里硬阻塞会死锁，
+  改用软代价（1 + 1.6×人数，上限 6 倍），车流自然分道。
+- **`repathAround` 截短路径**：只替换成"到中间路点的路径"会丢掉尾部，单位停在离目标几百像素处。
+  必须 `p.concat(rest)`。
+- **watchdog 阈值 18px 太紧**：目标格满了会触发 CloseEnough（清空路径），watchdog 立刻判定"停滞"并
+  重新规划，单位在目的地旁边来回抽动 2.4 秒才停。阈值改成 1.8 格（CloseEnough 是 1.5 格）。
+
+### 素材
+
+- Blender 改为 576 渲染 → 降采样 **144**（原来是 72），图集 1152×720 / 169 KB；
+- 纹理过滤 `NEAREST` → `LINEAR + mipmap`；节点显示尺寸仍是 72，由硬件降采样。
+- `docs/ART-GUIDE.md` 的规格表、manifest 示例、管线说明同步改成 144。
+
+### 回归
+
+```
+steertest   直线 dirFlips 0、faceDelta 0°；炮塔 retreats 0、dirFlips 0；集群 giveUp 0、10/10 抵达
+crowdtest   5/5（10/10 抵达、0 误报、0 抖动）
+movetest   18/18   phystest 10/10   harvesttest 6/6   maptest 21/21
+menutest 11/11     inputtest 20/20  featuretest 14/14
+speedtest 12/12    assettest 20/20  artcheck 6/6
+pathsim    停滞 0-4 / 62（随机场景），到达 50-53，就近停靠 8-9
+battletest 6 分钟：收入 15368 / AI 8840 / 0 报错
+```
+
+## v0.14 行驶观感 / 队列不堵 / 停下就停（已完成）
 
 用户四条反馈：**① 坦克走路时车身一直摇；② 平面上还提示"无法到达"；③ 一群坦克互相卡住；
 ④ 到达后不停歇、乱晃。** 每条都先量化，再对着原版改。

@@ -26,9 +26,9 @@ import blib as B
 import importlib
 importlib.reload(B)
 
-RES = 288          # render size (per facing); 288 = 4x the 72px game frame
-FACTOR = 4         # downscale factor -> 72px
-CELL = 72
+RES = 576          # render size (per facing); 576 = 4x the 144px game frame
+FACTOR = 4         # downscale factor -> 144px
+CELL = 144
 OUT_UNITS = os.path.join(ROOT, "art", "units")
 TMP = os.path.join(ROOT, "art", "blender", "_tmp")
 DEBUG = os.path.join(ROOT, "art", "blender", "_debug")

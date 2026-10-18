@@ -53,6 +53,27 @@ export function facingDeg(i: number, facings = FACINGS) {
     return ((i + 1) * (360 / facings)) % 360;
 }
 
+/**
+ * `facingIndex` with hysteresis, for anything that is recomputed every frame.
+ *
+ * The plain formula rounds, so a bearing sitting on a 22.5-degree boundary flips
+ * between two neighbouring images whenever it moves by a thousandth of a
+ * radian — on screen the hull appears to twitch and the turret appears to snap
+ * away and come back, even though it is tracking perfectly. Keep the current
+ * image until the bearing is clearly past its edge (about 6 degrees of guard at
+ * 8 facings), then switch once.
+ *
+ * `prev` < 0 means "no previous image": falls through to the plain formula.
+ */
+export function facingIndexSticky(deg: number, prev: number, facings = FACINGS) {
+    if (prev === undefined || prev === null || prev < 0 || prev >= facings) return facingIndex(deg, facings);
+    const step = 360 / facings;
+    const center = facingDeg(prev, facings);
+    const delta = ((deg - center + 540) % 360) - 180;
+    if (Math.abs(delta) <= step / 2 - step * 0.14) return prev;
+    return facingIndex(deg, facings);
+}
+
 /** unit vector for a facing index, in logic (cartesian) space */
 export function facingVec(i: number, facings = FACINGS) {
     const a = (facingDeg(i, facings) * Math.PI) / 180;

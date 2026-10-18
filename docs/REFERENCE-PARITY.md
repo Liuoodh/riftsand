@@ -596,3 +596,96 @@ movetest    18/18   phystest 10/10   harvesttest 6/6
 speedtest   12/12   inputtest 20/20  menutest 9/9   assettest 20/20
 battletest  6 分钟：收入 22677 / AI 9224 / 0 报错
 ```
+
+---
+
+## 15. v0.15：摇晃 / 互堵 / 炮塔复位 / 像素感——四条都对到了原版的一行代码
+
+这一版没有再"调参数"，四条问题各自对应原版一个具体机制。诊断工具 `tools/steertest.mjs`
+（直线航向、炮塔锁定、10 车同点）先量出基线，再改。
+
+### 15.1 车体摇晃：原版每段路只定一次方向
+
+```ts
+// DriveLocomotor.onNewWaypoint —— 唯一的赋向点
+if (facing !== unit.direction) {
+    this.pointTurretToTarget(unit, target);
+    if (!this.moveOnCurve) {
+        unit.moveTrait.velocity.set(0, 0, 0);
+        return [new TurnTask(facing)];      // 停车 → 原地转向
+    }
+}
+// DriveLocomotor.tick 的直线分支 —— 只算位移，从不写 direction
+```
+
+我们的 `moveStep` 每帧 `Math.atan2(路点 - 位置)` 再追过去。路点只有 20 px 远时，
+位置抖一格就是 3° 的航向变化，车体老老实实跟着转 —— 直线行驶时左右摆。
+
+改成：`faceTarget` 只在**路点对象变化时**重算（`segWp !== wp`），直线段 `diff` 恒为 0，车体一动不动。
+转向用 `FacingUtil.tick` 语义（余量小于一步就吸附），不再留永久亚步误差。
+测：直线 12 秒，`dirFlips = 0`、`faceDelta = 0°`。
+
+### 15.2 8 方向贴图抖动：边界滞回
+
+`facingIndex()` 是 `Math.round`，角度停在 22.5° 边界上时，千分之一弧度就能让它
+在两个邻格之间跳。新增 `facingIndexSticky(deg, prev)`：只有超出当前格中心 ±(22.5° − 6°) 才换图。
+
+### 15.3 炮塔反复回正：`desiredFacing` 没有定时器
+
+```ts
+// TurretTrait.tick —— 没有超时，没有"回正"
+this.facing = FacingUtil.tick(this.facing, this.desiredFacing, rot);
+// 谁来写 desiredFacing：
+//   DriveLocomotor.pointTurretToTarget → attackTrait.currentTarget（跨 tick 存活）或移动方向
+//   MoveTrait.tick —— 只在"没有任务也没有目标"时写 unit.direction
+```
+
+我们原来是 `turretAim + 2.2 秒倒计时`：倒计时一到就回正；而且索敌有 0.22 s 冷却，
+冷却期间不调 `aimAt`，炮塔同样回正。于是每 0.3 秒"指过去 → 转回来"。
+
+改成持久 `focus`（目标实体，跨 tick 存活）+ 每帧 `aimAt(focus)`，无倒计时；
+`aimReady()` 判 `turretAim === null` 时直接视为就绪。测：10 秒交火 `retreats = 0`、`dirFlips = 0`。
+
+### 15.4 被友军堵死：原版从不因此取消订单
+
+`MoveTask` 的障碍分支（`MoveTask.ts:664-796`）顺序是：
+
+1. `freeWaypointIndex` = 前方**最近的无障碍路点** → `computePath(maxExpandedNodes:15, excludeTiles:有障碍格)`
+   → `path.splice(freeWaypointIndex, ...)`（**保留 anchor 之后的原路线**）
+2. 步兵对步兵 → `findFreeSubCell` / `relocateToSubCell`
+3. blocker 有任务 → `WaitTicksTask(40)`（2.7 s），累计到 `MAX_PLANNING_TICKS = 200`（13 s）才重规划
+4. blocker 完全空闲 → `blocker.unitOrderTrait.addTask(new MoveAsideTask(...))`
+5. 实在不行 → `findRelocationTile`（**半径 0..5 格**的径向搜索）换个能站的格子继续走
+6. 只有连续 5 个 `unreachableTargets` 才 `MoveResult.Fail`
+
+我们原来：绕行 = "排除 blocker 3×3 后重算到**最终目标**"（目标被围住必失败）→ 推人 →
+再失败 → 4 轮后 `giveUpOrder`。10 辆坦克点同一点，5 辆直接取消订单并弹"被友军挡住"。
+
+现在的实现：
+- `repathAround` 改成"绕到路径上最近的可站路点"，并且 `p.concat(rest)` **保留尾部**
+  （只替换会截短路径，单位会停在离目标几百像素处 —— 这是 pathsim 回归的直接原因）；
+- 绕行优先、推人次之、等待其次，`repathTry` 上限 10（约 8 秒）；
+- `parkNear` = `findRelocationTile`（0..5 格径向、要求有容量且可达），并加"只能更靠近目标"约束；
+- `failMove` 先 `parkNear`，5 格内有位就继续走；确实没位 → `CloseEnough` **静默停车**；
+  只有离目标 > 6 格才报"无法抵达"；
+- 寻路代价加**单位密度惩罚**（1 + 1.6×人数，上限 6 倍）——原版靠 `reservedPathNodes` 硬占格，
+  连续移动里硬阻塞会死锁，软代价达到同样的"车流分道"效果而不产生幽灵封锁。
+
+测（10 车同点，180 s）：取消订单 4 → **0**，抵达 5 → **10**。
+
+### 15.5 像素感：144 源图 + 线性过滤
+
+Blender 一直渲染 288 再降到 72，而引擎把车体画在 72×72 的节点里 —— 72 源图在放大时就是硬边。
+改为渲染 576 → 降采样 **144**，manifest 的 `frame` 同步；纹理过滤 `NEAREST` → `LINEAR + mipmap`。
+节点尺寸仍是 72，硬件降采样，边缘自然平滑。
+
+### 15.6 回归
+
+```
+steertest   直线 dirFlips 0 / 炮塔 retreats 0 / 集群 giveUp 0、10/10 抵达
+crowdtest   5/5        movetest 18/18     phystest 10/10    harvesttest 6/6
+maptest     21/21      menutest 11/11     inputtest 20/20   featuretest 14/14
+speedtest   12/12      assettest 20/20    artcheck 6/6
+pathsim     停滞 0-4 / 62（随机场景），到达 50-53，就近停靠 8-9
+battletest  6 分钟：收入 15368 / AI 8840 / 0 报错
+```

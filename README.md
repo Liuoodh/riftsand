@@ -6,7 +6,7 @@
 - 引擎：Cocos Creator 3.8.8
 - 语言：TypeScript
 - 仓库：https://github.com/Liuoodh/riftsand
-- 当前版本：**v0.14.0-dev — 行驶观感 / 队列不堵 / 到达即停**
+- 当前版本：**v0.15.0-dev — 车体不再摇 / 友军不再互堵 / 炮塔锁定 / 144px 素材**
 
 ![主菜单](docs/shots/menu.png)
 
@@ -160,6 +160,44 @@ frameIndex = startFrame + facingMult * facingIndex + animFrame
 
 等距下屏幕矩形对应世界**菱形**，把两个角反投影成世界 AABB 必然漏选。
 现在框选是「逐单位投影到屏幕再判断是否在矩形内」——这是等距下唯一正确的做法。
+
+## v0.15：四条问题，四条原版实现
+
+### 1. 车体行走时一直摇
+
+原版 `DriveLocomotor` 只在 `onNewWaypoint` 里算一次航向，然后返回 `TurnTask`；
+直线段的 `tick()` **从不写 `direction`**。我们每帧 `atan2(路点-位置)` 再追过去——
+20px 的路点抖一格就是 3°，车体跟着转。
+
+现在 `faceTarget` 只在路点对象变化时重算，直线段 `diff` 恒为 0。测：直线 12 秒 0 次朝向变化。
+另外给 8 方向贴图加了 6° 滞回，角度停在 22.5° 边界上不会再两帧一切。
+
+### 2. 坦克互相卡死、提示「被友军挡住」
+
+原版 `MoveTask` 的障碍分支：**先绕行到最近的无障碍路点**
+（`computePath(15 节点, excludeTiles)`，并保留 anchor 之后的原路线）→ 步兵换子格 →
+blocker 有任务就等 2.7s → 完全空闲才 `MoveAsideTask` 推它 →
+最后才 `findRelocationTile`（半径 5 格）。**只有连续 5 次 unreachable 才 Fail，从不因为朋友挡路取消订单。**
+
+我们的顺序是反的：先推人 → 绕行走「绕到最终目标」（目标被围住必失败）→ 4 轮后取消订单。
+现在按原版重排，并加了寻路代价的单位密度惩罚（车流自己分道）。
+10 车点同一点：取消 4 → **0**，抵达 5 → **10**。
+
+### 3. 炮塔转过去又转回来
+
+原版 `TurretTrait` 只有一个 `desiredFacing`，由 `pointTurretToTarget` 每 tick 写；
+`AttackTrait.currentTarget` 跨 tick 存活，所以锁定期间炮塔一直指着目标。**没有超时，没有回正。**
+
+我们原来是「瞄准角 + 2.2 秒倒计时」，加上索敌 0.22s 冷却期间不写目标——于是每 0.3 秒回正一次。
+现在改成持久 `focus`，无倒计时。测：10 秒交火 0 次回退。
+
+### 4. 素材像素感
+
+Blender 一直渲染 288 再降到 72，而引擎把车体画在 72×72 节点里，放大就是硬边。
+改为渲染 576 → 降采样 **144**，纹理过滤 `NEAREST` → `LINEAR + mipmap`。节点尺寸不变，硬件降采样。
+这一批已经用新参数重渲染，图集 1152×720（169 KB）。以后每批照 `docs/ART-GUIDE.md` 的 144 规格出图即可。
+
+新增诊断工具 `tools/steertest.mjs`：直线航向 / 炮塔锁定 / 10 车同点，三件事一次量完。
 
 ## v0.14：车不摇、队不堵、到了就停
 

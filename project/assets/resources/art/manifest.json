@@ -5,12 +5,12 @@
     "rampart": {
       "image": "art/units/rampart.png",
       "frame": {
-        "w": 72,
-        "h": 72
+        "w": 144,
+        "h": 144
       },
       "anchor": {
-        "x": 36,
-        "y": 36
+        "x": 72,
+        "y": 72
       },
       "facings": 8,
       "sequences": {
@@ -28,8 +28,8 @@
       "turret": {
         "image": "art/units/rampart_turret.png",
         "frame": {
-          "w": 72,
-          "h": 72
+          "w": 144,
+          "h": 144
         },
         "start": 0,
         "frames": 8

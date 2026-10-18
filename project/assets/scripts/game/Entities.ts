@@ -101,11 +101,40 @@ export class Unit extends Entity {
     orderQueue: Order[] = [];
     path: Array<{ x: number; y: number }> = [];
     face = 0;
+    /**
+     * Heading demanded by the current path segment.
+     *
+     * Reference: DriveLocomotor.onNewWaypoint derives the facing once and hands
+     * back a TurnTask; tick() never touches `direction` again while driving that
+     * leg. `face` chases `faceTarget`, never the raw waypoint, so a leg that is
+     * geometrically straight produces a completely still hull.
+     */
+    faceTarget = 0;
+    /** the waypoint `faceTarget` was computed for; identity, not equality */
+    private segWp: { x: number; y: number } | null = null;
     /** turret heading, decoupled from the hull (reference: TurretTrait) */
     turretFace = 0;
-    /** where the turret is pointed and for how much longer it stays there */
-    turretAim = 0;
-    turretHold = 0;
+    /**
+     * Bearing the turret should hold, or null when nothing is being tracked.
+     *
+     * Reference: TurretTrait.desiredFacing is written every tick by whoever
+     * owns the unit's attention (DriveLocomotor.pointTurretToTarget writes the
+     * move-or-attack bearing, MoveTrait writes the hull heading when idle).
+     * There is no timer: a turret pointed at a target stays pointed at it.
+     */
+    turretAim: number | null = null;
+    /**
+     * The thing this unit is currently watching.
+     *
+     * Reference: AttackTrait.currentTarget is a field that survives across ticks;
+     * DriveLocomotor.pointTurretToTarget reads it every tick and aims the barrel
+     * there. Target *acquisition* runs on a small cooldown (our `scan` timer),
+     * but the lock itself does not, which is why a retail tank's barrel stays on
+     * its target between scans. Rebuilding the aim from scratch every frame made
+     * the turret swing back to the hull for 0.2 s out of every 0.3 s — the
+     * "turret keeps turning back and forth" report.
+     */
+    focus: Entity | null = null;
     cd = 0;
     vx = 0;
     vy = 0;
@@ -135,6 +164,8 @@ export class Unit extends Entity {
     trafficT = 0;
     /** re-routes attempted for the current order, capped like MoveResult.Fail */
     repathTry = 0;
+    /** how many times we already parked near the destination (findRelocationTile) */
+    parkTry = 0;
     /** cell this unit wanted to enter but could not */
     blockTx = -1;
     blockTy = -1;
@@ -292,14 +323,30 @@ export class Unit extends Entity {
         const d = Math.hypot(dx, dy);
         if (d < 3) {
             this.path.shift();
+            this.segWp = null;
             // reaching a waypoint resets the planning counter (reference:
             // inPlanningForTicks is cleared on ReachedNextWaypoint)
             this.blockedNow = false;
+            this.repathTry = 0;
             return this.path.length > 0;
         }
 
-        const desired = Math.atan2(dy, dx);
-        let diff = desired - this.face;
+        /*
+         * Heading is derived once per segment, not once per frame.
+         *
+         * This is the whole "the hull keeps swinging while it drives" bug. The
+         * old code recomputed atan2(waypoint) every tick and chased it; a 20 px
+         * waypoint that drifts a pixel sideways is a 3-degree heading change, and
+         * the hull dutifully turned after it, so a straight drive wobbled. The
+         * reference computes the leg bearing in DriveLocomotor.onNewWaypoint and
+         * returns a TurnTask; the straight-line branch of tick() never assigns
+         * `direction` at all.
+         */
+        if (this.segWp !== wp) {
+            this.segWp = wp;
+            this.faceTarget = Math.atan2(dy, dx);
+        }
+        let diff = this.faceTarget - this.face;
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;
 
@@ -315,6 +362,7 @@ export class Unit extends Entity {
          */
         if (this.path.length === 1 && d < TILE * 1.5 && roomFn && !roomFn(this, wp.x, wp.y)) {
             this.path.length = 0;
+            this.segWp = null;
             this.speedCur = 0;
             this.vx = 0;
             this.vy = 0;
@@ -326,17 +374,27 @@ export class Unit extends Entity {
         // (DriveLocomotor returns a TurnTask and zero velocity otherwise).
         // Infantry pivot instantly (FootLocomotor just assigns direction).
         if (this.def.kind === 'infantry') {
-            this.face = desired;
+            this.face = this.faceTarget;
             this.turnDelta = 0;
         } else {
             const turn = this.turnRate;
-            const applied = Math.max(-turn * dt, Math.min(turn * dt, diff));
-            this.face += applied;
-            this.turnDelta = applied / Math.max(0.001, dt);
-            const remaining = Math.abs(diff - applied);
+            /*
+             * FacingUtil.tick semantics: when the remainder is smaller than one
+             * step, snap to the target. Without the snap the heading creeps a
+             * thousandth of a degree forever and never equals the target, so an
+             * 8-way sprite parked on a boundary flips between two images.
+             */
+            if (Math.abs(diff) <= turn * dt) {
+                this.face = this.faceTarget;
+                this.turnDelta = 0;
+            } else {
+                const applied = Math.sign(diff) * turn * dt;
+                this.face += applied;
+                this.turnDelta = applied / Math.max(0.001, dt);
+            }
             // Only a real about-face stops the hull. Waiting on every waypoint
             // kink turned harvesters into traffic jams (measured in battletest).
-            if (remaining > 0.85) {
+            if (Math.abs(diff) > 0.85) {
                 this.speedCur = Math.max(0, this.speedCur - this.accel * 2 * dt);
                 this.vx = 0;
                 this.vy = 0;
@@ -349,7 +407,14 @@ export class Unit extends Entity {
                 return true;
             }
         }
-        const align = Math.max(0.15, Math.cos(diff));
+        /*
+         * Throttle penalty for a heading error, with a dead zone.
+         *
+         * The continuous cos() made the speed pulse with every tiny correction,
+         * which reads as a stutter on top of the wobble. Anything under 20
+         * degrees is a lane adjustment, not a turn.
+         */
+        const align = Math.abs(diff) > 0.35 ? Math.max(0.2, Math.cos(diff)) : 1;
 
         let top = this.speed * speedMul * align * this.terrainMul;
         if (this.speedCap > 0) top = Math.min(top, this.speedCap);
@@ -419,15 +484,12 @@ export class Unit extends Entity {
 
     stop() {
         this.path.length = 0;
+        this.segWp = null;
         this.vx = 0;
         this.vy = 0;
         this.speedCur = 0;
     }
 
-    /**
-     * Turret tracks a target when there is one, otherwise drifts back to the
-     * hull heading. Air units have no turret, so their body simply follows.
-     */
     /**
      * Is the turret pointed close enough to fire?
      *
@@ -437,26 +499,45 @@ export class Unit extends Entity {
      */
     aimReady(tolerance = 0.22) {
         if (this.def.kind === 'infantry' || this.def.kind === 'air') return true;
+        if (this.turretAim === null) return true;
         let d = this.turretAim - this.turretFace;
         while (d > Math.PI) d -= Math.PI * 2;
         while (d < -Math.PI) d += Math.PI * 2;
         return Math.abs(d) <= tolerance;
     }
 
-    /** called when a target is acquired: swing the turret onto it, never snap */
+    /**
+     * Lock the turret onto a bearing for this tick.
+     *
+     * Cleared at the start of every update and rewritten by whatever owns the
+     * unit's attention, which is exactly how `turretTrait.desiredFacing` behaves
+     * in the reference. The old design kept the bearing plus a 2.2 s timer, so a
+     * tank that fired, then spent two seconds repositioning, dropped the lock and
+     * swung its barrel back to the hull — the "the turret keeps turning back and
+     * forth" report. A turret now holds its target for as long as the target is
+     * being tracked, and only re-centres when the unit is genuinely idle.
+     */
     aimAt(x: number, y: number) {
         this.turretAim = Math.atan2(y - this.y, x - this.x);
-        this.turretHold = 2.2;
     }
 
-    aimTurret(dt: number, targetAngle?: number) {
+    /**
+     * Advance the turret toward `want` (default: the hull heading).
+     *
+     * FacingUtil.tick semantics again: snap when the remainder is under one step,
+     * otherwise rotate by exactly one step. The previous always-clamp version
+     * left a permanent sub-step error, which the 8-way sprite turned into a
+     * visible flicker between two neighbouring turret images.
+     */
+    aimTurret(dt: number, want?: number | null) {
         if (this.def.kind === 'air') return;
-        const want = targetAngle === undefined ? this.face : targetAngle;
-        let d = want - this.turretFace;
+        const target = want === undefined || want === null ? this.face : want;
+        let d = target - this.turretFace;
         while (d > Math.PI) d -= Math.PI * 2;
         while (d < -Math.PI) d += Math.PI * 2;
         const rate = (this.def.kind === 'infantry' ? 12 : 3.6) * dt;
-        this.turretFace += Math.max(-rate, Math.min(rate, d));
+        if (Math.abs(d) <= rate) this.turretFace = target;
+        else this.turretFace += Math.sign(d) * rate;
     }
 
     canShoot() {

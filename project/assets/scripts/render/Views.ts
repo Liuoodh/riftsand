@@ -12,7 +12,7 @@ import {
 } from '../core/Core';
 import { TerrainMap, TileKind } from '../world/Terrain';
 import { worldToProj, ISO_HW, ISO_HH, HEIGHT_PX, PROJ_HALF_X, PROJ_HALF_Y } from '../world/Iso';
-import { Anim, Seq, facingIndex, facingDeg } from './Frames';
+import { Anim, Seq, facingIndex, facingIndexSticky, facingDeg } from './Frames';
 import { Game, PlayerState } from '../game/Game';
 import { Unit, Building, Entity, Projectile, Fx, Zone, Crate, Decal } from '../game/Entities';
 import {
@@ -612,8 +612,8 @@ export class EntityView {
                 // ground units use discrete facing images: never spin the node
                 this.node.angle = 0;
                 const deg = (u.face * 180) / Math.PI;
-                const dir8 = facingIndex(deg);
-                const tDir8 = facingIndex((u.turretFace * 180) / Math.PI);
+                const dir8 = facingIndexSticky(deg, this.dir8);
+                const tDir8 = facingIndexSticky((u.turretFace * 180) / Math.PI, this.tDir8);
 
                 /*
                  * Sequence clock: moving plays Walk, standing holds Ready.

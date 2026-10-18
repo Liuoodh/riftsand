@@ -104,7 +104,18 @@ async function loadUnit(id: string, def: any): Promise<void> {
 
     const bodyTex = await loadTexture(def.image);
     if (!bodyTex) { lastError += `${id}: body image missing (${def.image}); `; return; }
-    bodyTex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+    /*
+     * Blender-rendered art is not pixel art.
+     *
+     * The source atlases are rendered at 4x and downscaled by the artist, so the
+     * frames are photographic-ish: nearest-neighbour sampling turns every
+     * anti-aliased edge back into a staircase and the tank reads as a chunky
+     * sprite. Linear filtering with mipmaps keeps the render smooth at any
+     * zoom. Pixel art (a manifest that ships tiny 1x frames) stays crisp anyway
+     * because there is no downscale to speak of.
+     */
+    bodyTex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+    bodyTex.setMipFilter(Texture2D.Filter.LINEAR);
     bodyTex.setWrapMode(Texture2D.WrapMode.CLAMP_TO_EDGE, Texture2D.WrapMode.CLAMP_TO_EDGE);
 
     const body = sliceSheet(bodyTex, fw, fh, total);
@@ -112,7 +123,8 @@ async function loadUnit(id: string, def: any): Promise<void> {
     if (def.turret?.image) {
         const tTex = await loadTexture(def.turret.image);
         if (tTex) {
-            tTex.setFilters(Texture2D.Filter.NEAREST, Texture2D.Filter.NEAREST);
+            tTex.setFilters(Texture2D.Filter.LINEAR, Texture2D.Filter.LINEAR);
+            tTex.setMipFilter(Texture2D.Filter.LINEAR);
             tTex.setWrapMode(Texture2D.WrapMode.CLAMP_TO_EDGE, Texture2D.WrapMode.CLAMP_TO_EDGE);
             const tfw = def.turret.frame?.w ?? fw;
             const tfh = def.turret.frame?.h ?? fh;
