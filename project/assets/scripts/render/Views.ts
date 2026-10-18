@@ -615,15 +615,36 @@ export class EntityView {
                 const dir8 = facingIndex(deg);
                 const tDir8 = facingIndex((u.turretFace * 180) / Math.PI);
 
-                // sequence clock: moving plays Walk, standing holds Ready
-                this.anim.play(u.speedCur > 4 ? Seq.Walk : Seq.Ready);
-                this.anim.step(dt);
+                /*
+                 * Sequence clock: moving plays Walk, standing holds Ready.
+                 *
+                 * The playback rate follows the hull speed. A tank creeping out of
+                 * a turn should not scroll its tracks at full speed, and — the
+                 * visible symptom — a 9fps four-frame cycle on a heavy hull reads
+                 * as a nervous jitter when the vehicle is barely moving. Retail
+                 * sequences are tied to locomotor progress for the same reason.
+                 */
+                const moving = u.speedCur > 4;
+                this.anim.play(moving ? Seq.Walk : Seq.Ready);
+                const baseSpeed = Math.max(1, u.def.speed);
+                this.anim.step(dt, moving ? Math.max(0.2, Math.min(1, u.speedCur / baseSpeed)) : 1);
 
                 const flip = u.def.kind === 'infantry'
                     && Math.cos((facingDeg(dir8) * Math.PI) / 180) < -0.15;
                 const S = u.hitFlash > 0 ? 1.04 : 1;
                 this.spriteNode.setScale(flip ? -S : S, S, 1);
-                this.spriteNode.setPosition(-u.recoil * 26, 0, 0);
+                /*
+                 * No hull recoil offset.
+                 *
+                 * This used to slide the whole sprite 26px along screen-X on every
+                 * shot (and it was always screen-X, regardless of which way the
+                 * hull pointed). A tank firing while driving therefore jittered
+                 * sideways 26px and back, four times a second in a firefight —
+                 * the "body keeps shaking while it walks" report. Retail has no
+                 * hull displacement at all; the barrel is what kicks, and that is
+                 * the turret node (a couple of pixels along the barrel).
+                 */
+                this.spriteNode.setPosition(0, 0, 0);
 
                 if (dir8 !== this.dir8 || this.anim.frame !== this.frame) {
                     this.dir8 = dir8;
@@ -632,6 +653,11 @@ export class EntityView {
                 }
 
                 // turret overlay: only repaint when its heading actually changed
+                this.turret.node.setPosition(
+                    Math.cos((u.turretFace)) * u.recoil * 4,
+                    Math.sin((u.turretFace)) * u.recoil * 4 * 0.5,
+                    0,
+                );
                 if (tDir8 !== this.tDir8 || u.owner !== this.lastOwner) {
                     this.tDir8 = tDir8;
                     const art = unitTurretFrame(u.def, tDir8);
@@ -646,7 +672,6 @@ export class EntityView {
                         if (u.def.kind === 'vehicle') paintTurret(tp, u.def, factionOf(u.owner), tDir8);
                     }
                 }
-                this.turret.node.setPosition(-u.recoil * 26, 0, 0);
             }
 
             // own cloaked units read as a ghost so the player can still command them

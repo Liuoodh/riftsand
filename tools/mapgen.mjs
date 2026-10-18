@@ -274,8 +274,8 @@ function ringLake() {
     paintTiles(m);
 
     const ore = [
-        { tx: 18, ty: 33, amount: 4600 },
-        { tx: 18, ty: 47, amount: 4600 },
+        { tx: 24, ty: 33, amount: 4600 },
+        { tx: 24, ty: 47, amount: 4600 },
         { tx: 40, ty: 22, amount: 6200 },
         { tx: 40, ty: 58, amount: 6200 },
         { tx: 27, ty: 40, amount: 3800 },

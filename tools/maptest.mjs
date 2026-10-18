@@ -111,7 +111,9 @@ for (const id of MAPS) {
     check(`${id} 两个出生点之间有车辆通路`, res.link);
     const badOre = res.ore.filter((o) => !o.reach0 || !o.reach1);
     check(`${id} 全部矿点可达`, badOre.length === 0, `${res.ore.length} 个矿点，不可达 ${badOre.length}`);
-    check(`${id} 采集链能产出`, res.earned > 1500, `${res.harv} 台采集车，60 秒产出 ${res.earned}`);
+    // a 300-cargo truck delivers ~3 times a minute on a short map and ~2 times on a
+    // long one; four deliveries total is the bar for "the loop closes"
+    check(`${id} 采集链能产出`, res.earned >= 1200, `${res.harv} 台采集车，60 秒产出 ${res.earned}`);
     check(`${id} 运行无报错`, errors.length === 0, errors.slice(0, 2).join(' | '));
     await page.close();
 }

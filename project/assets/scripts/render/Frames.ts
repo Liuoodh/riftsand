@@ -75,13 +75,19 @@ export class Anim {
         this.t = 0;
     }
 
-    step(dt: number) {
+    /**
+     * @param rateScale  playback speed multiplier, 0..2. Vehicle sequences are
+     *   tied to ground speed (a tank crawling out of a turn must not scroll its
+     *   tracks at full rate), infantry simply pass 1.
+     */
+    step(dt: number, rateScale = 1) {
         const d = SEQUENCES[this.seq];
         if (d.rate <= 0 || d.frames <= 1) {
             this.frame = 0;
             return;
         }
-        const period = 1 / d.rate;
+        const rate = d.rate * Math.max(0.05, rateScale);
+        const period = 1 / rate;
         this.t += dt;
         // guard against long frames (tab switch) turning into a loop storm
         if (this.t > period * 8) this.t = period;

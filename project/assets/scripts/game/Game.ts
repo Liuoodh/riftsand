@@ -1345,7 +1345,15 @@ export class Game {
     }
 
     /** the reference gives up after 5 unreachable targets; do the same */
-    private giveUpOrder(u: Unit) {
+    /**
+     * The order could not be completed.
+     *
+     * `reason` matters for the player-facing message: only a missing ROUTE means
+     * "unreachable". Being squeezed by friendly traffic ends the order too, but
+     * telling the player "无法抵达目标" there is a lie — and it was the message
+     * they saw on an empty flat map.
+     */
+    private giveUpOrder(u: Unit, reason: 'nopath' | 'blocked' = 'nopath') {
         const wasMoving = u.order.k !== 'idle';
         u.retry = 0;
         u.stuck = 0;
@@ -1356,7 +1364,12 @@ export class Game {
         u.progGoalD = 0;
         u.stop();
         u.order = { k: 'idle' };
-        if (wasMoving && u.owner === 0) this.events.onMessage?.('无法抵达目标，已取消行进', 'warn');
+        if (wasMoving && u.owner === 0) {
+            this.events.onMessage?.(
+                reason === 'nopath' ? '无法抵达目标，已取消行进' : '前方被友军堵住，已原地待命',
+                'warn',
+            );
+        }
     }
 
     private moveUnitTo(u: Unit, x: number, y: number, keepOrder: boolean) {
@@ -1384,7 +1397,7 @@ export class Game {
          * findRelocationTile). Only when literally nowhere is reachable does the
          * order end — that is `MoveResult.Fail`.
          */
-        if (!this.relocateTo(u, x, y)) this.giveUpOrder(u);
+        if (!this.relocateTo(u, x, y)) this.giveUpOrder(u, 'nopath');
     }
 
     private startHarvest(u: Unit, node: CrystalNode | null) {
@@ -2190,11 +2203,25 @@ export class Game {
                 if (u.path.length > 0) {
                     u.moveStep(dt, 1);
                     if (u.blockedNow) order.timer += dt;
-                    if (order.timer > 2.2) {
-                        // the dock lane is jammed: retry the approach from another side
+                    if (order.timer > 1.2) {
+                        /*
+                         * Truck-vs-truck deadlock on the way home.
+                         *
+                         * Two trucks meeting in a one-cell corridor (refinery on
+                         * one side, ore field on the other) both want the same
+                         * middle cell. Re-pathing does not help — the corridor has
+                         * exactly one lane — so the slower answer is the right one:
+                         * back off a cell and let the other pass, exactly what the
+                         * mining phase already does.
+                         */
                         order.timer = 0;
-                        const pth = this.findDock(u, drop);
-                        if (pth) u.path = pth;
+                        const blocker = this.blockerAt(u) || this.nearestBlocker(u);
+                        if (blocker && blocker.owner === u.owner && blocker.isHarvester) {
+                            this.backOff(u);
+                        } else {
+                            const pth = this.findDock(u, drop);
+                            if (pth) u.path = pth;
+                        }
                     }
                 } else {
                     const pth = this.findDock(u, drop)
@@ -2692,7 +2719,7 @@ export class Game {
                         if (!this.relocateTo(u, goal!.x, goal!.y) ) u.stallT = 2.4;
                     } else if (u.stallT >= 2.4) {
                         u.stallT = 0;
-                        this.giveUpOrder(u);
+                        this.giveUpOrder(u, 'blocked');
                     }
                 } else {
                     u.stallT = 0;
@@ -2837,12 +2864,56 @@ export class Game {
     private stepBlockedByUnit(u: Unit, x: number, y: number): boolean {
         const tx = Math.floor((x + HALF) / TILE);
         const ty = Math.floor((y + HALF) / TILE);
+        /*
+         * Traffic is not a wall.
+         *
+         * Reference: MoveTask's obstacle loop only treats a unit as an obstacle
+         * when it is *stationary* (`blocker.moveTrait.moveState === Idle`), a
+         * building, or mid-collision; when the blocker still has velocity the
+         * loop `break`s and the unit keeps driving. That rule is what lets a
+         * column of tanks follow each other — and its absence is why a tank
+         * column used to lock up: our capacity test rejected the leader's cell
+         * even while the leader was driving out of it, so every follower queued
+         * behind a moving tank forever, ran out of re-path attempts and cancelled
+         * its order ("cannot reach" on an empty plane).
+         */
+        const set = this.occupancy.at(tx, ty);
+        if (set && set.size > 0) {
+            /*
+             * `sameLane` must start false: a cell that only contains US is not a
+             * "lane being vacated", it is just our own cell, and returning early
+             * there skipped the hull stand-off test entirely — which is how two
+             * tanks driving head-on were allowed to walk right through each other
+             * (measured 1.3px apart) even with the rule in place.
+             */
+            let sameLane = false;
+            let others = 0;
+            for (const o of set) {
+                if (o === u || o.dead) continue;
+                others++;
+                /*
+                 * "Going the same way" is the part that matters.
+                 *
+                 * Reference condition: `unit.direction === blocker.direction` —
+                 * a moving blocker is only ignored when it is travelling the same
+                 * way as us and is therefore about to vacate the tile.
+                 */
+                const sameDir = Math.cos(o.face - u.face) > 0.55;
+                if (!(o.speedCur > 6 && o.path.length > 0 && sameDir)) { sameLane = false; break; }
+                sameLane = true;
+            }
+            if (others > 0 && sameLane) return false;   // the cell is being vacated ahead of us
+        }
         if (!this.occupancy.hasRoomFor(u, tx, ty)) return true;
 
         this.grid.query(x, y, u.radius + 42, this.tmp);
         for (const e of this.tmp) {
             const o = e as Unit;
             if (o === u || o.dead || !o.def || o.isAir) continue;
+            // same rule for the hull test: a hull driving the same way cannot be
+            // "driven into", so it must not veto the step either
+            if (o.def.kind !== 'infantry' && o.speedCur > 6 && o.path.length > 0
+                && Math.cos(o.face - u.face) > 0.55) continue;
             /*
              * Crushers ignore hostile infantry entirely — that is how a tank
              * drives onto a cell and flattens whoever is standing there
@@ -2866,7 +2937,17 @@ export class Game {
             const dNew = Math.hypot(o.x - x, o.y - y);
             if (dNew >= minD) continue;
             const dCur = Math.hypot(o.x - u.x, o.y - u.y);
-            if (dNew < dCur - 0.02) return true;
+            /*
+             * Refuse any step that ends inside the stand-off ring unless it is
+             * clearly a retreat.
+             *
+             * The old test only refused steps that *closed* the gap by more than
+             * 0.02px. A head-on pair could then walk into each other sideways: the
+             * straight step was refused, the axis-slide fallback kept the distance
+             * unchanged (allowed), and repeat that a few times and two tanks end up
+             * 1.3px apart, which is exactly "they drove through each other".
+             */
+            if (dNew < dCur + 1.0) return true;
         }
         return false;
     }
@@ -3007,8 +3088,28 @@ export class Game {
         u.blockT = 0;
         u.repathTry = 0;
         u.repathHold = 1.5;
+        u.stallT = 0;
         if (u.order.k === 'move' || u.order.k === 'attackmove') {
-            this.giveUpOrder(u);
+            /*
+             * CloseEnough before Fail.
+             *
+             * Reference: the obstacle branch checks `isCloseEnoughToDest()` before
+             * giving up and returns `MoveResult.CloseEnough` — an order that ends
+             * two tiles short because friends are in the way is a *success*, not
+             * an unreachable target. Ten tanks ordered to one point cannot all
+             * stand on it; without this bail-out every one of them that arrived
+             * in the ring around the destination cancelled its order and printed a
+             * warning, which read as "the game says it cannot get there" while the
+             * tanks were visibly there.
+             */
+            const goal = this.orderGoal(u);
+            const near = goal ? Math.hypot(goal.x - u.x, goal.y - u.y) : 0;
+            if (goal && near <= TILE * 2.4) {
+                u.stop();
+                u.order = { k: 'idle' };
+                return;
+            }
+            this.giveUpOrder(u, 'blocked');
         }
         // A harvester keeps its destination: the ore field is still where it
         // wants to go, it just cannot get there this second. Clearing the node
