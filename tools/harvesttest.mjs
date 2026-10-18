@@ -70,7 +70,9 @@ const res = await page.evaluate(async () => {
             }
             const tx = Math.floor((u.x + HALF) / TILE);
             const ty = Math.floor((u.y + HALF) / TILE);
-            if (g.worldBlockedAt(u.x, u.y, u.radius)) everInside++;
+            // steerRadius, not the visual radius: the hull is allowed to overhang a wall
+            // by a few pixels (that is what lets a truck park beside the refinery)
+            if (g.worldBlockedAt(u.x, u.y, u.steerRadius)) everInside++;
             if (u.order.k === 'harvest') phases.add(u.order.phase);
             if (u.order.k === 'harvest' && u.order.phase === 'mining') everMining = true;
             wasBlocked.push(u.blockedNow ? 1 : 0);

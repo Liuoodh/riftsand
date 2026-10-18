@@ -83,7 +83,15 @@ const out = await page.evaluate(() => {
     const enemyInfDef = g.availableUnitsFor(g.players[1], 'infantry').find((d) => d.weapon && !d.cloak);
 
     /* 1. terrain multipliers */
-    const dune = findTile(1);
+    let dune = findTile(1);
+    // the flat test map has no dunes: build one so this test stays map-independent
+    if (!dune) {
+        const tx = 30, ty = 50;
+        g.terrain.kind[ty * 80 + tx] = 1;
+        g.terrain.rebuildSpeed();
+        g.terrain.rebuildHeight();
+        dune = { tx, ty };
+    }
     const sand = findTile(0);
     const crystal = findTile(3);
     res.terrain = {

@@ -249,6 +249,39 @@ montage ready_*.png walk_*.png -tile 8x -geometry +0+0 -background none tank.png
 - 导出后 `node tools/mapbuild.mjs` 校验并打包，`node tools/maptest.mjs` 进游戏验收。
 - 完整格式、素材数量、设计准则、验收标准：见 [`MAP-GUIDE.md`](./MAP-GUIDE.md)。
 
+### 5.4 真素材接入（Blender 批次 → 游戏）
+
+图集画完/渲染完后，**三步进游戏**：
+
+```bash
+node tools/artimport.mjs    # 合并 art/manifest*.json + 拷图到 project/assets/resources/art
+#  … 构建（CocosCreator --build）
+node tools/artcheck.mjs     # 可选：打印「引擎朝向 N → 图集帧 M」对照表
+```
+
+**目录约定**
+
+| 位置 | 作用 |
+|---|---|
+| `art/units/*.png`、`art/manifest.<批次>.json` | 你在仓库根的工作区（Blender 直接往这里输出） |
+| `project/assets/resources/art/**` | 运行时真正加载的副本，由 `artimport` 生成，**不要手改** |
+| `art/templates/**` | 空白模板，`artimport` 会跳过（否则会把占位图当成品导进去，把程序化美术覆盖成空白） |
+
+**为什么必须放 `resources/`**：小游戏打包只会带上 `assets/resources` 下被引用的资源；放在普通
+`assets/` 的 PNG 不会进包，运行时是空的。
+
+**朝向与排版（已经踩过的坑）**
+
+- 帧序必须是 `start + animFrame × facings + facing`（朝向是最内层，8 张一行）。
+- 朝向表：`0 上 / 1 左上 / 2 左 / 3 左下 / 4 下 / 5 右下 / 6 右 / 7 右上`，与引擎
+  `facingIndex()` 一一对应，**不需要** `dirOffset`。若某批渲染的起点不同，在 manifest 里加
+  `"dirOffset": n` 即可，不用改代码。
+- 锚点：帧中心 = 车体触地点（`anchor: 36,36`），这样单位站在格心、不会浮空。
+- 炮塔单独一张、与车体同一锚点；`EntityView` 用同一变换叠上去，后坐力位移两者一致。
+
+**没画完的单位**会自动退回程序化画笔，所以可以逐个单位替换，不会出现空白单位。
+`assettest.mjs` 会校验：帧数够不够、图集尺寸是否是帧宽高的整数倍、缺哪一帧。
+
 ---
 
 ### 5.4 Blender 管线（本仓库已实现，可复用）

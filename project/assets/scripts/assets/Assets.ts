@@ -24,6 +24,7 @@ import { CanvasPen } from './Pen';
 import { paintUnit, paintHull } from '../render/Art';
 import { ShpFile } from './Shp';
 import { indicesToRgba, parsePal, remapTeam, Rgba8, syntheticPal } from './Palette';
+import { unitBodyArtFrame, unitTurretArtFrame } from './ArtPack';
 
 export const FRAME_W = 72;
 export const FRAME_H = 72;
@@ -144,8 +145,11 @@ const isVehicleHull = (def: UnitDef) => def.kind === 'vehicle';
  * because it rotates independently); everything else bakes as one image.
  */
 export function unitBodyFrame(
-    def: UnitDef, faction: Faction, dir8: number, frame: number,
+    def: UnitDef, faction: Faction, dir8: number, frame: number, moving = false,
 ): SpriteFrame | null {
+    // real art wins when the artist shipped it; the painter is the fallback
+    const real = unitBodyArtFrame(def.id, dir8, frame, moving);
+    if (real) return real;
     // the team colour is part of the identity of a baked frame: two matches with
     // different player colours must not reuse each other's textures
     const key = `u|${def.id}|${faction}|${activeTeamColorOf(faction)}|${dir8}|${frame}`;
@@ -155,6 +159,11 @@ export function unitBodyFrame(
         if (isVehicleHull(def)) paintHull(pen, def, faction, dir8, frame);
         else paintUnit(pen, def, faction, dir8, frame);
     }, key);
+}
+
+/** Turret overlay from real art, or null when the unit has no turret atlas. */
+export function unitTurretFrame(def: UnitDef, dir8: number): SpriteFrame | null {
+    return unitTurretArtFrame(def.id, dir8);
 }
 
 export function clearFrameCache() {

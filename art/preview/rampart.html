@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>素材预览 · 城墙主战坦克 RAMPART</title>
+<style>
+  :root{
+    --bg:#0a0d12; --panel:#10141a; --panel2:#151a22; --line:#1d7c8a;
+    --cyan:#3fd9ec; --cyan-dim:#1d7c8a; --amber:#e8a33d; --sand:#c9a173;
+    --text:#f2f5f7; --muted:#8d9aa8; --ok:#3fbf9a; --danger:#e5523f;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);
+    font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+  body{min-height:100vh;background:
+     radial-gradient(1200px 600px at 20% -10%, #16202b 0%, transparent 60%),
+     radial-gradient(900px 500px at 90% 0%, #1a1512 0%, transparent 55%), var(--bg)}
+  .wrap{max-width:1180px;margin:0 auto;padding:28px 22px 60px}
+  header{display:flex;align-items:flex-end;gap:18px;flex-wrap:wrap;margin-bottom:6px}
+  h1{font-size:22px;margin:0;letter-spacing:.5px}
+  h1 small{display:block;font-size:12px;color:var(--muted);font-weight:400;letter-spacing:1.5px;margin-top:4px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+  .chip{font-size:11px;padding:5px 10px;border-radius:999px;background:var(--panel);
+    border:1px solid #1e2631;color:var(--muted)}
+  .chip b{color:var(--cyan);font-weight:600}
+  .tabs{display:flex;gap:6px;margin:22px 0 14px;flex-wrap:wrap}
+  .tab{appearance:none;border:1px solid #1e2631;background:var(--panel);color:var(--muted);
+    padding:9px 16px;border-radius:9px;font-size:13px;cursor:pointer;transition:.15s}
+  .tab:hover{color:var(--text);border-color:#2b3947}
+  .tab.on{color:var(--text);border-color:var(--cyan-dim);
+    background:linear-gradient(180deg,rgba(63,217,236,.10),rgba(63,217,236,.02));
+    box-shadow:inset 0 1px 0 rgba(63,217,236,.35)}
+  .stage{position:relative;background:
+      linear-gradient(180deg,#11161d,#0c1015);border:1px solid #1b232d;border-radius:14px;
+      overflow:hidden}
+  .stage:before{content:"";position:absolute;inset:0;pointer-events:none;
+    background-image:linear-gradient(rgba(63,217,236,.04) 1px,transparent 1px),
+      linear-gradient(90deg,rgba(63,217,236,.04) 1px,transparent 1px);
+    background-size:36px 36px}
+  canvas{display:block;width:100%;height:auto;image-rendering:pixelated;position:relative}
+  .row{display:flex;gap:14px;flex-wrap:wrap;margin-top:14px}
+  .card{background:var(--panel);border:1px solid #1b232d;border-radius:12px;padding:14px 16px;flex:1 1 240px}
+  .card h3{margin:0 0 8px;font-size:12px;letter-spacing:1.5px;color:var(--cyan);font-weight:600}
+  .card p{margin:4px 0;font-size:12.5px;line-height:1.65;color:var(--muted)}
+  .card code{color:var(--amber);font-size:11.5px}
+  .ctrls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+  .ctrl{display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid #1b232d;
+    border-radius:9px;padding:7px 12px;font-size:12px;color:var(--muted)}
+  input[type=range]{width:130px;accent-color:var(--cyan)}
+  .val{color:var(--cyan);min-width:26px;text-align:right;font-variant-numeric:tabular-nums}
+  .hint{font-size:11.5px;color:#5f6d7b;margin-top:10px}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:11.5px;color:var(--muted)}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:1px}
+  footer{margin-top:26px;font-size:11.5px;color:#5f6d7b;line-height:1.8}
+  footer a{color:var(--cyan-dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>城墙主战坦克 · RAMPART
+      <small>BLENDER 8 向渲染 · 精灵图集预览</small>
+    </h1>
+    <div class="chips">
+      <span class="chip">车体 <b>576×360</b> / 40 帧</span>
+      <span class="chip">炮塔 <b>576×72</b> / 8 帧</span>
+      <span class="chip">单帧 <b>72×72</b></span>
+      <span class="chip">相机 <b>30°</b> 正交</span>
+    </div>
+  </header>
+
+  <div class="tabs">
+    <button class="tab on" data-tab="dirs">8 方向</button>
+    <button class="tab" data-tab="walk">行走循环</button>
+    <button class="tab" data-tab="field">战场合成</button>
+    <button class="tab" data-tab="atlas">图集 &amp; 索引</button>
+  </div>
+
+  <div class="stage">
+    <canvas id="cv" width="1120" height="380"></canvas>
+  </div>
+
+  <div class="ctrls">
+    <label class="ctrl">缩放
+      <input id="zoom" type="range" min="1" max="8" step="1" value="3">
+      <span class="val" id="zoomV">3x</span>
+    </label>
+    <label class="ctrl" id="facingCtl">朝向
+      <input id="facing" type="range" min="0" max="7" step="1" value="6">
+      <span class="val" id="facingV">6</span>
+    </label>
+    <label class="ctrl" id="spinCtl"><input id="spin" type="checkbox" checked> 炮塔自转</label>
+    <label class="ctrl" id="layerCtl"><input id="layer" type="checkbox" checked> 叠加炮塔</label>
+  </div>
+
+  <div class="row">
+    <div class="card">
+      <h3>当前批次</h3>
+      <p>车体 Ready ×8 + Walk ×4×8（含履带滚动）= 40 帧</p>
+      <p>独立炮塔 ×8 帧，与车体同锚点（画布中心 = 接地面中心）</p>
+      <p>图集按引擎公式 <code>start + facingMult×facing + anim</code> 排布</p>
+    </div>
+    <div class="card">
+      <h3>还差什么</h3>
+      <p>FireUp 2 帧 · Die1 4 帧（8 向）尚未制作</p>
+      <p>DS 阵营配色版本（沙蜥商团）待定</p>
+      <p>阴影/选中环由引擎绘制，不烤进图集</p>
+    </div>
+    <div class="card legend">
+      <span><i style="background:#4b5461"></i>车体中性灰</span>
+      <span><i style="background:#5d6775"></i>亮面装甲</span>
+      <span><i style="background:#3fd9ec"></i>阵营霓虹</span>
+      <span><i style="background:#e8a33d"></i>队色（BU 琥珀）</span>
+    </div>
+  </div>
+
+  <footer>
+    源文件：<code>art/blender/rampart.blend</code> ·
+    构建脚本：<code>tools/blender/rampart_build.py</code>（经 blender-mcp 插件 socket 送入 Blender 执行）·
+    图集：<code>art/units/rampart.png</code>、<code>art/units/rampart_turret.png</code><br>
+    朝向顺序（屏幕）：上 → 左上 → 左 → 左下 → 下 → 右下 → 右 → 右上。炮塔单独一张，运行时独立转向。
+  </footer>
+</div>
+
+<script>
+const HULL_SRC = "../units/rampart.png";
+const TURRET_SRC = "../units/rampart_turret.png";
+const CELL = 72;
+const FACING_NAMES = ["上","左上","左","左下","下","右下","右","右上"];
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+let hull = new Image(), turret = new Image(), ready = 0;
+hull.onload = turret.onload = () => { if (++ready === 2) frame(); };
+hull.src = HULL_SRC; turret.src = TURRET_SRC;
+
+const state = { tab: "dirs", zoom: 3, facing: 6, spin: true, layer: true, t: 0 };
+
+/* sprite geometry: frame index -> source rect */
+function srcRect(idx){ return [(idx % 8) * CELL, Math.floor(idx / 8) * CELL, CELL, CELL]; }
+
+function drawSprite(img, idx, cx, cy, s, alpha){
+  if (!img || !img.width) return;
+  const [sx, sy] = srcRect(idx);
+  ctx.save();
+  if (alpha != null) ctx.globalAlpha = alpha;
+  // anchor = frame centre (ground contact point)
+  ctx.drawImage(img, sx, sy, CELL, CELL, Math.round(cx - CELL * s / 2), Math.round(cy - CELL * s / 2), CELL * s, CELL * s);
+  ctx.restore();
+}
+
+function diamond(cx, cy, w, h, fill){
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - h / 2); ctx.lineTo(cx + w / 2, cy);
+  ctx.lineTo(cx, cy + h / 2); ctx.lineTo(cx - w / 2, cy);
+  ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+}
+
+function shadow(cx, cy, w, h){
+  ctx.save();
+  ctx.globalAlpha = .28; ctx.filter = "blur(0px)";
+  diamond(cx + 1, cy + 1, w, h, "#2a1f14");
+  ctx.restore();
+}
+
+function clear(w, h){ ctx.clearRect(0, 0, w, h); ctx.fillStyle = "#0c1015"; ctx.fillRect(0, 0, w, h); }
+
+/* ---------------- tab: 8 facings ---------------- */
+function drawDirs(){
+  const W = cv.width, H = cv.height;
+  clear(W, H);
+  const s = Math.max(1, state.zoom);
+  const cellW = W / 8;
+  for (let i = 0; i < 8; i++) {
+    const cx = cellW * i + cellW / 2, cy = H / 2 - 10;
+    // sand pad under each unit
+    diamond(cx, cy, 104, 52, "#4a3524");
+    diamond(cx, cy, 94, 47, "#6b4f34");
+    diamond(cx, cy - 1, 70, 35, "#7d5c3d");
+    shadow(cx, cy, 46, 23);
+    drawSprite(hull, 8 + i * 4, cx, cy, s);
+    if (state.layer) drawSprite(turret, i, cx, cy, s);
+    ctx.fillStyle = "#8d9aa8"; ctx.font = "12px system-ui"; ctx.textAlign = "center";
+    ctx.fillText(FACING_NAMES[i] + "  ·  #" + i, cx, cy + 70);
+  }
+  ctx.fillStyle = "#5f6d7b"; ctx.font = "11px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("每格 72×72px，画布中心 = 车体接地面；缩放 " + s + "x", 16, H - 14);
+}
+
+/* ---------------- tab: walk cycle ---------------- */
+const walkStart = () => performance.now();
+let walkT0 = walkStart();
+
+function drawWalk(ts){
+  const W = cv.width, H = cv.height;
+  clear(W, H);
+  const s = Math.max(2, state.zoom + 1);
+  const cx = W / 2, cy = H / 2 + 10;
+  const f = Math.floor(((ts - walkT0) / 1000) * 9) % 4;      // 9 fps, 4 frames
+  const spinIdx = state.spin ? Math.floor((ts / 260) % 8) : state.facing;
+
+  diamond(cx, cy, 240, 120, "#241c14");
+  diamond(cx, cy, 226, 113, "#4a3a28");
+  shadow(cx, cy, 110, 55);
+  drawSprite(hull, 8 + state.facing * 4 + f, cx, cy, s);
+  if (state.layer) drawSprite(turret, spinIdx, cx, cy, s);
+
+  // callouts
+  ctx.fillStyle = "#8d9aa8"; ctx.font = "12px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("车体 Walk 帧 " + f + " / 4  ·  9 fps", 18, 26);
+  ctx.fillText("朝向 #" + state.facing + " " + FACING_NAMES[state.facing] + "  ·  炮塔 #" + spinIdx, 18, 46);
+  ctx.fillStyle = "#3fd9ec"; ctx.font = "11px system-ui";
+  ctx.fillText("履带每帧滚动 1/4 齿距", 18, H - 16);
+}
+
+/* ---------------- tab: field mock ---------------- */
+const N = 4, S = 3, TW = 56 * S, TH = 28 * S;
+let startT = performance.now();
+
+function iso(i, j, ox, oy){ return [ox + (i - j) * TW / 2, oy + (i + j) * TH / 2]; }
+
+function drawField(ts){
+  const W = cv.width, H = cv.height;
+  clear(W, H);
+  const ox = W / 2, oy = 34;
+  const k = (ts - startT) / 1000 * 0.5;
+
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+    const [x, y] = iso(i, j, ox, oy);
+    const n = Math.sin(i * 12.9898 + j * 78.233) * 43758.5453;
+    const v = n - Math.floor(n);
+    const light = (i + j) % 2 === 0 ? "#c9a173" : "#c19a6b";
+    diamond(x, y, TW, TH, "#8d6b45");
+    diamond(x, y - 1, TW - 2, TH - 2, v > .74 ? "#d9b585" : light);
+  }
+  [[1,2],[3,1]].forEach(([i,j])=>{
+    const [x,y] = iso(i,j,ox,oy);
+    diamond(x, y - 14, 54, 27, "#6f5b41"); diamond(x, y - 22, 36, 18, "#9c8464");
+  });
+
+  // tank driving a circle in tile space
+  const r = 1.15, ci = 2.0, cj = 1.9;
+  const ti = ci + r * Math.cos(k), tj = cj + r * Math.sin(k);
+  const di = -Math.sin(k), dj = Math.cos(k);
+  const [tx, ty] = iso(ti, tj, ox, oy);
+
+  const vx = di - dj, vy = (di + dj) * 0.5;
+  const ang = Math.atan2(vy, vx) * 180 / Math.PI;
+  let facing = Math.round((-90 - ang) / 45) % 8; if (facing < 0) facing += 8;
+
+  const tgt = iso(3.4, 0.4, ox, oy);
+  const tAng = Math.atan2(tgt[1] - ty, tgt[0] - tx) * 180 / Math.PI;
+  let tfacing = Math.round((-90 - tAng) / 45) % 8; if (tfacing < 0) tfacing += 8;
+
+  // selection ring
+  ctx.save(); ctx.globalAlpha = .5; ctx.strokeStyle = "#3fd9ec"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(tx, ty, 84, 42, 0, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+
+  shadow(tx, ty, 70, 35);
+  const f = Math.floor((ts / 1000) * 9) % 4;
+  drawSprite(hull, 8 + facing * 4 + f, tx, ty, S);
+  drawSprite(turret, tfacing, tx, ty, S);
+
+  // firing flash: muzzle sits ~1 world unit from the frame centre
+  const phase = (ts / 1000) % 2.2;
+  if (phase < 0.18) {
+    const a = 1 - phase / 0.18;
+    const fa = (90 + tfacing * 45) * Math.PI / 180;
+    const mx = tx + Math.cos(fa) * 62, my = ty + Math.sin(fa) * 34;
+    ctx.save(); ctx.globalAlpha = a;
+    ctx.fillStyle = "#ffd9a0"; ctx.beginPath(); ctx.arc(mx, my, 10 * a + 4, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(63,217,236,.85)";
+    ctx.beginPath(); ctx.arc(tgt[0], tgt[1], 14 * (1 - a) + 4, 0, 7); ctx.fill();
+    ctx.restore();
+  }
+
+  // hp bar
+  ctx.fillStyle = "rgba(8,10,14,.8)"; ctx.fillRect(tx - 34, ty - 74, 68, 7);
+  ctx.fillStyle = "#3fbf9a"; ctx.fillRect(tx - 32, ty - 72, 64, 3);
+
+  ctx.textAlign = "left"; ctx.font = "12px system-ui"; ctx.fillStyle = "#8d9aa8";
+  ctx.fillText("俯视合成：车体按行驶方向取帧（# " + facing + "），炮塔独立取帧指向目标（# " + tfacing + "）", 18, H - 16);
+}
+
+/* ---------------- tab: atlas ---------------- */
+function drawAtlas(){
+  const W = cv.width, H = cv.height;
+  clear(W, H);
+  const s = Math.min(1.5, (W - 90) / 576);
+  const ax = 60, ay = 44;
+  ctx.fillStyle = "#8d9aa8"; ctx.font = "12px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("rampart.png · 576×360 · 行 = 线性帧号 / 8，列 = 帧号 % 8", ax, ay - 18);
+  if (hull.width) ctx.drawImage(hull, ax, ay, 576 * s, 360 * s);
+
+  // grid
+  ctx.strokeStyle = "rgba(63,217,236,.16)"; ctx.lineWidth = 1;
+  for (let c = 0; c <= 8; c++) { const x = ax + c * CELL * s; ctx.beginPath(); ctx.moveTo(x, ay); ctx.lineTo(x, ay + 360 * s); ctx.stroke(); }
+  for (let r = 0; r <= 5; r++) { const y = ay + r * CELL * s; ctx.beginPath(); ctx.moveTo(ax, y); ctx.lineTo(ax + 576 * s, y); ctx.stroke(); }
+
+  // label frame indices
+  ctx.fillStyle = "rgba(140,155,170,.75)"; ctx.font = "9px ui-monospace,monospace"; ctx.textAlign = "left";
+  for (let r = 0; r < 5; r++) for (let c = 0; c < 8; c++) {
+    ctx.fillText(String(r * 8 + c), ax + c * CELL * s + 2, ay + r * CELL * s + 10);
+  }
+
+  // turret strip
+  const ty = ay + 360 * s + 40;
+  ctx.fillStyle = "#8d9aa8"; ctx.font = "12px system-ui";
+  ctx.fillText("rampart_turret.png · 576×72 · 8 个朝向，0 = 上", ax, ty - 10);
+  if (turret.width) ctx.drawImage(turret, ax, ty, 576 * s, 72 * s);
+
+  ctx.fillStyle = "#5f6d7b"; ctx.font = "11px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("Ready 0–7 ｜ Walk 8–39（每朝向连续 4 帧：8+4·facing+anim）", ax, H - 12);
+}
+
+/* ---------------- loop ---------------- */
+function frame(ts){
+  ts = ts || performance.now();
+  // resizing the canvas resets the 2D context state, so re-apply it every frame
+  ctx.imageSmoothingEnabled = false;
+  if (state.tab === "dirs") drawDirs();
+  else if (state.tab === "walk") drawWalk(ts);
+  else if (state.tab === "field") drawField(ts);
+  else drawAtlas();
+  requestAnimationFrame(frame);
+}
+
+/* ---------------- ui ---------------- */
+document.querySelectorAll(".tab").forEach(btn => btn.addEventListener("click", () => {
+  document.querySelectorAll(".tab").forEach(b => b.classList.remove("on"));
+  btn.classList.add("on");
+  state.tab = btn.dataset.tab;
+  cv.height = { dirs: 340, walk: 400, field: 380, atlas: 760 }[state.tab] || 380;
+  const show = (el, on) => document.getElementById(el).style.display = on ? "" : "none";
+  show("facingCtl", state.tab !== "dirs" && state.tab !== "atlas");
+  show("spinCtl", state.tab === "walk");
+  show("layerCtl", state.tab !== "field" && state.tab !== "atlas");
+  show("zoom", state.tab === "dirs");
+}));
+
+document.getElementById("zoom").addEventListener("input", e => {
+  state.zoom = +e.target.value; document.getElementById("zoomV").textContent = state.zoom + "x";
+});
+document.getElementById("facing").addEventListener("input", e => {
+  state.facing = +e.target.value; document.getElementById("facingV").textContent = state.facing;
+});
+document.getElementById("spin").addEventListener("change", e => state.spin = e.target.checked);
+document.getElementById("layer").addEventListener("change", e => state.layer = e.target.checked);
+
+function activate(name){
+  const btn = document.querySelector('.tab[data-tab="' + name + '"]');
+  if (btn) btn.click();
+}
+const hash = (location.hash || "").replace("#", "");
+if (["dirs", "walk", "field", "atlas"].includes(hash)) activate(hash);
+
+/* initial visibility */
+document.getElementById("facingCtl").style.display = "none";
+document.getElementById("spinCtl").style.display = "none";
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

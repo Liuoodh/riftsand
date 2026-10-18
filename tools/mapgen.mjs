@@ -172,8 +172,31 @@ function check(name, m, spawns, ore) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 1. TWIN GATES — two chokepoints through a north/south rock belt       */
+/* 0. FLAT — the temporary test plane                                   */
 /* ------------------------------------------------------------------ */
+function flat() {
+    const m = blank();
+    /*
+     * A completely empty 80x80 plane: no rock, no water, no height.
+     *
+     * This is the temporary battlefield while the real maps are being authored:
+     * it isolates unit/art/AI behaviour from terrain, so "the tank cannot get
+     * there" or "the truck is stuck" can only ever be a unit bug.
+     */
+    const ore = [
+        { tx: 28, ty: 36, amount: 4000 },
+        { tx: 28, ty: 44, amount: 4000 },
+        { tx: 40, ty: 40, amount: 6000 },
+        { tx: 51, ty: 36, amount: 4000 },
+        { tx: 51, ty: 44, amount: 4000 },
+    ];
+    // same base positions the old default map used, so the camera starts where
+    // the input tests (and the player) expect it to
+    const spawns = [{ tx: 18, ty: 40, player: 0 }, { tx: 61, ty: 39, player: 1 }];
+    paintTiles(m);
+    check('flat', m, spawns, ore);
+    return { m, ore, spawns };
+}
 function twinGates() {
     const m = blank();
     // a rock belt splitting north from south, with two 6-wide gates
@@ -298,6 +321,7 @@ function mesa() {
 /* emit                                                                */
 /* ------------------------------------------------------------------ */
 const MAPS = [
+    { id: 'flat', name: '测试平面', en: 'FLAT TEST', theater: 'desert', note: '纯平面测试场，等真实地图做好后替换', gen: flat },
     { id: 'twin-gates', name: '双峡口', en: 'TWIN GATES', theater: 'desert', note: '南北岩脊把战场切成三条路', gen: twinGates },
     { id: 'ring-lake', name: '环湖', en: 'RING LAKE', theater: 'desert', note: '中央水域逼出环形绕行', gen: ringLake },
     { id: 'mesa', name: '台地', en: 'MESA', theater: 'desert', note: '中央高地三条坡道，居高临下', gen: mesa },

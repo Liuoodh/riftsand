@@ -19,7 +19,7 @@ import {
     drawUnit, drawBuilding, drawCrystal, drawRock, drawBush, drawCrate,
     drawChevron, drawPickup, paintTurret, drawRuin, pen,
 } from './Art';
-import { unitBodyFrame, FRAME_W, FRAME_H } from '../assets/Assets';
+import { unitBodyFrame, unitTurretFrame, FRAME_W, FRAME_H } from '../assets/Assets';
 
 const hex = (h: string, a = 255) => HEX(h, a);
 
@@ -122,25 +122,38 @@ export class TerrainView {
             g.fill();
         }
 
-        // scatter props on open sand
-        for (let i = 0; i < 340; i++) {
-            const tx = Math.floor(rng() * N);
-            const ty = Math.floor(rng() * N);
-            if (this.terrain.kind[ty * N + tx] !== TileKind.Sand) continue;
-            const wx = tx * TILE + rng() * TILE - HALF;
-            const wy = ty * TILE + rng() * TILE - HALF;
-            const p = worldToProj(wx, wy, this.terrain.heightAt(wx, wy));
-            const roll = rng();
-            if (roll < 0.42) {
-                this.bushAt(g, p.x, p.y, 0.8 + rng() * 0.5, rng);
-            } else if (roll < 0.62) {
-                this.crateAt(g, p.x, p.y, rng);
-            } else if (roll < 0.84) {
-                g.ellipse(p.x, p.y, 4 + rng() * 3, 2 + rng() * 1.6);
-                g.fillColor = hex(PAL.sandDark, 70);
-                g.fill();
-            } else {
-                this.rockAt(g, p.x, p.y, rng);
+        // props: authored maps place them explicitly, generated maps scatter them
+        const overlays = this.terrain.overlays;
+        if (overlays.length) {
+            for (const ov of overlays) {
+                const wx = ov.tx * TILE + TILE / 2 - HALF + (ov.ox ?? 0) * TILE;
+                const wy = ov.ty * TILE + TILE / 2 - HALF + (ov.oy ?? 0) * TILE;
+                const p = worldToProj(wx, wy, this.terrain.heightAt(wx, wy));
+                const v = ov.variant ?? ov.tx * 13 + ov.ty * 7;
+                if (ov.kind === 'bush') this.bushAt(g, p.x, p.y, 0.8 + (v % 5) * 0.08, makeRng(v | 0));
+                else if (ov.kind === 'crate') this.crateAt(g, p.x, p.y, makeRng(v | 0));
+                else this.rockAt(g, p.x, p.y, makeRng(v | 0));
+            }
+        } else {
+            for (let i = 0; i < 340; i++) {
+                const tx = Math.floor(rng() * N);
+                const ty = Math.floor(rng() * N);
+                if (this.terrain.kind[ty * N + tx] !== TileKind.Sand) continue;
+                const wx = tx * TILE + rng() * TILE - HALF;
+                const wy = ty * TILE + rng() * TILE - HALF;
+                const p = worldToProj(wx, wy, this.terrain.heightAt(wx, wy));
+                const roll = rng();
+                if (roll < 0.42) {
+                    this.bushAt(g, p.x, p.y, 0.8 + rng() * 0.5, rng);
+                } else if (roll < 0.62) {
+                    this.crateAt(g, p.x, p.y, rng);
+                } else if (roll < 0.84) {
+                    g.ellipse(p.x, p.y, 4 + rng() * 3, 2 + rng() * 1.6);
+                    g.fillColor = hex(PAL.sandDark, 70);
+                    g.fill();
+                } else {
+                    this.rockAt(g, p.x, p.y, rng);
+                }
             }
         }
     }
@@ -487,6 +500,9 @@ export class EntityView {
     sprite: Sprite;
     /** live turret overlay (two primitives, cheaper than baking every combo) */
     turret: Graphics;
+    /** turret atlas sprite, shown instead of the Graphics overlay when art exists */
+    private turretSprite: Sprite | null = null;
+    private turretSpriteNode: Node | null = null;
     ring: Graphics;
     hp: Graphics;
     chev: Graphics;
@@ -523,6 +539,20 @@ export class EntityView {
         const st = this.spriteNode.getComponent(UITransform)!;
         st.setContentSize(FRAME_W, FRAME_H);
         this.turret = gfxNode(this.node, 'turret');
+        /*
+         * Turret art slot.
+         *
+         * The Graphics overlay stays for units without a turret atlas; when the
+         * artist ships one, this Sprite replaces it (same node, same recoil
+         * offset) so both paths share the transform.
+         */
+        this.turretSpriteNode = plainNode(this.turret.node, 'turretArt');
+        const ts = this.turretSpriteNode.addComponent(Sprite);
+        ts.sizeMode = Sprite.SizeMode.CUSTOM;
+        ts.type = Sprite.Type.SIMPLE;
+        this.turretSpriteNode.getComponent(UITransform)!.setContentSize(FRAME_W, FRAME_H);
+        this.turretSpriteNode.active = false;
+        this.turretSprite = ts;
         this.hp = gfxNode(this.node, 'hp');
         this.chev = gfxNode(this.node, 'chev');
         this.deco = gfxNode(this.node, 'deco');
@@ -541,7 +571,8 @@ export class EntityView {
 
     /** fetch the sprite frame for this unit's current facing / walk frame */
     private applyFrame(u: Unit, faction: Faction) {
-        const sf = unitBodyFrame(u.def, faction, Math.max(0, this.dir8), Math.max(0, this.frame));
+        const moving = this.anim.seq === Seq.Walk;
+        const sf = unitBodyFrame(u.def, faction, Math.max(0, this.dir8), Math.max(0, this.frame), moving);
         if (sf) this.sprite.spriteFrame = sf;
     }
 
@@ -603,9 +634,17 @@ export class EntityView {
                 // turret overlay: only repaint when its heading actually changed
                 if (tDir8 !== this.tDir8 || u.owner !== this.lastOwner) {
                     this.tDir8 = tDir8;
-                    const tp = pen(this.turret);
-                    tp.clear();
-                    if (u.def.kind === 'vehicle') paintTurret(tp, u.def, factionOf(u.owner), tDir8);
+                    const art = unitTurretFrame(u.def, tDir8);
+                    if (art && this.turretSprite && this.turretSpriteNode) {
+                        this.turretSprite.spriteFrame = art;
+                        this.turretSpriteNode.active = true;
+                        this.turret.clear();
+                    } else {
+                        if (this.turretSpriteNode) this.turretSpriteNode.active = false;
+                        const tp = pen(this.turret);
+                        tp.clear();
+                        if (u.def.kind === 'vehicle') paintTurret(tp, u.def, factionOf(u.owner), tDir8);
+                    }
                 }
                 this.turret.node.setPosition(-u.recoil * 26, 0, 0);
             }

@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "note": "城墙主战坦克（Blender 渲染批次 1）— 由 tools/blender/rampart_build.py 生成，可直接并入 art/manifest.json",
+  "units": {
+    "rampart": {
+      "image": "art/units/rampart.png",
+      "frame": { "w": 72, "h": 72 },
+      "anchor": { "x": 36, "y": 36 },
+      "facings": 8,
+      "sequences": {
+        "ready": { "start": 0, "frames": 8, "rate": 0 },
+        "walk": { "start": 8, "frames": 32, "rate": 9 }
+      },
+      "turret": {
+        "image": "art/units/rampart_turret.png",
+        "frame": { "w": 72, "h": 72 },
+        "start": 0,
+        "frames": 8
+      }
+    }
+  }
+}

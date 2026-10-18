@@ -116,6 +116,11 @@ function validate(doc, file) {
     }
 
     if (!doc.ore || !doc.ore.length) e.push('no ore');
+    for (const ov of doc.overlay ?? []) {
+        if (ov.tx < 0 || ov.ty < 0 || ov.tx >= N || ov.ty >= N) e.push(`overlay ${ov.kind} at ${ov.tx},${ov.ty} off-map`);
+        if (!['bush', 'rock', 'crate'].includes(ov.kind)) e.push(`overlay kind ${ov.kind} unknown`);
+        if (ov.block && land[ov.ty * N + ov.tx] === LAND.ore) e.push(`blocking ${ov.kind} sits on ore at ${ov.tx},${ov.ty}`);
+    }
     let playable = 0;
     for (let i = 0; i < cells; i++) if (land[i] !== LAND.rock && land[i] !== LAND.water) playable++;
     if (playable < cells * 0.25) e.push('less than 25% driveable');
@@ -138,7 +143,7 @@ for (const f of files) {
         for (const err of errors.slice(0, 8)) console.error('     ' + err);
     } else {
         const ore = doc.ore.reduce((s, o) => s + o.amount, 0);
-        console.log(`ok   ${f}  ore=${ore}  spawns=${doc.spawns.length}`);
+        console.log(`ok   ${f}  ore=${ore}  props=${(doc.overlay ?? []).length}  spawns=${doc.spawns.length}`);
     }
     docs.push(doc);
 }

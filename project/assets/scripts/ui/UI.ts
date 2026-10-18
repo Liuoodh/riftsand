@@ -304,7 +304,7 @@ export class UI {
     private modalBtns: UIButton[] = [];
 
     private selFaction: Faction = 'BU';
-    private selMap = 'basin';
+    private selMap = MAPS[0]?.id ?? 'flat';
     private selColor = 'azure';
     private selDiff: 'easy' | 'normal' | 'hard' = 'normal';
     private selCredits = 4200;
@@ -845,23 +845,24 @@ export class UI {
         const mLabel = mkLabel(ov, '战 场', 13, '#93a3b0');
         mLabel.node.setPosition(-166, 198, 0);
         /*
-         * Two columns of at most four rows.
+         * One column up to four maps, two columns beyond that.
          *
          * The list used to be a single column of five procedural maps. Authored
          * maps (docs/MAP-GUIDE.md) push the count past what one column can show
          * without colliding with the trait line, so it wraps: top-to-bottom in
          * the left column, then the right one.
          */
-        const rows = Math.ceil(MAPS.length / 2);
+        const twoCol = MAPS.length > 4;
+        const rows = twoCol ? Math.ceil(MAPS.length / 2) : MAPS.length;
         const rowH = rows > 4 ? Math.max(26, 150 / rows) : 38;
         MAPS.forEach((m, i) => {
-            const col = i < rows ? 0 : 1;
-            const row = i < rows ? i : i - rows;
-            const b = new UIButton(ov, 160, 32, `${m.name}   ·   ${m.en}`, 11, () => {
+            const col = twoCol && i >= rows ? 1 : 0;
+            const row = twoCol && i >= rows ? i - rows : i;
+            const b = new UIButton(ov, twoCol ? 160 : 332, 32, `${m.name}   ·   ${m.en}`, twoCol ? 11 : 13, () => {
                 this.selMap = m.id;
                 this.rebuildMenu();
             }, PAL.cyan);
-            b.setPosition(col === 0 ? -84 : 84, 172 - row * rowH);
+            b.setPosition(twoCol ? (col === 0 ? -84 : 84) : 0, 172 - row * rowH);
             b.setActive(this.selMap === m.id);
             this.menuBtns.push(b);
         });

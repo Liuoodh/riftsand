@@ -8,7 +8,7 @@
  * job `rampType` does in the retail engine (ObjectPosition.ts + rampHeights.ts).
  */
 import { MAP_TILES, makeRng, TILE, HALF } from '../core/Core';
-import { type MapData, LAND, decodeMap } from './MapData';
+import { type MapData, type MapOverlay, LAND, decodeMap } from './MapData';
 
 export enum TileKind {
     Sand = 0,
@@ -57,6 +57,8 @@ export class TerrainMap {
     tile = new Uint16Array(MAP_TILES * MAP_TILES);
     /** true when the level array came from a map file instead of the generator */
     authored = false;
+    /** props placed by an authored map (rocks, bushes, crates) */
+    overlays: MapOverlay[] = [];
     /** movement multiplier per tile (sand 1.0, dune slower, crystal slowest) */
     speed = new Float32Array(MAP_TILES * MAP_TILES);
     nodes: CrystalNode[] = [];
@@ -389,11 +391,17 @@ export class TerrainMap {
         }
 
         this.authored = true;
+        this.overlays = (d.overlay ?? []).slice();
         const rng = makeRng(d.id.length * 7919 + 13);
         let nid = 1;
         for (const o of d.ore ?? []) {
             const r = o.amount >= 4200 ? 2 : 1;
             this.addNode(o.tx, o.ty, o.amount, nid++, rng, r);
+        }
+        // blocking props are walls: one boulder can close a two-tile gap, so this
+        // has to be applied before the connectivity-sensitive paths are rebuilt
+        for (const ov of this.overlays) {
+            if (ov.block && this.inside(ov.tx, ov.ty)) this.solid[this.idx(ov.tx, ov.ty)] = 1;
         }
         this.rebuildSpeed();
         this.rebuildHeight();

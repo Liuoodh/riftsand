@@ -67,6 +67,11 @@
     <button id="toolSpawn0">出生点 P0</button>
     <button id="toolSpawn1">出生点 P1</button>
   </div>
+  <div class="row" style="margin-top:6px">
+    <button id="toolBush">灌木</button>
+    <button id="toolRock">岩石(阻挡)</button>
+    <button id="toolCrate">箱子</button>
+  </div>
 
   <h2>地图信息</h2>
   <label>id（文件名，英文）</label>
@@ -139,6 +144,7 @@ let S = {
   tile: new Uint16Array(N * N),
   blocked: new Uint8Array(N * N),
   ore: [],
+  overlay: [],
   spawns: [{ tx: 12, ty: 40, player: 0 }, { tx: 67, ty: 39, player: 1 }],
 };
 let brush = { kind: 'land', land: 0, height: 0, size: 3 };
@@ -172,7 +178,9 @@ function snapshot() {
   undoStack.push({
     land: S.land.slice(), height: S.height.slice(),
     tile: S.tile.slice(), blocked: S.blocked.slice(),
-    ore: S.ore.map((o) => ({ ...o })), spawns: S.spawns.map((s) => ({ ...s })),
+    ore: S.ore.map((o) => ({ ...o })),
+    overlay: S.overlay.map((o) => ({ ...o })),
+    spawns: S.spawns.map((s) => ({ ...s })),
   });
   if (undoStack.length > 24) undoStack.shift();
 }
@@ -256,6 +264,14 @@ function draw() {
     ctx.fill();
   }
 
+  // props: small coloured dots (art comes from the tileset, this is a locator)
+  for (const o of S.overlay) {
+    ctx.fillStyle = o.kind === 'rock' ? '#4a443c' : o.kind === 'bush' ? '#6f7a3c' : '#a8792f';
+    ctx.beginPath();
+    ctx.arc(panX + (o.tx + 0.5) * size, panY + (o.ty + 0.5) * size, Math.max(2, size * 0.3), 0, 7);
+    ctx.fill();
+  }
+
   // spawns + base footprint ghost (7-radius apron the validator demands)
   for (const s of S.spawns) {
     const cx = panX + s.tx * size, cy = panY + s.ty * size;
@@ -302,9 +318,15 @@ cv.addEventListener('mousedown', (e) => {
     S.spawns[idx] = { tx: c.tx, ty: c.ty, player: idx };
     refreshStats(); draw(); return;
   }
+  if (brush.kind === 'overlay') {
+    S.overlay = S.overlay.filter((o) => !(o.tx === c.tx && o.ty === c.ty));
+    S.overlay.push({ kind: brush.overlay, tx: c.tx, ty: c.ty, block: brush.overlay === 'rock' ? 1 : 0 });
+    refreshStats(); draw(); return;
+  }
   if (brush.kind === 'erase') {
-    // remove an ore marker under the cursor
+    // remove an ore marker or a prop under the cursor
     S.ore = S.ore.filter((o) => Math.abs(o.tx - c.tx) > 1 || Math.abs(o.ty - c.ty) > 1);
+    S.overlay = S.overlay.filter((o) => !(o.tx === c.tx && o.ty === c.ty));
     refreshStats(); draw(); return;
   }
   dragging = true;
@@ -338,7 +360,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { spaceDown = true; e.preventDefault(); }
   if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
     const s = undoStack.pop();
-    if (s) { S.land = s.land; S.height = s.height; S.tile = s.tile; S.blocked = s.blocked; S.ore = s.ore; S.spawns = s.spawns; refreshStats(); draw(); }
+    if (s) { S.land = s.land; S.height = s.height; S.tile = s.tile; S.blocked = s.blocked; S.ore = s.ore; S.overlay = s.overlay || []; S.spawns = s.spawns; refreshStats(); draw(); }
     e.preventDefault();
   }
 });
@@ -378,6 +400,9 @@ for (const s of [1, 3, 5, 9]) {
 document.getElementById('toolOre').onclick = () => { brush = { ...brush, kind: 'ore' }; syncPalette(); };
 document.getElementById('toolSpawn0').onclick = () => { brush = { ...brush, kind: 'spawn', player: 0 }; syncPalette(); };
 document.getElementById('toolSpawn1').onclick = () => { brush = { ...brush, kind: 'spawn', player: 1 }; syncPalette(); };
+document.getElementById('toolBush').onclick = () => { brush = { ...brush, kind: 'overlay', overlay: 'bush' }; syncPalette(); };
+document.getElementById('toolRock').onclick = () => { brush = { ...brush, kind: 'overlay', overlay: 'rock' }; syncPalette(); };
+document.getElementById('toolCrate').onclick = () => { brush = { ...brush, kind: 'overlay', overlay: 'crate' }; syncPalette(); };
 
 function syncPalette() {
   [...landBox.children].forEach((b) => b.classList.toggle('on', brush.kind === 'land' && +b.dataset.land === brush.land));
@@ -386,6 +411,9 @@ function syncPalette() {
   document.getElementById('toolOre').classList.toggle('on', brush.kind === 'ore');
   document.getElementById('toolSpawn0').classList.toggle('on', brush.kind === 'spawn' && brush.player === 0);
   document.getElementById('toolSpawn1').classList.toggle('on', brush.kind === 'spawn' && brush.player === 1);
+  document.getElementById('toolBush').classList.toggle('on', brush.kind === 'overlay' && brush.overlay === 'bush');
+  document.getElementById('toolRock').classList.toggle('on', brush.kind === 'overlay' && brush.overlay === 'rock');
+  document.getElementById('toolCrate').classList.toggle('on', brush.kind === 'overlay' && brush.overlay === 'crate');
 }
 
 /* ------------------------------------------------------------------ */
@@ -438,6 +466,7 @@ document.getElementById('btnExport').onclick = () => {
     tiles: pack(S.tile),
     blocked: pack(S.blocked),
     ore: S.ore,
+    overlay: S.overlay,
     spawns: S.spawns,
   };
   const blob = new Blob([JSON.stringify(doc)], { type: 'application/json' });
@@ -462,6 +491,7 @@ document.getElementById('file').onchange = (e) => {
       if (d.tiles) unpack(d.tiles, S.tile);
       if (d.blocked) unpack(d.blocked, S.blocked);
       S.ore = d.ore || [];
+      S.overlay = d.overlay || [];
       S.spawns = d.spawns || S.spawns;
       document.getElementById('mId').value = d.id || 'new-map';
       document.getElementById('mName').value = d.name || '';
@@ -480,6 +510,7 @@ document.getElementById('btnNew').onclick = () => {
   snapshot();
   S.land.fill(LAND.clear); S.height.fill(0); S.tile.fill(0); S.blocked.fill(0);
   S.ore = [];
+  S.overlay = [];
   refreshStats(); draw();
 };
 
@@ -506,6 +537,7 @@ if (openPath) {
     if (d.tiles) unpack(d.tiles, S.tile);
     if (d.blocked) unpack(d.blocked, S.blocked);
     S.ore = d.ore || [];
+    S.overlay = d.overlay || [];
     S.spawns = d.spawns || S.spawns;
     document.getElementById('mId').value = d.id || '';
     document.getElementById('mName').value = d.name || '';

@@ -347,6 +347,15 @@ export class Game {
         if (!this.occupancy.hasRoomFor(u, stx, sty)) {
             const spot = this.findSpawnCell(u, stx, sty, 4);
             if (spot) { px = spot.x; py = spot.y; stx = spot.tx; sty = spot.ty; u.x = px; u.y = py; u.prevX = px; u.prevY = py; }
+        } else if (def.kind !== 'infantry' && this.occupancy.at(stx, sty)) {
+            /*
+             * A cell can legally hold two harvesters, so `hasRoomFor` says yes
+             * even when someone is already parked there. Spawning on top of that
+             * unit produced two trucks drawn as one sprite; move to a free cell
+             * unless the map is genuinely packed.
+             */
+            const spot = this.findSpawnCell(u, stx, sty, 3);
+            if (spot) { px = spot.x; py = spot.y; stx = spot.tx; sty = spot.ty; u.x = px; u.y = py; u.prevX = px; u.prevY = py; }
         }
         u.cellX = stx;
         u.cellY = sty;
@@ -427,17 +436,28 @@ export class Game {
 
     /** nearest cell that has room for this unit, preferring close ones */
     private findSpawnCell(u: Unit, tx: number, ty: number, maxR = 4): { x: number; y: number; tx: number; ty: number } | null {
-        for (let r = 0; r <= maxR; r++) {
-            for (let dy = -r; dy <= r; dy++) {
-                for (let dx = -r; dx <= r; dx++) {
-                    if (r > 0 && Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
-                    const nx = tx + dx, ny = ty + dy;
-                    if (nx < 0 || ny < 0 || nx >= MAP_TILES || ny >= MAP_TILES) continue;
-                    if (!this.occupancy.hasRoomFor(u, nx, ny)) continue;
-                    const wx = nx * TILE + TILE / 2 - HALF;
-                    const wy = ny * TILE + TILE / 2 - HALF;
-                    if (this.worldBlockedAt(wx, wy, u.radius)) continue;
-                    return { x: wx, y: wy, tx: nx, ty: ny };
+        /*
+         * Two passes: an EMPTY cell first, a merely "has room" cell second.
+         *
+         * A cell takes one vehicle, but two harvesters are allowed to share one
+         * (they need that at the refinery dock). At spawn time that rule stacked
+         * both trucks on the same pixel, which reads as a glitch. Vehicles are
+         * always spread at spawn; sharing is only for the dock.
+         */
+        for (let pass = 0; pass < 2; pass++) {
+            for (let r = 0; r <= maxR; r++) {
+                for (let dy = -r; dy <= r; dy++) {
+                    for (let dx = -r; dx <= r; dx++) {
+                        if (r > 0 && Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
+                        const nx = tx + dx, ny = ty + dy;
+                        if (nx < 0 || ny < 0 || nx >= MAP_TILES || ny >= MAP_TILES) continue;
+                        if (pass === 0 && this.occupancy.at(nx, ny)) continue;
+                        if (!this.occupancy.hasRoomFor(u, nx, ny)) continue;
+                        const wx = nx * TILE + TILE / 2 - HALF;
+                        const wy = ny * TILE + TILE / 2 - HALF;
+                        if (this.worldBlockedAt(wx, wy, u.radius)) continue;
+                        return { x: wx, y: wy, tx: nx, ty: ny };
+                    }
                 }
             }
         }
@@ -2571,36 +2591,68 @@ export class Game {
      * Infantry sharing a cell stand on separate sub-positions (0..2).
      * Bounded to a few pixels and clamped inside the cell, so this can never
      * turn into the old "push" — it is a visual tidy-up, not a collision solver.
+    /**
+     * Infantry sharing a cell stand on distinct sub-positions.
+     *
+     * Reference: `ObjectPosition.computeSubCellOffset()` — sub-cell `n` is
+     * `± TILE/4` from the cell centre on each axis (`(0,0)`, `(-8,-8)`,
+     * `(+8,-8)`, `(-8,+8)`, `(+8,+8)`), and `MoveTask.canStopAtTile` allows at
+     * most three infantry on one tile, each on a different sub-cell.
+     *
+     * We used to nudge neighbours apart until they were 11px away from each
+     * other, which is *closer* than the retail layout and made a squad read as
+     * one blob (the "兵和兵叠在一起" report). Driving each man to his own fixed
+     * sub-cell point gives the retail spacing (16px diagonal) and stops the
+     * pairwise jitter, because every unit now has a stable target instead of a
+     * reaction to its neighbours.
      */
     private spreadInfantry(dt: number) {
         const T = TILE;
+        const q = T * 0.25;             // reference: LEPTONS_PER_TILE / 4
         for (const a of this.units) {
-            if (a.dead || a.def.kind !== 'infantry' || a.speedCur > 4) continue;
+            if (a.dead || a.speedCur > 4) continue;
             const here = this.occupancy.at(a.cellX, a.cellY);
             if (!here || here.size < 2) continue;
-            for (const b of here) {
-                if (b === a || b.dead || b.def.kind !== 'infantry' || b.id < a.id) continue;
-                const dx = b.x - a.x, dy = b.y - a.y;
-                const d = Math.hypot(dx, dy);
-                if (d > 11) continue;
-                if (d < 0.001) {
-                    // stacked exactly: split along the cell diagonal
-                    a.x -= 1; a.y -= 1; b.x += 1; b.y += 1;
-                    continue;
-                }
-                const give = Math.min((11 - d) * 0.5, 26 * dt);
-                const nx = dx / d, ny = dy / d;
-                // only 1px of inset: the clamp exists to keep the nudge inside the
-                // shared cell, not to hold the unit in the middle of it (a 6px
-                // inset used to pin units at the boundary so they could never leave)
-                const x0 = a.cellX * T - HALF + 1, x1 = x0 + T - 2;
-                const y0 = a.cellY * T - HALF + 1, y1 = y0 + T - 2;
-                a.x = clamp(a.x - nx * give, x0, x1);
-                a.y = clamp(a.y - ny * give, y0, y1);
-                b.x = clamp(b.x + nx * give, x0, x1);
-                b.y = clamp(b.y + ny * give, y0, y1);
+
+            if (a.def.kind === 'infantry') {
+                const sc = a.subCell;
+                const ox = sc ? (((sc - 1) % 2) * 2 - 1) * q : 0;
+                const oy = sc ? (2 * Math.floor((sc - 1) / 2) - 1) * q : 0;
+                this.driftTo(a, ox, oy, 26 * dt);
+                continue;
             }
+
+            /*
+             * Two vehicles can share a cell (harvesters at the dock need it, and
+             * a cell holds two of them by design). Standing on the exact same
+             * pixel makes them read as one broken sprite, so they get a small
+             * fixed offset pair — the vehicle equivalent of infantry sub-cells.
+             * Kept well inside the cell so neither can be pushed out of it.
+             */
+            const mates: Unit[] = [];
+            for (const o of here) if (!o.dead && o.def.kind !== 'infantry') mates.push(o);
+            if (mates.length < 2) continue;
+            mates.sort((x, y) => x.id - y.id);
+            const idx = mates.indexOf(a);
+            if (idx < 0) continue;
+            const off = T * 0.22;
+            this.driftTo(a, idx === 0 ? -off : off, idx === 0 ? -off : off, 22 * dt);
         }
+    }
+
+    /** ease a unit toward cell centre + (ox, oy) without ever leaving the cell */
+    private driftTo(u: Unit, ox: number, oy: number, maxStep: number) {
+        const T = TILE;
+        const tx = u.cellX * T + T / 2 - HALF + ox;
+        const ty = u.cellY * T + T / 2 - HALF + oy;
+        const dx = tx - u.x, dy = ty - u.y;
+        const d = Math.hypot(dx, dy);
+        if (d < 0.4) return;
+        const step = Math.min(d, maxStep);
+        const x0 = u.cellX * T - HALF + 1, x1 = x0 + T - 2;
+        const y0 = u.cellY * T - HALF + 1, y1 = y0 + T - 2;
+        u.x = clamp(u.x + (dx / d) * step, x0, x1);
+        u.y = clamp(u.y + (dy / d) * step, y0, y1);
     }
 
     /**

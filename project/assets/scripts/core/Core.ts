@@ -188,6 +188,23 @@ export interface MapDef {
  */
 export const MAPS: MapDef[] = [
     {
+        id: 'flat', name: '测试平面', en: 'FLAT TEST',
+        trait: '纯平面测试场 · 无岩石/水/高地', data: 'flat',
+        seed: 0, rocks: 0, dunes: 0, lane: 0, ore: 1,
+    },
+];
+
+/**
+ * Every map that exists, whether or not it is offered in the menu.
+ *
+ * The menu currently shows a single flat test plane while the real battlefields
+ * are being authored (see docs/MAP-GUIDE.md). Keeping the rest here means
+ * `?map=mesa` still loads, and re-enabling a map is one line in the filter below
+ * instead of re-typing its definition.
+ */
+export const MAPS_LIBRARY: MapDef[] = [
+    ...MAPS,
+    {
         id: 'basin', name: '沙海盆地', en: 'SAND BASIN',
         trait: '随机 · 标准地貌 · 中场开阔', seed: 90210,
         rocks: 0.715, dunes: 0.575, lane: 1, ore: 1,
@@ -230,7 +247,8 @@ export const MAPS: MapDef[] = [
     },
 ];
 
-export const mapById = (id: string): MapDef => MAPS.find((m) => m.id === id) ?? MAPS[0];
+export const mapById = (id: string): MapDef =>
+    MAPS_LIBRARY.find((m) => m.id === id) ?? MAPS[0] ?? MAPS_LIBRARY[0];
 
 export interface PlayerColor {
     id: string;

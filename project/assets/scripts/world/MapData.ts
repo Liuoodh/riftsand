@@ -62,6 +62,31 @@ export interface MapSpawn {
     player: number;
 }
 
+/**
+ * A placed prop (the retail `[OverlayPack]` / terrain object list).
+ *
+ * Separate from `land` on purpose: land answers "what is the ground", an overlay
+ * answers "what is standing on it". A rock outcrop, a dead tree and a supply
+ * crate are all *objects* — they have their own art, their own anchor, optional
+ * blocking, and they sort by depth. Trying to express them as land types is how
+ * a map format ends up with 40 terrain kinds and a renderer that cannot tell a
+ * bush from a boulder.
+ */
+export type OverlayKind = 'bush' | 'rock' | 'crate';
+
+export interface MapOverlay {
+    kind: OverlayKind;
+    tx: number;
+    ty: number;
+    /** 0..1 sub-tile offset, so props do not snap to a grid */
+    ox?: number;
+    oy?: number;
+    /** art variation / seed */
+    variant?: number;
+    /** 1 = blocks ground movement (boulders; bushes and crates do not) */
+    block?: boolean;
+}
+
 export interface MapData {
     format: 1;
     id: string;
@@ -75,6 +100,8 @@ export interface MapData {
     height?: Packed;
     tiles?: Packed;
     blocked?: Packed;
+    /** decorative / blocking props standing on the ground */
+    overlay?: MapOverlay[];
     ore?: MapOre[];
     spawns?: MapSpawn[];
     /** short design note shown in the map picker */
@@ -187,6 +214,18 @@ export function validateMap(d: MapData): string[] {
         for (const o of d.ore) {
             if (o.tx < 0 || o.ty < 0 || o.tx >= size || o.ty >= size) errs.push(`ore at ${o.tx},${o.ty} off-map`);
             if (o.amount <= 0) errs.push(`ore at ${o.tx},${o.ty} has no amount`);
+        }
+    }
+
+    for (const ov of d.overlay ?? []) {
+        if (ov.tx < 0 || ov.ty < 0 || ov.tx >= size || ov.ty >= size) {
+            errs.push(`overlay ${ov.kind} at ${ov.tx},${ov.ty} off-map`);
+        }
+        if (ov.kind !== 'bush' && ov.kind !== 'rock' && ov.kind !== 'crate') {
+            errs.push(`overlay kind ${String(ov.kind)} unknown`);
+        }
+        if (ov.block && decoded.land[cellIndex(ov.tx, ov.ty, size)] === LAND.Ore) {
+            errs.push(`blocking ${ov.kind} at ${ov.tx},${ov.ty} sits on ore`);
         }
     }
     return errs;

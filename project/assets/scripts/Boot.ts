@@ -17,7 +17,7 @@ import {
 import {
     BUILDINGS, UNITS, Faction, HALF, TILE, MAP_TILES, clamp, dist,
     TAP_MAX_MS, TAP_SLOP, LONG_PRESS_MS, BOX_MIN_PX, SNAP_PX,
-    ProdCat, SuperWeaponId, SUPER_WEAPONS, PLAYER_COLORS, MAPS,
+    ProdCat, SuperWeaponId, SUPER_WEAPONS, PLAYER_COLORS, MAPS, MAPS_LIBRARY,
 } from './core/Core';
 import { Game } from './game/Game';
 import { Building, Unit, Entity } from './game/Entities';
@@ -29,7 +29,8 @@ import { ShpFile } from './assets/Shp';
 import { TmpFile, encodeTmp, tmpTileToRgba, tmpRowWidth } from './assets/Tmp';
 import { encodeShp } from './assets/ShpEncode';
 import { parsePal, remapTeam, syntheticPal } from './assets/Palette';
-import { frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable, clearFrameCache } from './assets/Assets';
+import { frameFromShp, unitBodyFrame, unitTurretFrame, cachedFrameCount, canvasAvailable, clearFrameCache } from './assets/Assets';
+import { loadArt, artIds, artError, describeArt, frameIndexFromRect } from './assets/ArtPack';
 import { UI, mkNode } from './ui/UI';
 import { RadialItem } from './ui/Overlay';
 import { sfx } from './audio/Sfx';
@@ -142,12 +143,41 @@ export class RiftApp extends Component {
         this.bindInput();
         this.ui.showMenu();
 
+        /*
+         * Real art loads in the background: the menu is playable before the
+         * atlases arrive, and `Assets.unitBodyFrame` falls back to the painter
+         * until they do. The promise is exposed so tools/assettest can await it
+         * instead of guessing a delay.
+         */
+        (globalThis as any).__riftsandArtReady = loadArt().then(() => {
+            (globalThis as any).__riftsandArtInfo = {
+                ids: artIds(), error: artError(), describe: artIds().map(describeArt),
+            };
+        });
+        /*
+         * Debug hook: resolve the atlas frame index a given facing would use.
+         * `tools/artcheck.mjs` prints the whole 8-facing table, which is how a
+         * mirrored/offset batch gets caught without eyeballing screenshots.
+         */
+        (globalThis as any).__riftsandArt = {
+            bodyIndex(defId: string, dir: number, frame: number, moving: boolean) {
+                const sf = unitBodyFrame({ id: defId } as any, 'BU', dir, frame, moving);
+                return sf ? frameIndexFromRect(sf) : -1;
+            },
+            turretIndex(defId: string, dir: number) {
+                const sf = unitTurretFrame({ id: defId } as any, dir);
+                return sf ? frameIndexFromRect(sf) : -1;
+            },
+        };
+
         // dev hook: ?auto=1 jumps straight into a match (used by the smoke test)
         //           ?auto=1&map=mesa also picks the map (used by tools/maptest.mjs)
         const search = typeof location !== 'undefined' && location.search ? location.search : '';
         if (search.indexOf('auto=1') >= 0) {
             const m = /[?&]map=([\w-]+)/.exec(search);
-            this.startGame('BU', 'normal', 4200, true, m ? m[1] : 'basin');
+            // follow the menu's first map instead of a hard-coded id, so the
+            // test hook and the real entry point never disagree about "default"
+            this.startGame('BU', 'normal', 4200, true, m ? m[1] : MAPS[0].id);
         }
     }
 
@@ -998,7 +1028,7 @@ function tryBoot(): boolean {
     anyObj.__RIFTSAND_BOOTED__ = true;
     // exposed for the headless test / showcase tooling
     anyObj.__riftsandDefs = { UNITS, BUILDINGS };
-    anyObj.__riftsandConst = { TILE, HALF, MAP_TILES };
+        anyObj.__riftsandConst = { TILE, HALF, MAP_TILES, maps: MAPS.map((m) => m.id), mapLib: MAPS_LIBRARY.map((m) => m.id) };
     anyObj.__riftsandAssets = {
         ShpFile, TmpFile, encodeShp, parsePal, remapTeam, syntheticPal,
         frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable, clearFrameCache,
