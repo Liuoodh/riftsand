@@ -248,6 +248,8 @@ const aside = await page.evaluate(() => {
     return {
         idleMoved: +Math.hypot(idle.x - before.x, idle.y - before.y).toFixed(1),
         walkerDist: +Math.hypot(walker.x - goal.x, walker.y - goal.y).toFixed(1),
+        idleCell: [idle.cellX, idle.cellY], walkerCell: [walker.cellX, walker.cellY],
+        walkerOrder: walker.order.k, walkerPath: walker.path.length,
     };
 });
 console.log('   aside', JSON.stringify(aside));

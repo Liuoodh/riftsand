@@ -2688,7 +2688,76 @@ export class Game {
             this.syncCell(u);
         }
         this.spreadInfantry(dt);
+        this.separateHulls(dt);
         this.handleBlocked(dt);
+    }
+
+    /**
+     * Push apart two hulls that already share a tile.
+     *
+     * The movement rule only ever *refuses* a step that would close the gap; it
+     * has no way to undo an overlap that already exists. Two tanks can end up
+     * inside each other's stand-off ring through a spawn, a relocation, or a
+     * follower entering a leader's tile just before the leader stopped — and once
+     * that happens the pair is welded: every step either hull wants to take is
+     * vetoed by the other, which is the pile-up in the screenshot (two selection
+     * rings on one tile, neither moving).
+     *
+     * A tiny symmetric shove, clamped by the terrain test and capped per frame,
+     * lets them come apart without any of the old "one unit shoves another" mass
+     * behaviour.
+     */
+    private separateHulls(dt: number) {
+        for (const a of this.units) {
+            if (a.dead || a.isAir || a.def.kind === 'infantry') continue;
+            this.grid.query(a.x, a.y, a.radius + 30, this.tmp);
+            for (const e of this.tmp) {
+                const b = e as Unit;
+                if (b === a || b.dead || b.isAir || !b.def || b.def.kind === 'infantry') continue;
+                if (b.id < a.id) continue;                 // handle each pair once
+                /*
+                 * Only separate hulls that are BOTH standing still.
+                 *
+                 * A mover approaching a parked friend generates exactly the
+                 * overlap this pass is meant to undo, and pushing the parked one
+                 * out of the way turns separation into the old "a tank shoves
+                 * another tank down the road" behaviour — measured 147 px of
+                 * displacement, straight onto the mover's destination tile, which
+                 * is why the mover then parked 1.5 tiles short. Movement is
+                 * already prevented from creating new overlaps by
+                 * `stepBlockedByUnit`; this pass only repairs a pair that is
+                 * already welded together and going nowhere.
+                 */
+                if (a.speedCur > 4 || b.speedCur > 4) continue;
+                const share = a.isHarvester && b.isHarvester ? 0.46 : 0.92;
+                /*
+                 * Separate to a full tile, not just to the stand-off ring.
+                 *
+                 * `minD` is only the "do the sprites intersect" distance (~24 px).
+                 * Two hulls resting exactly at `minD` are still inside the same
+                 * 32 px tile — which is what the screenshot shows: two selection
+                 * rings on one tile. Pushing to a full tile guarantees they
+                 * register on different cells, so neither one's next step is
+                 * vetoed by the other's presence in its own cell.
+                 */
+                const minD = Math.max((a.radius + b.radius) * share, TILE * 1.12);
+                let dx = b.x - a.x, dy = b.y - a.y;
+                let d = Math.hypot(dx, dy);
+                if (d >= minD - 0.4) continue;
+                if (d < 0.01) {
+                    // exactly concentric: split along the hull's flank
+                    dx = Math.cos(a.face + Math.PI / 2);
+                    dy = Math.sin(a.face + Math.PI / 2);
+                    d = 1;
+                }
+                const push = Math.min((minD - d) * 0.5, 40 * dt);
+                const nx = dx / d, ny = dy / d;
+                const ax = a.x - nx * push, ay = a.y - ny * push;
+                if (!this.worldBlockedAt(ax, ay, a.steerRadius)) { a.x = ax; a.y = ay; }
+                const bx = b.x + nx * push, by = b.y + ny * push;
+                if (!this.worldBlockedAt(bx, by, b.steerRadius)) { b.x = bx; b.y = by; }
+            }
+        }
     }
 
     /**
@@ -2812,7 +2881,22 @@ export class Game {
                         this.giveUpOrder(u, 'blocked');
                     }
                 } else {
+                    /*
+                     * Empty path, still holding a move order, already close.
+                     *
+                     * Every branch of `handleBlocked` below skips units with an
+                     * empty path, so this state had no exit: the hull stood there
+                     * for the rest of the match with `order = 'move'` and nothing
+                     * moving it. It is a finished order whatever the exact
+                     * distance — the path ran out within two tiles of the goal,
+                     * which is exactly the CloseEnough bail-out.
+                     */
+                    u.stop();
                     u.stallT = 0;
+                    u.blockT = 0;
+                    u.waitT = 0;
+                    if (u.order.k === 'move' || u.order.k === 'attackmove') u.order = { k: 'idle' };
+                    continue;
                 }
             } else {
                 u.stallT = 0;
@@ -2868,6 +2952,21 @@ export class Game {
                     continue;
                 }
                 if (g0 && destFull && Math.hypot(g0.x - u.x, g0.y - u.y) < TILE * 2.5) {
+                    /*
+                     * Prefer a nearer free tile over parking here.
+                     *
+                     * CloseEnough is the last resort, not the first: a unit 1.5
+                     * tiles out that finds its destination occupied should take the
+                     * free tile next door (32 px away) rather than stop where it
+                     * stands (measured 49.8 px short in movetest). Only when
+                     * relocation has already been tried do we accept the current
+                     * spot.
+                     */
+                    if (Number.isNaN(u.parkX) && this.parkNear(u, g0.x, g0.y, 5)) {
+                        u.parkTry++;
+                        u.blockT = 0;
+                        continue;
+                    }
                     u.stop();
                     u.blockT = 0;
                     u.waitT = 0;
@@ -3021,7 +3120,7 @@ export class Game {
              * four attempts (about two seconds) and cancel the order, which is
              * why a ten-tank group lost five of its ten orders on open ground.
              */
-            if (u.repathTry <= 10) {
+            if (u.repathTry <= 6) {
                 u.waitT = 0.45;
                 continue;
             }
@@ -3095,14 +3194,24 @@ export class Game {
                 if (o === u || o.dead) continue;
                 others++;
                 /*
-                 * "Going the same way" is the part that matters.
+                 * "Going the same way **and about to leave this tile**".
                  *
-                 * Reference condition: `unit.direction === blocker.direction` —
-                 * a moving blocker is only ignored when it is travelling the same
-                 * way as us and is therefore about to vacate the tile.
+                 * Reference: MoveTask breaks out of the obstacle loop for a
+                 * blocker with velocity unless
+                 * `blocker.moveTrait.currentWaypoint?.tile === node.tile` — i.e.
+                 * it only trusts the tile to clear if the blocker's next waypoint
+                 * is somewhere else. Our version dropped that second half, so a
+                 * leader that was merely rolling to a stop *inside* the tile still
+                 * counted as "vacating", the follower moved in, and when the
+                 * leader halted the two hulls sat in one cell 25 px apart, each
+                 * one's next step vetoed by the other. That is the pile-up in the
+                 * screenshot: two selection rings on one tile, neither moving.
                  */
                 const sameDir = Math.cos(o.face - u.face) > 0.55;
-                if (!(o.speedCur > 6 && o.path.length > 0 && sameDir)) { sameLane = false; break; }
+                const oNext = o.path.length > 0 ? o.path[0] : null;
+                const leaving = !!oNext
+                    && (Math.floor((oNext.x + HALF) / TILE) !== tx || Math.floor((oNext.y + HALF) / TILE) !== ty);
+                if (!(o.speedCur > 6 && o.path.length > 0 && sameDir && leaving)) { sameLane = false; break; }
                 sameLane = true;
             }
             /*
@@ -3147,16 +3256,19 @@ export class Game {
             if (dNew >= minD) continue;
             const dCur = Math.hypot(o.x - u.x, o.y - u.y);
             /*
-             * Refuse any step that ends inside the stand-off ring unless it is
-             * clearly a retreat.
+             * Inside the stand-off ring: only a step that genuinely opens the gap
+             * is allowed.
              *
-             * The old test only refused steps that *closed* the gap by more than
-             * 0.02px. A head-on pair could then walk into each other sideways: the
-             * straight step was refused, the axis-slide fallback kept the distance
-             * unchanged (allowed), and repeat that a few times and two tanks end up
-             * 1.3px apart, which is exactly "they drove through each other".
+             * The tolerance used to be +1.0 px, which meant two hulls already
+             * closer than the ring could not separate either — a step that opened
+             * the gap by 0.4 px was refused, the axis-slide fallback produced
+             * exactly such a step, and the pair stayed welded together for the
+             * rest of the match. 0.05 px still refuses any step that closes or
+             * holds the distance (including the sideways shuffle that let a
+             * head-on pair walk through each other) while letting a wedged pair
+             * drive apart.
              */
-            if (dNew < dCur + 1.0) return true;
+            if (dNew < dCur + 0.05) return true;
         }
         return false;
     }
@@ -3246,10 +3358,20 @@ export class Game {
          */
         const dirs: Array<{ x: number; y: number }> = [
             { x: -fy, y: fx }, { x: fy, y: -fx },
-            { x: -fx, y: -fy },
+            /*
+             * Sideways only — never straight ahead.
+             *
+             * The list used to include `{-fx,-fy}`, i.e. "move away from the
+             * caller along the caller's own approach line". That looks harmless
+             * for one step, but `requestAside` fires again as soon as the caller
+             * catches up, so the bystander is nudged another tile ahead, and
+             * another: measured 147 px of travel that ended exactly on the
+             * caller's destination tile. The caller then has nowhere to go and
+             * parks 1.5 tiles short. Diagonal candidates keep the sidestep
+             * sideways while still working for a hull wedged against a wall.
+             */
             { x: (-fx - fy) * 0.7071, y: (-fy + fx) * 0.7071 },
             { x: (-fx + fy) * 0.7071, y: (-fy - fx) * 0.7071 },
-            { x: fx, y: fy },
         ];
         for (const reach of [TILE * 1.15, TILE * 2.0]) {
             for (const dir of dirs) {
@@ -3478,6 +3600,25 @@ export class Game {
              * as "unreachable" while standing three tiles from the goal.
              */
             const near = goal ? Math.hypot(goal.x - u.x, goal.y - u.y) : 0;
+            /*
+             * One last direct query before parking.
+             *
+             * The give-up chain can conclude "stuck" after a friend that has just
+             * sidestepped, at which point the route to the goal is actually clear
+             * again — but every re-route so far was anchored at a detour waypoint,
+             * not at the destination. Asking once for the destination itself is
+             * cheap and recovers the common "a blocker moved out of the way"
+             * case (measured: a walker parking 48.7 px short of an empty tile).
+             */
+            if (goal && near <= TILE * 6) {
+                const direct = this.findPath(u, goal.x, goal.y);
+                if (direct) {
+                    u.path = direct;
+                    u.repathTry = 0;
+                    u.blockedNow = false;
+                    return;
+                }
+            }
             /*
              * Nowhere to stand within five tiles of the goal.
              *

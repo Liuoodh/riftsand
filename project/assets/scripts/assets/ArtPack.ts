@@ -8,13 +8,13 @@
  * painter, so a missing or broken atlas degrades to the old look instead of a
  * blank unit.
  *
- * Atlas layout follows the retail convention the painter already uses:
+ * Atlas layout follows the retail SHP convention: facing is the SLOW index and
+ * the animation phase is the fast one inside each facing.
  *
- *   index = sequenceStart + animFrame * facings + facing
+ *   index = sequenceStart + facing * phasesInSequence + phase
  *
- * i.e. facing is the fastest-varying index (row-major, 8 per row). That is what
- * `tools/blender/blib.py:render_facings` write out, so a batch that renders
- * `for frame: for facing:` lands here without re-ordering.
+ * `tools/blender/blib.py:render_facings` writes the same order ("four
+ * consecutive cells per facing"), so a batch lands here without re-ordering.
  *
  * Files live under `assets/resources/art/**` and are loaded through
  * `resources.load`, which is the only path that survives the mini-game build
@@ -194,7 +194,22 @@ export function unitBodyArtFrame(id: string, dir: number, animFrame: number, mov
     }
     const phases = Math.max(1, Math.round(a.walk.frames / a.facings));
     const phase = ((animFrame % phases) + phases) % phases;
-    return a.body[a.walk.start + phase * a.facings + d] ?? a.body[d] ?? null;
+    /*
+     * `facing` is the SLOW index: each facing owns `phases` consecutive cells.
+     *
+     *   walk.start + facing * phases + phase
+     *
+     * This used to be `walk.start + phase * facings + facing` — the transpose.
+     * Both formulas agree on the first phase, which is why every unit looked
+     * fine standing still and every check that only inspected `ready` passed.
+     * While *driving* the engine then cycled through four different FACINGS
+     * instead of four animation phases: measured on the atlas, the four frames it
+     * played for facing 0 had bounding-box widths of 48, 85, 48, 85 px — the 85s
+     * are a side view. On screen that reads as the hull swinging left and right
+     * on every step, which is exactly the "the body keeps wobbling while it
+     * drives" report that survived several rounds of steering fixes.
+     */
+    return a.body[a.walk.start + d * phases + phase] ?? a.body[d] ?? null;
 }
 
 /** Turret frame; returns null for art without a separate turret (mcv, harvester). */
