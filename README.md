@@ -6,7 +6,7 @@
 - 引擎：Cocos Creator 3.8.8
 - 语言：TypeScript
 - 仓库：https://github.com/Liuoodh/riftsand
-- 当前版本：**v0.18.0-dev — 往右晃：图块来回跳；互卡：两车共格；选中环改血条**
+- 当前版本：**v0.19.0-dev — 车身晃动＝行走帧在颠（已归零）；血条按原版重画**
 
 ![主菜单](docs/shots/menu.png)
 
@@ -161,6 +161,40 @@ frameIndex = startFrame + facingMult * facingIndex + animFrame
 等距下屏幕矩形对应世界**菱形**，把两个角反投影成世界 AABB 必然漏选。
 现在框选是「逐单位投影到屏幕再判断是否在矩形内」——这是等距下唯一正确的做法。
 
+## v0.19：车身晃动的真身是素材在颠、血条按原版重画
+
+### 1. 摇晃：行走帧在整体上下位移
+
+把 facing 5 的四帧并排放大就看到了：四帧车体位置都不一样。回到 Blender 脚本：
+
+```python
+bob = [0.0, 0.016, 0.0, -0.016]
+hull.location.z = bob[ai] * 2.5
+```
+
+每帧把整个车体抬高/压低 0.04 单位，叠在履带滚动上。144px 图集上是每帧 1.5px 的垂直跳，
+9fps 一直抖。**为什么只有往右、右上看得出**：车体横移时视线跟着轮廓走，垂直抖动与运动
+方向垂直，最扎眼；上下的行走里抖动叠在运动方向上，就被盖住了。这也是为什么前几轮
+用 `face`、图块号这些逻辑指标怎么测都稳定——问题不在逻辑里。
+
+- `bob` 归零，只保留履带滚动（真正"在动"的是它）。重渲染后四帧质心位移 **dy = 0.00**，
+  帧间像素差 5.3% → 2.4%（只剩履带）。
+- 车头改**前视点**：`pathLookAhead(1.7 格)` 沿折线取前方一点求方位，再对 `faceTarget`
+  做低通。网格路径是 26.57°/63.43° 交替的楼梯，逐路点求方位会让车头在两个图块间反复跨线。
+
+### 2. 血条：原版就是一条细线
+
+1px 黑框 + 纯色填充，硬角、无发光、无选中描边，颜色在半血、四分之一血处跳档。
+单位 26×2.5px，建筑按体量加宽。
+
+### 回归
+
+```
+dirtest 9/9（八方向 0 次图块来回切）  crowdtest 7/7  movetest 18/18  phystest 10/10
+harvesttest 6/6  artcheck 9/9  menutest 11/11  maptest 21/21  assettest 20/20
+inputtest 20/20  featuretest 14/14  speedtest 12/12  steertest 全绿
+```
+
 ## v0.18：往右晃的真因（图块来回跳）、卡成一坨的真因（两车共格）、选中环改血条
 
 ### 1. 「只有往右还晃」——不是转向，是 8 方向图块在跳
@@ -199,7 +233,7 @@ frameIndex = startFrame + facingMult * facingIndex + animFrame
 
 ```
 dirtest 9/9   crowdtest 7/7   movetest 18/18   phystest 10/10   harvesttest 6/6
-maptest 21/21 menutest 11/11  assettest 20/20  artcheck 8/8      inputtest 20/20
+maptest 21/21 menutest 11/11  assettest 20/20  artcheck 9/9      inputtest 20/20
 featuretest 14/14  speedtest 12/12  steertest 全绿  pathsim 停滞 0/62
 ```
 
@@ -254,7 +288,7 @@ Blender 拼图：`start + perFacing * facing + anim`（**朝向在外层**）。
 
 回归：`walktest 6/6 车 idleTurn=0 全部停稳`；`steertest` 直线 0 次朝向变化、炮塔 0 次回退、集群 `giveUp=0`；
 `crowdtest 5/5`、`movetest 18/18`、`phystest 10/10`、`harvesttest 6/6`、`maptest 21/21`、`menutest 11/11`、
-`assettest 20/20`、`inputtest 20/20`、`featuretest 14/14`、`speedtest 12/12`、`artcheck 8/8`；
+`assettest 20/20`、`inputtest 20/20`、`featuretest 14/14`、`speedtest 12/12`、`artcheck 9/9`；
 `pathsim` 停滞 4/62；6 分钟对战 0 报错。
 
 ## v0.16：摇晃、互堵、炮塔——上一版量错了地方

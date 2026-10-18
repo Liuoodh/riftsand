@@ -842,44 +842,42 @@ export class EntityView {
     /**
      * Retail-style health bar.
      *
-     * RA2 marks a selected unit with a bar, not with a ring: a dark trough, a
-     * green/yellow/red fill and a thin bright edge while selected. It sits under
-     * the unit's feet for ground units (where the original puts it) and above the
-     * roof for buildings, which would otherwise cover it.
+     * Red Alert 2 marks a selected unit with a plain health bar under its feet:
+     * a thin dark trough, a flat fill, hard corners, no glow and no outline
+     * around the selected unit. The colour steps at half and a quarter health.
+     * (The previous version rounded the trough and added a white rim when
+     * selected, which read as a UI element pasted over the sprite.)
+     *
+     * Buildings keep their bar above the roof — a bar under a 3x3 structure ends
+     * up buried in the ground shadow.
      */
     private drawHp(ratio: number, selected: boolean) {
         const g = this.hp;
         g.clear();
         const isB = this.e.isBuilding;
-        const w = isB ? Math.min(86, (this.e as Building).size * TILE * 0.8) : 32;
-        const h = isB ? 4 : 3.5;
+        const w = isB ? Math.min(88, (this.e as Building).size * TILE * 0.8) : 26;
+        const h = isB ? 3 : 2.5;
         const y = isB
             ? (this.e as Building).radius * 0.72
-            : ((this.e as Unit).isAir ? 24 : -13);
-        // trough
-        g.roundRect(-w / 2 - 1, y - 1, w + 2, h + 2, 1);
-        g.fillColor = new Color(4, 7, 10, 205);
+            : ((this.e as Unit).isAir ? 22 : -12);
+        // trough: 1px black frame, exactly the pixels the fill covers plus one
+        g.rect(-w / 2 - 1, y - 1, w + 2, h + 2);
+        g.fillColor = new Color(8, 9, 10, 235);
         g.fill();
-        // fill
-        const col = ratio > 0.55 ? hex(PAL.green) : ratio > 0.28 ? hex(PAL.amber) : hex(PAL.red);
+        const col = ratio > 0.5 ? '#3fe04a' : ratio > 0.25 ? '#ffc53a' : '#ff4436';
         if (ratio > 0) {
-            g.rect(-w / 2, y, w * ratio, h);
-            g.fillColor = col;
+            g.rect(-w / 2, y, Math.max(1, w * ratio), h);
+            g.fillColor = hex(col);
             g.fill();
         }
-        // selection: a bright rim, so the bar reads as "this one is mine"
-        if (selected) {
-            g.rect(-w / 2 - 1.5, y - 1.5, w + 3, h + 3);
-            g.strokeColor = new Color(235, 245, 255, 120);
-            g.lineWidth = 1;
-            g.stroke();
-        }
+        // construction progress sits under the bar, same width
         if (isB && !(this.e as Building).done) {
             const b = this.e as Building;
-            g.rect(-w / 2, y + 6, w * b.progress, 3);
+            g.rect(-w / 2, y + 5, w * b.progress, 2);
             g.fillColor = hex(PAL.cyan, 220);
             g.fill();
         }
+        void selected;      // selection is the bar itself, nothing is added on top
     }
 
     destroy() {

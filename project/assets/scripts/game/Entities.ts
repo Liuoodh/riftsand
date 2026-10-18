@@ -325,6 +325,35 @@ export class Unit extends Entity {
         this.blockTy = Math.floor((this.y + uy * look + HALF) / TILE);
     }
 
+    /**
+     * A point `ahead` world units along the remaining route (clamped to its end).
+     *
+     * This is the steering target for hull heading. Sampling the route instead of
+     * the next waypoint is what keeps the nose steady: consecutive waypoints of a
+     * grid path are one cell apart, so their bearings differ by 26.6 degrees and
+     * the 8-way sprite jumps a whole 45-degree image at every cell.
+     */
+    pathLookAhead(ahead: number): { x: number; y: number } {
+        const path = this.path;
+        if (path.length === 0) return { x: this.x, y: this.y };
+        let px = this.x;
+        let py = this.y;
+        let left = ahead;
+        for (let i = 0; i < path.length; i++) {
+            const wx = path[i].x, wy = path[i].y;
+            const seg = Math.hypot(wx - px, wy - py);
+            if (seg <= 0.001) continue;
+            if (seg >= left) {
+                const t = left / seg;
+                return { x: px + (wx - px) * t, y: py + (wy - py) * t };
+            }
+            left -= seg;
+            px = wx;
+            py = wy;
+        }
+        return { x: px, y: py };
+    }
+
     moveStep(dt: number, speedMul: number): boolean {
         this.prevX = this.x;
         this.prevY = this.y;
@@ -358,20 +387,39 @@ export class Unit extends Entity {
         }
 
         /*
-         * Heading is derived once per segment, not once per frame.
+         * Heading: pure pursuit along the path, not "point at path[0]".
          *
-         * This is the whole "the hull keeps swinging while it drives" bug. The
-         * old code recomputed atan2(waypoint) every tick and chased it; a 20 px
-         * waypoint that drifts a pixel sideways is a 3-degree heading change, and
-         * the hull dutifully turned after it, so a straight drive wobbled. The
-         * reference computes the leg bearing in DriveLocomotor.onNewWaypoint and
-         * returns a TurnTask; the straight-line branch of tick() never assigns
-         * `direction` at all.
+         * Chasing the next waypoint is what made the hull rock while it drove.
+         * A grid path is a staircase: consecutive waypoints sit one cell apart, so
+         * on anything that is not axis-aligned the bearing alternates between two
+         * values 26.6 degrees apart (243 and 297 for a diagonal, for instance).
+         * Each switch crosses an 8-way image boundary, and the sprite jumps 45
+         * degrees — the "body keeps turning and shaking" report, which is why it
+         * only showed up for some directions: only those directions have legs that
+         * straddle a bucket edge.
+         *
+         * The reference locomotor steers at a point on the route ahead of the
+         * unit (DriveLocomotor samples the line to the target and only re-derives
+         * the bearing when the waypoint itself changes), which averages the
+         * staircase into the direction the unit is really travelling. Same idea
+         * here: take a point ~1.7 tiles along the polyline and steer at that.
          */
-        if (this.segWp !== wp) {
-            this.segWp = wp;
-            this.faceTarget = Math.atan2(dy, dx);
-        }
+        const look = this.pathLookAhead(TILE * 1.7);
+        const wantDir = Math.atan2(look.y - this.y, look.x - this.x);
+        /*
+         * ...and let the demanded heading settle instead of snapping to it.
+         *
+         * Popping a waypoint moves the look-ahead point, which moves the demanded
+         * bearing in one step. Smoothing it here (the reference's TurnTask does
+         * the same job by turning at `rot` per tick, but our faceTarget also feeds
+         * the stand-still-while-turning test) keeps the 8-way image on one bucket
+         * through a staircase.
+         */
+        let dWant = wantDir - this.faceTarget;
+        while (dWant > Math.PI) dWant -= Math.PI * 2;
+        while (dWant < -Math.PI) dWant += Math.PI * 2;
+        this.faceTarget = this.faceTarget + dWant * Math.min(1, dt * 6);
+        this.faceTarget = wrapAngle(this.faceTarget);
         let diff = this.faceTarget - this.face;
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;

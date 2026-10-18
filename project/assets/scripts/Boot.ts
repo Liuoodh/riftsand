@@ -168,6 +168,10 @@ export class RiftApp extends Component {
                 const sf = unitTurretFrame({ id: defId } as any, dir);
                 return sf ? frameIndexFromRect(sf) : -1;
             },
+            /** raw frame, for tools that need the pixels (artcheck's bob test) */
+            bodyFrame(defId: string, dir: number, frame: number, moving: boolean) {
+                return unitBodyFrame({ id: defId } as any, 'BU', dir, frame, moving);
+            },
         };
 
         // dev hook: ?auto=1 jumps straight into a match (used by the smoke test)

@@ -2,6 +2,7 @@
 .shots/
 
 # Blender 管线的中间渲染与审阅图（可由 tools/blender/*.py 重新生成）
+art/blender/*.blend1
 art/blender/_tmp/
 art/blender/_debug/
 

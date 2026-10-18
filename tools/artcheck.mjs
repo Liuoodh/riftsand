@@ -89,6 +89,66 @@ if (info.ids.includes(UNIT)) {
     check('朝向之间按相位数量跨块',
         table.walk1[0] - table.walk[0] === table.walk.length,
         `facing0=${table.walk[0]} facing1=${table.walk1[0]} stride=${table.walk.length}`);
+
+    /*
+     * 6. no vertical bob between walk phases.
+     *
+     * A walk cycle must not lift the whole hull: the four frames have to share one
+     * ground line and only the treads/wheels may move. A 1.5 px bounce at 9 fps is
+     * a permanent shake, and it is worst when the hull drives sideways across the
+     * screen (the eye tracks the silhouette while the jitter runs perpendicular to
+     * it). This is what "the tank keeps turning and shaking" turned out to be — the
+     * Blender script had `bob = [0, .016, 0, -.016]` on `hull.location.z`.
+     *
+     * Measured from the atlas pixels: the bottom edge of the silhouette per phase.
+     */
+    const bobs = await page.evaluate((id) => {
+        const CANVAS = document.createElement('canvas');
+        const ctx = CANVAS.getContext('2d');
+        const cache = new Map();
+        const baseOf = (sf) => {
+            const tex = sf.texture;
+            const img = tex && tex.image && tex.image.data;
+            if (!img) return null;
+            if (!cache.has(tex)) {
+                const c = document.createElement('canvas');
+                c.width = tex.width; c.height = tex.height;
+                c.getContext('2d').drawImage(img, 0, 0);
+                cache.set(tex, c.getContext('2d'));
+            }
+            const src = cache.get(tex);
+            const r = sf.rect;
+            // PNG rows run top-down, SpriteFrame rects bottom-up
+            const top = tex.height - r.y - r.height;
+            const d = src.getImageData(r.x, top, r.width, r.height).data;
+            let bottom = -1;
+            for (let y = r.height - 1; y >= 0 && bottom < 0; y--) {
+                for (let x = 0; x < r.width; x++) {
+                    if (d[(y * r.width + x) * 4 + 3] > 40) { bottom = top + y; break; }
+                }
+            }
+            return bottom;
+        };
+        const out = [];
+        for (let f = 0; f < 8; f++) {
+            const rows = [];
+            for (let ph = 0; ph < 4; ph++) {
+                const sf = window.__riftsandArt.bodyFrame(id, f, ph, true);
+                rows.push(sf ? baseOf(sf) : null);
+            }
+            out.push(rows);
+        }
+        void CANVAS; void ctx;
+        return out;
+    }, UNIT);
+
+    const spread = bobs.map((r) => {
+        const v = r.filter((x) => x !== null);
+        return v.length ? Math.max(...v) - Math.min(...v) : 0;
+    });
+    check('行走四帧共用同一条地面线（车体不上下颠）',
+        spread.every((s) => s <= 1),
+        `每朝向底边跨度 ${JSON.stringify(spread)}`);
 }
 
 check('运行无报错', errors.length === 0, errors.slice(0, 2).join(' | '));

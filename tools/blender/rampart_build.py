@@ -200,7 +200,12 @@ def main():
 
     # ---------------- hull: ready (1) + walk (4)
     walk_frames = [0, 1, 2, 3]
-    bob = [0.0, 0.016, 0.0, -0.016]
+    # No vertical bob. The walk cycle used to lift and drop the whole hull by
+    # +-0.04 world units on top of the tread scroll: a 1.5 px jump every frame at
+    # 9 fps that read as the tank rocking, worst when it drove sideways across the
+    # screen (the eye tracks the silhouette there instead of following it). The
+    # treads already scroll, which is what sells motion; the bounce only shook.
+    bob = [0.0, 0.0, 0.0, 0.0]
 
     def frame_cb(ai, af):
         # tread scroll: 1/4 of a tread pitch per frame

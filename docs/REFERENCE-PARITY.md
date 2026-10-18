@@ -850,7 +850,7 @@ walktest   6/6 车 img=1-2、idleTurn=0、全部停稳（距目标 29-100 px）
 steertest  直线 dirFlips 0 / faceDelta 0°；炮塔 retreats 0；集群 giveUp 0
 crowdtest 5/5   movetest 18/18   phystest 10/10   harvesttest 6/6
 maptest 21/21   menutest 11/11   assettest 20/20   inputtest 20/20
-featuretest 14/14   speedtest 12/12   artcheck 8/8
+featuretest 14/14   speedtest 12/12   artcheck 9/9
 pathsim    停滞 4/62、到达 50、就近停靠 8
 ```
 
@@ -909,8 +909,51 @@ Walk/Ready 每帧互换（两张图差 5% 像素，读起来就是「嗡嗡抖�
 dirtest     9/9     八方向行驶图块稳定，0 次来回切换
 crowdtest   7/7     10/10 抵达、0 误报、0 共格、最近 30.4px
 movetest    18/18   phystest 10/10   harvesttest 6/6
-maptest     21/21   menutest 11/11   assettest 20/20   artcheck 8/8
+maptest     21/21   menutest 11/11   assettest 20/20   artcheck 9/9
 inputtest   20/20   featuretest 14/14   speedtest 12/12
 steertest   dirFlips 0 / retreats 0 / giveUp 0 / stillMoving 0
 pathsim     停滞 0/62，到达 53
+```
+
+---
+
+## 19. v0.19：车身晃动＝素材在上下颠；血条按原版重画
+
+### 19.1 摇晃的真身是「行走帧在整体上下位移」
+
+前面几轮一直在代码里找，这次直接从素材查：把 facing 5 的四个 walk 帧并排放大，
+四帧的车体轮廓和位置都不一样。回到 Blender 脚本，找到根源：
+
+```python
+bob = [0.0, 0.016, 0.0, -0.016]
+hull.location.z = bob[ai] * 2.5
+```
+
+**每一帧把整个车体抬高/压低 0.04 单位**，再叠上履带贴图滚动。换算到 144px 图集上
+就是每帧 1.5px 的垂直跳，9fps 下持续抖动。为什么「只有往右和右上」看得见：
+车体左右横移时，视线是跟着轮廓走的，垂直方向的抖动与运动方向垂直，最刺眼；
+上下走时抖动叠在运动方向上，看不出来。这也解释了为什么我前几轮用逻辑指标
+（`face`、图块号）怎么测都是稳定的——问题根本不在逻辑里。
+
+修法：
+
+- `bob` 全零，只保留 `set_tread_offset()` 的履带滚动（真正卖"在动"的是它）。
+  重渲染后实测：四帧质心位移 **dy = 0.00**，帧间像素差从 5.3% 降到 2.4%（只剩履带）。
+- 车头改用**前视点**（pure pursuit）：`Unit.pathLookAhead(1.7 格)` 沿折线取一个前方点，
+  再对它求方位，并对 `faceTarget` 做 6/s 的低通。网格路径是 26.57°/63.43° 交替的楼梯，
+  逐路点求方位会让车头在两个桶之间来回跨，前视点把它们平均成真实行进方向。
+
+### 19.2 血条：按原版重画
+
+原版是脚下一条**平直的细血条**：1px 黑框 + 纯色填充，硬角、无发光、无选中描边，
+颜色在半血和四分之一血处跳档。上一版用了圆角槽 + 选中白边，看起来像贴上去的 UI。
+现在：单位 26×2.5px、建筑按体量加宽，槽比填充大 1px，`#3fe04a / #ffc53a / #ff4436` 三档。
+
+### 19.3 回归
+
+```
+dirtest 9/9（八方向 0 次图块来回切换）   crowdtest 7/7   movetest 18/18
+phystest 10/10   harvesttest 6/6   artcheck 9/9   menutest 11/11
+maptest 21/21   assettest 20/20   inputtest 20/20   featuretest 14/14   speedtest 12/12
+steertest dirFlips 0 / retreats 0 / giveUp 0
 ```
