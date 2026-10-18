@@ -87,6 +87,12 @@ Walk: 方向 0 的 4 帧连续, 方向 1 的 4 帧连续, ...
 
 这样 `frameIndex` 的换算和原版一致，将来接真 SHP 时零改动。
 
+> ⚠️ **图集是「线性 32 帧」，不是「4 行 × 8 列」的语义。** 因为 `frame = start + 4 × facing + anim`，
+> 方向 0 的 4 帧落在 index 8–11（= 第 2 行前 4 格），方向 1 的 4 帧落在 12–15（第 2 行后 4 格）……
+> `art/templates/README.md` 里写的「行 1–4 = Walk 1–4；列 = 方向」在这个公式下不成立，
+> 按行填模板会得到「每帧只有一个方向」的错图。**以 `render/Frames.ts` 的公式为准**，
+> 把 32 帧当成一条连续序列，按 `8 + 4 × facing + anim` 落格。`art/units/rampart.png` 就是这么排的。
+
 ### 2.3 各单位的差异
 
 | 类型 | 说明 |
@@ -145,6 +151,9 @@ Walk: 方向 0 的 4 帧连续, 方向 1 的 4 帧连续, ...
 
 ## 4. 地图素材清单
 
+> **地图本身怎么设计、怎么导出、怎么验收，见 [`MAP-GUIDE.md`](./MAP-GUIDE.md)。**
+> 这一节只讲「要画哪些图、画多大、有什么硬要求」。
+
 ### 4.1 地形瓦片
 
 | 元素 | 尺寸 | 数量 | 说明 |
@@ -154,7 +163,14 @@ Walk: 方向 0 的 4 帧连续, 方向 1 的 4 帧连续, ...
 | 沙丘侧壁 | 由代码按层高拉伸 | — | 也可以给 1 张 56×16 的条纹，代码平铺 |
 | 岩石 | 56 × 28 | 3 张 | 实心，不可通行 |
 | 矿脉 | 56 × 28 | 3 张 | 可通行、减速，上面再叠晶体 |
-| 浅滩/道路 | 56 × 28 | 各 2–4 张 | 预留 |
+| 道路 | 56 × 28 | 2–4 张 | 压实的深色土路，带车辙；比沙地快 18% |
+| 浅水 / 水面 | 56 × 28 | 2–4 张 | 不可通行（桥梁/船只留给后续） |
+| **两两过渡** | 56 × 28 | 每种组合 16 张 | 上/下/左/右四条边各有「接/不接」，2⁴ = 16。**这是地形看起来「像红警」的关键** |
+| **悬崖侧壁** | 56 × 16（可平铺） | 4 方向 × 3 层高 | 高台侧面；也可只做 1 张由代码竖向平铺 |
+| **坡道** | 56 × 28 | 4 方向 × 2 | 1 层落差的斜面，带明暗渐变 |
+
+过渡瓦片建议按位掩码命名：`clear_to_rock_1011.png`（上、右、下、左，1 = 该边接岩石）。
+代码按邻格 `land` 差异查表替换底图 —— 接入点见 `MAP-GUIDE.md` 第 6 节。
 
 如果你打算直接做 TMP，尺寸是 **60 × 30**，代码按 56/60 缩放；见第 6 节。
 
@@ -228,10 +244,44 @@ montage ready_*.png walk_*.png -tile 8x -geometry +0+0 -background none tank.png
 
 ### 5.3 地图
 
-- 关卡布局用 **Tiled**（免费）：导出 JSON，我们按图块坐标读取（`tools/maploader` 预留）。
-- 地形瓦片本身仍然是 PNG 或 TMP；Tiled 只负责「哪一格放什么」。
+- **布局用 `tools/mapeditor.html`**（浏览器里直接开，无需安装）：涂地形/高度/阻挡、放矿点和出生点，导出 JSON。
+- 地形瓦片本身仍然是 PNG 或 TMP；编辑器只负责「哪一格放什么」。
+- 导出后 `node tools/mapbuild.mjs` 校验并打包，`node tools/maptest.mjs` 进游戏验收。
+- 完整格式、素材数量、设计准则、验收标准：见 [`MAP-GUIDE.md`](./MAP-GUIDE.md)。
 
 ---
+
+### 5.4 Blender 管线（本仓库已实现，可复用）
+
+用 `ahujasid/blender-mcp` 的 Blender 插件把 `bpy` 脚本送进**正在运行的 Blender** 执行，
+产出 PNG 图集。不需要 uv / Python 依赖，Blender 自带 numpy 就能做降采样和拼图。
+
+```bash
+# 1) 插件：把仓库里的 addon.py 拷到用户插件目录，Blender 里启用（或 Python 里 addon_utils.enable）
+#    C:\Users\<you>\AppData\Roaming\Blender Foundation\Blender\5.2\scripts\addons\blender_mcp.py
+# 2) 插件面板 Connect -> 监听 127.0.0.1:9876
+# 3) 跑构建脚本（走同一个 execute_code 通道）
+python tools/blender/bridge.py run tools/blender/rampart_build.py
+```
+
+| 文件 | 作用 |
+|---|---|
+| `tools/blender/bridge.py` | 最小 socket 客户端，`run <脚本>` / `code "<片段>"` / `ping` |
+| `tools/blender/blib.py` | 场景/材质/几何/渲染/降采样/拼图集的公共函数 |
+| `tools/blender/rampart_build.py` | 城墙主战坦克：建模 + 48 帧渲染 + 两张图集 |
+| `tools/blender/inspect_atlas.py` | 6× 放大 + 锚点十字线，检查朝向与锚点 |
+| `tools/blender/inspect_hires.py` | 288px 原图合成审阅（车体 + 炮塔叠一起） |
+| `art/blender/rampart.blend` | 场景源文件，改模型从这里改 |
+
+管线里的固定约定（和本文档其余部分一致，别改）：
+
+- 相机正交、俯角 **30°**（`rotation_euler.x = 60°`），看向世界原点 —— 原点即接地面中心，直接落在画布中心；
+- 朝向 i 的渲染 = 模型绕 Z 转 `90° + 45°i`，得到「上 → 左上 → … → 右上」的顺序；
+- 光照固定在世界空间（左上主光 + 冷补光 + 青色轮廓光），只转模型不转灯；
+- 渲染 288×288（4 倍超采样）→ 盒式降采样到 72 → 加 1px 暗描边 → 按线性帧号拼图集；
+- 履带用程序纹理（`ShaderNodeTexWave`）在物体坐标上平移，四帧各移 1/4 齿距。
+
+新增单位的最小改法：复制 `rampart_build.py`，改 `build_hull` / `build_turret` 的尺寸，其余不用动。
 
 ## 6. manifest：代码怎么找到你的图
 

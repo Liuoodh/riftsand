@@ -8,12 +8,17 @@
  * job `rampType` does in the retail engine (ObjectPosition.ts + rampHeights.ts).
  */
 import { MAP_TILES, makeRng, TILE, HALF } from '../core/Core';
+import { type MapData, LAND, decodeMap } from './MapData';
 
 export enum TileKind {
     Sand = 0,
     Dune = 1,
     Rock = 2,
     Crystal = 3,
+    /** graded road: faster than sand, the retail `Road` land type */
+    Road = 4,
+    /** impassable water — reserved for bridges/ships later */
+    Water = 5,
 }
 
 /** a tile's step cost for connectivity, mirroring |Δz| <= 1 in the reference */
@@ -43,6 +48,15 @@ export class TerrainMap {
     maxLevel = 1;
     /** fine height-ish noise for tinting the ground */
     tint = new Float32Array(MAP_TILES * MAP_TILES);
+    /**
+     * Visual tile id per cell (see MapData). Gameplay never reads it: it exists
+     * so an authored map can say "this cell is tileset tile 37". Until a real
+     * PNG/TMP tileset is plugged in, the renderer uses it as a small palette
+     * variation so a painted map still reads as varied ground.
+     */
+    tile = new Uint16Array(MAP_TILES * MAP_TILES);
+    /** true when the level array came from a map file instead of the generator */
+    authored = false;
     /** movement multiplier per tile (sand 1.0, dune slower, crystal slowest) */
     speed = new Float32Array(MAP_TILES * MAP_TILES);
     nodes: CrystalNode[] = [];
@@ -106,21 +120,32 @@ export class TerrainMap {
         }
     }
 
-    /** rebuilds integer levels + the shared-corner height field */
+    /**
+     * Rebuilds integer levels + the shared-corner height field.
+     *
+     * Two sources of truth:
+     *   - procedural maps derive the level from the land kind (rock = 2, dune = 1)
+     *     and then flatten the base bowls;
+     *   - an authored map carries its own per-cell height, and that height is
+     *     authoritative — flattening a drawn plateau because a base happened to
+     *     be nearby is exactly the kind of "the editor lied" surprise to avoid.
+     */
     rebuildHeight() {
         const n = this.size;
-        for (let i = 0; i < this.kind.length; i++) {
-            const k = this.kind[i];
-            this.level[i] = k === TileKind.Rock ? 2 : k === TileKind.Dune ? 1 : 0;
+        if (!this.authored) {
+            for (let i = 0; i < this.kind.length; i++) {
+                const k = this.kind[i];
+                this.level[i] = k === TileKind.Rock ? 2 : k === TileKind.Dune ? 1 : 0;
+            }
+            // starting bowls and the mid lane are levelled so bases sit flat
+            const bases = [{ tx: 7, ty: 32 }, { tx: n - 8, ty: n - 33 }];
+            for (const b of bases) this.claimLevel(b.tx, b.ty, 9, 0);
+            for (let x = 0; x < n; x++) {
+                const y = Math.round(n / 2 + Math.sin(x * 0.22) * 4);
+                for (let d = -2; d <= 2; d++) if (this.inside(x, y + d)) this.level[this.idx(x, y + d)] = 0;
+            }
+            for (const node of this.nodes) this.claimLevel(node.tx, node.ty, 2, 0);
         }
-        // starting bowls and the mid lane are levelled so bases sit flat
-        const bases = [{ tx: 7, ty: 32 }, { tx: n - 8, ty: n - 33 }];
-        for (const b of bases) this.claimLevel(b.tx, b.ty, 9, 0);
-        for (let x = 0; x < n; x++) {
-            const y = Math.round(n / 2 + Math.sin(x * 0.22) * 4);
-            for (let d = -2; d <= 2; d++) if (this.inside(x, y + d)) this.level[this.idx(x, y + d)] = 0;
-        }
-        for (const node of this.nodes) this.claimLevel(node.tx, node.ty, 2, 0);
 
         // every vertex takes the mean of the (up to) four tiles touching it, so
         // a 1-level cliff becomes a one-tile ramp instead of a wall
@@ -281,7 +306,12 @@ export class TerrainMap {
     rebuildSpeed() {
         for (let i = 0; i < this.kind.length; i++) {
             const k = this.kind[i];
-            this.speed[i] = k === TileKind.Rock ? 0 : k === TileKind.Dune ? 0.84 : k === TileKind.Crystal ? 0.66 : 1;
+            this.speed[i] = k === TileKind.Rock ? 0
+                : k === TileKind.Water ? 0
+                    : k === TileKind.Dune ? 0.84
+                        : k === TileKind.Crystal ? 0.66
+                            : k === TileKind.Road ? 1.18
+                                : 1;
         }
     }
 
@@ -293,7 +323,8 @@ export class TerrainMap {
         if (!this.inside(tx, ty)) return 0;
         const i = this.idx(tx, ty);
         const k = this.kind[i];
-        if (k === TileKind.Rock) return 0;
+        if (k === TileKind.Rock || k === TileKind.Water) return 0;
+        if (k === TileKind.Road) return hover ? 1.3 : 1.18;
         if (k === TileKind.Dune) return hover ? 1 : isInfantry ? 0.95 : 0.84;
         if (k === TileKind.Crystal) return hover ? 0.85 : isInfantry ? 0.8 : 0.66;
         return 1;
@@ -305,11 +336,12 @@ export class TerrainMap {
         const k = this.kind[this.idx(tx, ty)];
         if (k === TileKind.Dune) return 1.25;
         if (k === TileKind.Crystal) return 1.4;
+        if (k === TileKind.Road) return 0.85;
         return 1;
     }
 
-    private addNode(tx: number, ty: number, amount: number, id: number, rng: () => number) {
-        this.claimCrystal(tx, ty, 1);
+    private addNode(tx: number, ty: number, amount: number, id: number, rng: () => number, r = 1) {
+        this.claimCrystal(tx, ty, r);
         this.nodes.push({
             id, tx, ty, amount, max: amount,
             x: tx * TILE + TILE / 2 - HALF,
@@ -323,5 +355,47 @@ export class TerrainMap {
             if (Math.abs(n.tx - tx) <= 1 && Math.abs(n.ty - ty) <= 1) return n;
         }
         return null;
+    }
+
+    /**
+     * Load an authored map (see MapData.ts).
+     *
+     * One loader for both worlds: generating and authoring produce the same six
+     * arrays, so nothing downstream (pathing, fog, renderer, AI) knows or cares
+     * where a map came from.
+     */
+    loadMap(d: MapData) {
+        const n = this.size;
+        const dec = decodeMap(d);
+        this.kind.fill(TileKind.Sand);
+        this.solid.fill(0);
+        this.tile.fill(0);
+        this.nodes = [];
+
+        for (let i = 0; i < n * n; i++) {
+            const l = dec.land[i];
+            let k: TileKind = TileKind.Sand;
+            if (l === LAND.Rough) k = TileKind.Dune;
+            else if (l === LAND.Road) k = TileKind.Road;
+            else if (l === LAND.Water) { k = TileKind.Water; this.solid[i] = 1; }
+            else if (l === LAND.Rock) { k = TileKind.Rock; this.solid[i] = 1; }
+            this.kind[i] = k;
+            this.level[i] = dec.height[i];
+            this.tile[i] = dec.tiles[i];
+            if (dec.blocked[i]) this.solid[i] = 1;
+            // tint drives the ground shading variation; derive it from the height
+            // and the tile id so an authored map is not a flat sheet of one colour
+            this.tint[i] = 0.35 + ((dec.tiles[i] % 7) / 7) * 0.5;
+        }
+
+        this.authored = true;
+        const rng = makeRng(d.id.length * 7919 + 13);
+        let nid = 1;
+        for (const o of d.ore ?? []) {
+            const r = o.amount >= 4200 ? 2 : 1;
+            this.addNode(o.tx, o.ty, o.amount, nid++, rng, r);
+        }
+        this.rebuildSpeed();
+        this.rebuildHeight();
     }
 }

@@ -841,20 +841,30 @@ export class UI {
         this.factionCard(ov, 'BU', -322, 145);
         this.factionCard(ov, 'DS', 322, 145);
 
-        // ---- map list (centre column) ----
+        // ---- map list (centre column, two columns so authored maps fit) ----
         const mLabel = mkLabel(ov, '战 场', 13, '#93a3b0');
         mLabel.node.setPosition(-166, 198, 0);
-        let my = 172;
-        for (const m of MAPS) {
-            const b = new UIButton(ov, 332, 32, `${m.name}   ·   ${m.en}`, 13, () => {
+        /*
+         * Two columns of at most four rows.
+         *
+         * The list used to be a single column of five procedural maps. Authored
+         * maps (docs/MAP-GUIDE.md) push the count past what one column can show
+         * without colliding with the trait line, so it wraps: top-to-bottom in
+         * the left column, then the right one.
+         */
+        const rows = Math.ceil(MAPS.length / 2);
+        const rowH = rows > 4 ? Math.max(26, 150 / rows) : 38;
+        MAPS.forEach((m, i) => {
+            const col = i < rows ? 0 : 1;
+            const row = i < rows ? i : i - rows;
+            const b = new UIButton(ov, 160, 32, `${m.name}   ·   ${m.en}`, 11, () => {
                 this.selMap = m.id;
                 this.rebuildMenu();
             }, PAL.cyan);
-            b.setPosition(0, my);
+            b.setPosition(col === 0 ? -84 : 84, 172 - row * rowH);
             b.setActive(this.selMap === m.id);
             this.menuBtns.push(b);
-            my -= 38;
-        }
+        });
         const picked = mapById(this.selMap);
         const trait = mkLabel(ov, picked.trait, 11, '#8fa0ae');
         trait.node.setPosition(-166, -14, 0);

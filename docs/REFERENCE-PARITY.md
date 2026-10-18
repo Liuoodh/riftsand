@@ -511,3 +511,88 @@ featuretest 14/14   （新增：摆放后 1.1s 完成升起、满血，不再二
 另外，`PathFinder` 的平滑（对应原版 `smoothPath`）必须用比 A* 更宽的净空：A* 只保证
 "格子能站"，拉直后的线段会贴着建筑墙角切过去，单位撞上就停——这正是"点了可达点却过不去"
 的最后一块拼图。
+
+---
+
+## 14. v0.12：「无法抵达目标」的真正原因（寻路之外的四处）
+
+用户反复报告「明明有路，却说抵达不了」。这一版先做了**可量化的诊断**，再改代码：
+
+| 工具 | 做什么 | 结论 |
+|---|---|---|
+| `tools/pathprobe.mjs` | 用洪水填充算出可达真值，再拿真 `PathFinder` 跑 400 组随机可达点 | **漏判 0**，平均绕行 0.56× —— **A\* 本身没问题** |
+| `tools/pathsim.mjs` | 下达移动指令后按「路径长度给预算」+「停滞检测」，并劫持 `failMove` / `giveUpOrder` 记录现场 | 修前 78 个订单里 **37 个停滞**，且几乎都不报错 |
+
+于是问题定位到「移动执行层」，四处都与原版语义不符：
+
+### 14.1 卡死计时器：原版只在 PlanMove 时累加
+
+`MoveTask.onTick` 里 `inPlanningForTicks` 只在 `MoveState.PlanMove`（**完全无法驱动**）时自增，
+到达路点后清空；`MAX_PLANNING_TICKS = 200`（15fps ≈ 13.3 秒）才触发重规划。
+
+我们的 `handleBlocked` 每帧无条件 `blockT += dt`，阈值 0.3 秒。
+后果：一辆坦克从静止起步，前 0.2 秒还在加速，位移不足 2px，被判定"没进展"；
+0.3 秒后开始重算，四次重算走完 **1.2 秒**，`failMove` 取消订单 —— **在空旷沙地上，刚下令一秒就自己取消了**。
+
+```ts
+// 现在：本帧没有推进才累加，有推进则衰减（衰减而非清零，避免抖动重置）
+if (!u.blockedNow) {
+    u.blockT = Math.max(0, u.blockT - dt * 3);
+    continue;
+}
+```
+阈值也按原版重排：0.35s 让路 → 1.6s 起三次绕行 → 就近重定位 → Fail。
+
+### 14.2 就近重定位：只查"空"不查"通"
+
+原版 `MoveTask.findRelocationTile` 找的是**可达**格子。我们的 `findFreeNear` 只判断
+"这格有没有障碍"，于是经常挑到墙另一侧的空格，`repathTo` 拿到 null，`u.path = []`，
+而 `handleBlocked` 对空路径的订单直接 `continue` —— **订单挂着、单位不动、没有任何提示**，
+这就是"点了没反应"的那一类。
+
+新增 `PathFinder.relocate()`：从单位当前位置 BFS，返回**最近且真能走到**的格子并给出路径。
+
+### 14.3 终点格已满：原版是 CloseEnough，不是无限蹭
+
+一格容 1 车 / 3 步兵。第 4 个步兵的路径终点仍在那一格里，于是它以满速贴着邻格边缘来回蹭：
+速度 36、`blockedNow=false`、`path.length=1`，位移 0。
+
+原版 `canStopAtTile` 失败后走 `isCloseEnoughToDest` → `MoveResult.CloseEnough`，订单结束。
+现在：`moveStep` 在最后一格、距离 < 1.5 格、且目标格无容量时直接判到达。
+
+### 14.4 墙体救援与步进判定用了两个半径
+
+`canStepTo` 用 `steerRadius`（0.45×视觉半径，允许车身压过墙角一点，同原版 sprite 溢出格子）；
+`resolveWorldCollision` 却用**完整视觉半径**判断"是否卡进墙里"，发现卡住就把单位传送回 `prevX/prevY`。
+一个合法的步子在救援层看来是"卡进墙"，于是每帧：前进 → 传送回来 → 前进 → ……
+表现为**满速原地抖动**，在悬崖边和建筑拐角最明显。两者统一为 `steerRadius` 后消失。
+
+### 14.5 顺带修掉的三处
+
+| 症状 | 根因 | 对齐的原版语义 |
+|---|---|---|
+| A* 在长路径上"差最后几百像素" | 展开上限 5200 < 地图 6400 格 | 原版不限（`maxExpandedNodes` 默认 `Infinity`） |
+| 起点格被建筑覆盖时整图不可达 | A* 不检查起点，起点无邻居可展开 | 起点吸附到最近可站格 |
+| 采油车把矿脉啃空却不产钱 | 炼油厂被摧毁后仍继续挖 | 没有卸货点就待命（原版 `DockTrait` 找不到 dock 即停机） |
+
+### 14.6 弹头 × 装甲矩阵
+
+原版 `WarheadRules` 把 `Verses` 解析成 11 列数组，`Warhead.ts:305` 做
+`damage *= verses.get(armorType)`；`AttackTrait.checkArmor()` 在 `100 * verse <= 1` 时
+**直接不把该目标纳入候选**。
+
+落地为 `VERSES`（3 弹头族 × 9 装甲列）+ `verseMul()` + `canHurt()`：
+步枪打混凝土核心 0.04×（几乎无伤，且不会再傻站着打），
+AP 弹对步兵 0.35×、HE 对空 0.15× —— 兵种搭配第一次真正有意义。
+建筑按体量分 `wood/steel/concrete`（size ≥4 / ≥3 / 其余），对应原版用墙体材质区分装甲。
+
+### 14.7 回归
+
+```
+pathprobe   漏判 0 / 400 组        平均绕行 0.56×
+pathsim     停滞 0 / 62（修前 37）  到达 54，就近停靠 8（CloseEnough）
+maptest     21/21                 3 张手工图 × 7 项
+movetest    18/18   phystest 10/10   harvesttest 6/6
+speedtest   12/12   inputtest 20/20  menutest 9/9   assettest 20/20
+battletest  6 分钟：收入 22677 / AI 9224 / 0 报错
+```

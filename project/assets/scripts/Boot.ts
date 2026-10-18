@@ -143,9 +143,11 @@ export class RiftApp extends Component {
         this.ui.showMenu();
 
         // dev hook: ?auto=1 jumps straight into a match (used by the smoke test)
+        //           ?auto=1&map=mesa also picks the map (used by tools/maptest.mjs)
         const search = typeof location !== 'undefined' && location.search ? location.search : '';
         if (search.indexOf('auto=1') >= 0) {
-            this.startGame('BU', 'normal', 4200, true);
+            const m = /[?&]map=([\w-]+)/.exec(search);
+            this.startGame('BU', 'normal', 4200, true, m ? m[1] : 'basin');
         }
     }
 

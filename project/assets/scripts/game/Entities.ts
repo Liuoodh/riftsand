@@ -52,9 +52,24 @@ export function setWorldBlocked(fn: ((x: number, y: number, r: number) => boolea
  * map, and what stops enemies walking through each other.
  */
 let unitBlockedFn: ((u: Unit, x: number, y: number) => boolean) | null = null;
+/** cell-capacity test only, no interpenetration — the reference canStopAtTile */
+let roomFn: ((u: Unit, x: number, y: number) => boolean) | null = null;
 
 export function setUnitBlocked(fn: ((u: Unit, x: number, y: number) => boolean) | null) {
     unitBlockedFn = fn;
+}
+
+/**
+ * Injected "does this cell have room for me" test.
+ *
+ * Needed by the CloseEnough rule: when the final waypoint sits in a cell that is
+ * already full, the order must complete with the unit standing next to it
+ * (reference: MoveTask.canStopAtTile fails → isCloseEnoughToDest → MoveResult.
+ * CloseEnough). Without it the unit slides along the neighbour's edge forever at
+ * full speed — full throttle, zero net movement.
+ */
+export function setRoomCheck(fn: ((u: Unit, x: number, y: number) => boolean) | null) {
+    roomFn = fn;
 }
 
 export class Entity {
@@ -125,6 +140,8 @@ export class Unit extends Entity {
     blockTy = -1;
     /** >0 means "do not ask for a new path" (avoids oscillating on failure) */
     repathHold = 0;
+    /** how long a live move order has had an empty path (engine watchdog) */
+    stallT = 0;
     /** >0 while this unit is moving aside for someone else */
     asideT = 0;
     /** cached "engaged" target for attack-move */
@@ -260,11 +277,13 @@ export class Unit extends Entity {
             this.speedCur = 0;
             this.vx = 0;
             this.vy = 0;
+            this.blockedNow = false;
             return this.path.length > 0;
         }
         if (this.path.length === 0) {
             this.speedCur = Math.max(0, this.speedCur - this.accel * dt);
             this.vx = 0; this.vy = 0;
+            this.blockedNow = false;
             return false;
         }
         const wp = this.path[0];
@@ -273,6 +292,9 @@ export class Unit extends Entity {
         const d = Math.hypot(dx, dy);
         if (d < 3) {
             this.path.shift();
+            // reaching a waypoint resets the planning counter (reference:
+            // inPlanningForTicks is cleared on ReachedNextWaypoint)
+            this.blockedNow = false;
             return this.path.length > 0;
         }
 
@@ -280,6 +302,25 @@ export class Unit extends Entity {
         let diff = desired - this.face;
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;
+
+        /*
+         * CloseEnough: the last waypoint is a cell that is already full.
+         *
+         * Three riflemen can share a cell, the fourth cannot. Five men ordered to
+         * one point put two of them against a neighbour's edge, where they keep
+         * full speed and gain nothing — measured as a permanent stall with
+         * `blockT == 0` because every tick technically moved them a fraction of
+         * a pixel along the free axis. The retail engine ends the order here
+         * (canStopAtTile → CloseEnough), so the unit parks beside the crowd.
+         */
+        if (this.path.length === 1 && d < TILE * 1.5 && roomFn && !roomFn(this, wp.x, wp.y)) {
+            this.path.length = 0;
+            this.speedCur = 0;
+            this.vx = 0;
+            this.vy = 0;
+            this.blockedNow = false;
+            return false;
+        }
 
         // Reference behaviour: a hull must face its path before it drives
         // (DriveLocomotor returns a TurnTask and zero velocity otherwise).
@@ -299,6 +340,12 @@ export class Unit extends Entity {
                 this.speedCur = Math.max(0, this.speedCur - this.accel * 2 * dt);
                 this.vx = 0;
                 this.vy = 0;
+                /*
+                 * Turning is not being blocked. Leaving the flag untouched let a
+                 * stale `true` from the previous tick survive a long turn, which
+                 * fed the blocked-unit chain and cancelled perfectly good orders.
+                 */
+                this.blockedNow = false;
                 return true;
             }
         }
@@ -456,7 +503,14 @@ export class Building extends Entity {
         this.progress = progress;
         this.hp = def.hp * (progress >= 1 ? 1 : Math.max(0.12, progress));
         this.maxHp = def.hp;
-        this.armor = 'building';
+        /*
+         * Structure armour class by bulk, mirroring the retail rules where
+         * walls are ArmorType.Concrete, big tech buildings Steel and light
+         * structures Wood. Small arms bounce off a 4x4 command core (0.04x) while
+         * high explosive still hurts it (0.55x) — which is what makes artillery
+         * and bombing runs the answer to a turtled base instead of riflemen.
+         */
+        this.armor = def.size >= 4 ? 'concrete' : def.size >= 3 ? 'steel' : 'wood';
         this.x = tx * TILE + (def.size * TILE) / 2 - HALF;
         this.y = ty * TILE + (def.size * TILE) / 2 - HALF;
     }

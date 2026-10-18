@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>裂沙战线 · 地图编辑器</title>
+<style>
+  :root {
+    --bg: #0e1216; --panel: #151b21; --line: #26313b; --text: #d6e0e8;
+    --dim: #7d8d9b; --cyan: #4fd0e0; --amber: #d9a13f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex; height: 100vh; overflow: hidden;
+  }
+  #side { width: 288px; flex: none; background: var(--panel); border-right: 1px solid var(--line);
+          padding: 14px; overflow-y: auto; }
+  #main { flex: 1; position: relative; overflow: hidden; }
+  canvas { display: block; }
+  h1 { font-size: 15px; letter-spacing: 2px; margin: 0 0 2px; color: var(--cyan); font-weight: 600; }
+  .sub { color: var(--dim); font-size: 11px; margin-bottom: 14px; }
+  h2 { font-size: 11px; letter-spacing: 1.5px; color: var(--dim); margin: 16px 0 8px;
+       text-transform: uppercase; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; }
+  button {
+    background: #1d262f; color: var(--text); border: 1px solid var(--line);
+    border-radius: 4px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover { border-color: var(--cyan); }
+  button.on { background: #1f3b42; border-color: var(--cyan); color: var(--cyan); }
+  button.wide { width: 100%; margin-top: 6px; }
+  .sw { width: 100%; display: flex; align-items: center; gap: 8px; justify-content: flex-start;
+        padding: 6px 8px; }
+  .dot { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #0006; flex: none; }
+  label { font-size: 11px; color: var(--dim); display: block; margin: 8px 0 4px; }
+  input[type=text], input[type=number] {
+    width: 100%; background: #0f151a; color: var(--text); border: 1px solid var(--line);
+    border-radius: 4px; padding: 5px 7px; font-family: inherit; font-size: 12px;
+  }
+  #stats { font-size: 11px; color: var(--dim); white-space: pre-wrap; line-height: 1.6; }
+  #warn { font-size: 11px; color: #e0736a; white-space: pre-wrap; margin-top: 6px; }
+  #hint { position: absolute; left: 12px; bottom: 10px; font-size: 11px; color: var(--dim);
+          background: #0e1216cc; padding: 6px 10px; border-radius: 4px; border: 1px solid var(--line); }
+  #zoom { position: absolute; right: 12px; bottom: 10px; display: flex; gap: 6px; align-items: center;
+          background: #0e1216cc; padding: 6px 8px; border-radius: 4px; border: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<div id="side">
+  <h1>裂沙战线 · 地图编辑器</h1>
+  <div class="sub">paint → export JSON → node tools/mapbuild.mjs</div>
+
+  <h2>地形（左键涂，右键清除）</h2>
+  <div class="row" id="landPalette"></div>
+
+  <h2>高度层</h2>
+  <div class="row" id="heightPalette"></div>
+
+  <h2>笔刷</h2>
+  <div class="row" id="brushRow"></div>
+
+  <h2>标记</h2>
+  <div class="row">
+    <button id="toolOre">矿点</button>
+    <button id="toolSpawn0">出生点 P0</button>
+    <button id="toolSpawn1">出生点 P1</button>
+  </div>
+
+  <h2>地图信息</h2>
+  <label>id（文件名，英文）</label>
+  <input type="text" id="mId" value="new-map">
+  <label>名称</label>
+  <input type="text" id="mName" value="新地图">
+  <label>英文名</label>
+  <input type="text" id="mEn" value="NEW MAP">
+  <label>设计说明</label>
+  <input type="text" id="mNote" value="">
+
+  <h2>文件</h2>
+  <button class="wide" id="btnImport">导入 JSON…</button>
+  <button class="wide" id="btnExport">导出 JSON</button>
+  <button class="wide" id="btnNew">清空重画</button>
+  <input type="file" id="file" accept=".json" hidden>
+
+  <h2>状态</h2>
+  <div id="stats"></div>
+  <div id="warn"></div>
+</div>
+
+<div id="main">
+  <canvas id="cv"></canvas>
+  <div id="hint">左键绘制 · 右键擦除 · 滚轮缩放 · 空格/中键拖动</div>
+  <div id="zoom"><button id="zOut">−</button><span id="zLbl">8px</span><button id="zIn">+</button></div>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ */
+/* format — must stay in sync with world/MapData.ts and tools/mapbuild  */
+/* ------------------------------------------------------------------ */
+const N = 80;
+const LAND = { clear: 0, rough: 1, road: 2, ore: 3, water: 4, rock: 5 };
+const LAND_STYLE = [
+  { id: 0, name: '平地 clear', hex: '#c8a878' },
+  { id: 1, name: '沙丘 rough', hex: '#b0906a' },
+  { id: 2, name: '道路 road', hex: '#9a8266' },
+  { id: 3, name: '矿脉 ore', hex: '#8a9459' },
+  { id: 4, name: '水 water', hex: '#3c6b78' },
+  { id: 5, name: '岩石 rock', hex: '#6b6258' },
+];
+
+function pack(values) {
+  const data = [];
+  let cur = values[0], run = 0;
+  for (let i = 0; i < values.length; i++) {
+    if (values[i] === cur) { run++; continue; }
+    data.push(cur, run); cur = values[i]; run = 1;
+  }
+  data.push(cur, run);
+  return { enc: 'rle', n: values.length, data };
+}
+function unpack(p, out) {
+  let at = 0;
+  for (let i = 0; i < p.data.length; i += 2) {
+    const v = p.data[i], n = p.data[i + 1];
+    for (let k = 0; k < n && at < out.length; k++) out[at++] = v;
+  }
+  return at;
+}
+
+/* ------------------------------------------------------------------ */
+/* state                                                              */
+/* ------------------------------------------------------------------ */
+let S = {
+  id: 'new-map', name: '新地图', en: 'NEW MAP', note: '',
+  land: new Uint8Array(N * N),
+  height: new Uint8Array(N * N),
+  tile: new Uint16Array(N * N),
+  blocked: new Uint8Array(N * N),
+  ore: [],
+  spawns: [{ tx: 12, ty: 40, player: 0 }, { tx: 67, ty: 39, player: 1 }],
+};
+let brush = { kind: 'land', land: 0, height: 0, size: 3 };
+let zoom = 8;            // pixels per cell
+let panX = 0, panY = 0;  // in pixels
+let undoStack = [];
+let showIso = false;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+
+function resize() {
+  const m = document.getElementById('main');
+  cv.width = m.clientWidth;
+  cv.height = m.clientHeight;
+  draw();
+}
+window.addEventListener('resize', resize);
+
+/* ------------------------------------------------------------------ */
+/* painting                                                           */
+/* ------------------------------------------------------------------ */
+function cellAt(px, py) {
+  const tx = Math.floor((px - panX) / zoom);
+  const ty = Math.floor((py - panY) / zoom);
+  if (tx < 0 || ty < 0 || tx >= N || ty >= N) return null;
+  return { tx, ty };
+}
+
+function snapshot() {
+  undoStack.push({
+    land: S.land.slice(), height: S.height.slice(),
+    tile: S.tile.slice(), blocked: S.blocked.slice(),
+    ore: S.ore.map((o) => ({ ...o })), spawns: S.spawns.map((s) => ({ ...s })),
+  });
+  if (undoStack.length > 24) undoStack.shift();
+}
+
+function paintAt(tx, ty, erase) {
+  const r = Math.floor(brush.size / 2);
+  for (let y = ty - r; y <= ty + r; y++) {
+    for (let x = tx - r; x <= tx + r; x++) {
+      if (x < 0 || y < 0 || x >= N || y >= N) continue;
+      const i = y * N + x;
+      if (erase) {
+        S.land[i] = LAND.clear; S.height[i] = 0; S.blocked[i] = 0; S.tile[i] = 0;
+        continue;
+      }
+      if (brush.kind === 'land') {
+        S.land[i] = brush.land;
+        S.tile[i] = brush.land * 4 + Math.floor(hash2(x, y) * 4);
+        if (brush.land === LAND.rock || brush.land === LAND.water) S.blocked[i] = 1;
+        else S.blocked[i] = 0;
+      } else if (brush.kind === 'height') {
+        S.height[i] = brush.height;
+      } else if (brush.kind === 'blocked') {
+        S.blocked[i] = erase ? 0 : 1;
+      }
+    }
+  }
+  refreshStats();
+  draw();
+}
+
+function hash2(x, y) {
+  let h = (x * 374761393 + y * 668265263) >>> 0;
+  h = (h ^ (h >>> 13)) * 1274126177;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+/* ------------------------------------------------------------------ */
+/* draw                                                               */
+/* ------------------------------------------------------------------ */
+function draw() {
+  ctx.fillStyle = '#0a0e12';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  const size = zoom;
+  for (let ty = 0; ty < N; ty++) {
+    for (let tx = 0; tx < N; tx++) {
+      const i = ty * N + tx;
+      const l = S.land[i];
+      const st = LAND_STYLE[l] || LAND_STYLE[0];
+      let c = st.hex;
+      // height shading so plateaus read immediately
+      const h = S.height[i];
+      if (h > 0) c = shade(c, 1 + h * 0.14);
+      if (S.blocked[i] && l !== LAND.rock && l !== LAND.water) c = '#5c5148';
+      ctx.fillStyle = c;
+      ctx.fillRect(panX + tx * size, panY + ty * size, size + 1, size + 1);
+    }
+  }
+
+  // grid
+  if (size >= 8) {
+    ctx.strokeStyle = '#00000030';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= N; x++) {
+      ctx.moveTo(panX + x * size, panY);
+      ctx.lineTo(panX + x * size, panY + N * size);
+    }
+    for (let y = 0; y <= N; y++) {
+      ctx.moveTo(panX, panY + y * size);
+      ctx.lineTo(panX + N * size, panY + y * size);
+    }
+    ctx.stroke();
+  }
+
+  // ore
+  for (const o of S.ore) {
+    ctx.fillStyle = '#b9c46b';
+    ctx.beginPath();
+    ctx.arc(panX + (o.tx + 0.5) * size, panY + (o.ty + 0.5) * size, Math.max(3, size * 0.45), 0, 7);
+    ctx.fill();
+  }
+
+  // spawns + base footprint ghost (7-radius apron the validator demands)
+  for (const s of S.spawns) {
+    const cx = panX + s.tx * size, cy = panY + s.ty * size;
+    ctx.strokeStyle = s.player === 0 ? '#4fd0e0' : '#e0736a';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(cx - 7 * size, cy - 7 * size, 14 * size, 14 * size);
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.max(4, size * 0.5), 0, 7);
+    ctx.fillStyle = s.player === 0 ? '#4fd0e0' : '#e0736a';
+    ctx.fill();
+  }
+}
+
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = Math.min(255, ((n >> 16) & 255) * f);
+  const g = Math.min(255, ((n >> 8) & 255) * f);
+  const b = Math.min(255, (n & 255) * f);
+  return `rgb(${r | 0},${g | 0},${b | 0})`;
+}
+
+/* ------------------------------------------------------------------ */
+/* input                                                              */
+/* ------------------------------------------------------------------ */
+let dragging = false, erasing = false, panning = false, spaceDown = false;
+let lastPan = null;
+
+cv.addEventListener('contextmenu', (e) => e.preventDefault());
+cv.addEventListener('mousedown', (e) => {
+  if (e.button === 1 || spaceDown) {
+    panning = true; lastPan = { x: e.offsetX, y: e.offsetY };
+    return;
+  }
+  const c = cellAt(e.offsetX, e.offsetY);
+  if (!c) return;
+  snapshot();
+  if (brush.kind === 'ore') {
+    S.ore.push({ tx: c.tx, ty: c.ty, amount: 4000 });
+    S.land[c.ty * N + c.tx] = LAND.ore;
+    refreshStats(); draw(); return;
+  }
+  if (brush.kind === 'spawn') {
+    const idx = brush.player;
+    S.spawns[idx] = { tx: c.tx, ty: c.ty, player: idx };
+    refreshStats(); draw(); return;
+  }
+  if (brush.kind === 'erase') {
+    // remove an ore marker under the cursor
+    S.ore = S.ore.filter((o) => Math.abs(o.tx - c.tx) > 1 || Math.abs(o.ty - c.ty) > 1);
+    refreshStats(); draw(); return;
+  }
+  dragging = true;
+  erasing = e.button === 2;
+  paintAt(c.tx, c.ty, erasing);
+});
+cv.addEventListener('mousemove', (e) => {
+  if (panning && lastPan) {
+    panX += e.offsetX - lastPan.x;
+    panY += e.offsetY - lastPan.y;
+    lastPan = { x: e.offsetX, y: e.offsetY };
+    draw();
+    return;
+  }
+  if (!dragging) return;
+  const c = cellAt(e.offsetX, e.offsetY);
+  if (c) paintAt(c.tx, c.ty, erasing);
+});
+window.addEventListener('mouseup', () => { dragging = false; panning = false; lastPan = null; });
+cv.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const before = { x: e.offsetX, y: e.offsetY };
+  const c = { tx: (before.x - panX) / zoom, ty: (before.y - panY) / zoom };
+  zoom = Math.max(3, Math.min(28, zoom + (e.deltaY < 0 ? 1 : -1)));
+  panX = before.x - c.tx * zoom;
+  panY = before.y - c.ty * zoom;
+  document.getElementById('zLbl').textContent = zoom + 'px';
+  draw();
+});
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') { spaceDown = true; e.preventDefault(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+    const s = undoStack.pop();
+    if (s) { S.land = s.land; S.height = s.height; S.tile = s.tile; S.blocked = s.blocked; S.ore = s.ore; S.spawns = s.spawns; refreshStats(); draw(); }
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', (e) => { if (e.code === 'Space') spaceDown = false; });
+
+/* ------------------------------------------------------------------ */
+/* palette                                                            */
+/* ------------------------------------------------------------------ */
+const landBox = document.getElementById('landPalette');
+for (const st of LAND_STYLE) {
+  const b = document.createElement('button');
+  b.className = 'sw';
+  b.innerHTML = `<span class="dot" style="background:${st.hex}"></span>${st.name}`;
+  b.onclick = () => { brush = { ...brush, kind: 'land', land: st.id }; syncPalette(); };
+  b.dataset.land = st.id;
+  landBox.appendChild(b);
+}
+
+const hBox = document.getElementById('heightPalette');
+for (let h = 0; h <= 3; h++) {
+  const b = document.createElement('button');
+  b.textContent = h === 0 ? '0 平地' : h === 3 ? '3 高台' : String(h);
+  b.onclick = () => { brush = { ...brush, kind: 'height', height: h }; syncPalette(); };
+  b.dataset.height = h;
+  hBox.appendChild(b);
+}
+
+const brushRow = document.getElementById('brushRow');
+for (const s of [1, 3, 5, 9]) {
+  const b = document.createElement('button');
+  b.textContent = s + '×' + s;
+  b.onclick = () => { brush = { ...brush, size: s }; syncPalette(); };
+  b.dataset.size = s;
+  brushRow.appendChild(b);
+}
+
+document.getElementById('toolOre').onclick = () => { brush = { ...brush, kind: 'ore' }; syncPalette(); };
+document.getElementById('toolSpawn0').onclick = () => { brush = { ...brush, kind: 'spawn', player: 0 }; syncPalette(); };
+document.getElementById('toolSpawn1').onclick = () => { brush = { ...brush, kind: 'spawn', player: 1 }; syncPalette(); };
+
+function syncPalette() {
+  [...landBox.children].forEach((b) => b.classList.toggle('on', brush.kind === 'land' && +b.dataset.land === brush.land));
+  [...hBox.children].forEach((b) => b.classList.toggle('on', brush.kind === 'height' && +b.dataset.height === brush.height));
+  [...brushRow.children].forEach((b) => b.classList.toggle('on', +b.dataset.size === brush.size));
+  document.getElementById('toolOre').classList.toggle('on', brush.kind === 'ore');
+  document.getElementById('toolSpawn0').classList.toggle('on', brush.kind === 'spawn' && brush.player === 0);
+  document.getElementById('toolSpawn1').classList.toggle('on', brush.kind === 'spawn' && brush.player === 1);
+}
+
+/* ------------------------------------------------------------------ */
+/* stats + validation                                                 */
+/* ------------------------------------------------------------------ */
+function refreshStats() {
+  const c = { clear: 0, rough: 0, road: 0, ore: 0, water: 0, rock: 0 };
+  for (let i = 0; i < S.land.length; i++) {
+    const k = S.land[i];
+    c[['clear', 'rough', 'road', 'ore', 'water', 'rock'][k]]++;
+  }
+  const playable = N * N - c.rock - c.water;
+  document.getElementById('stats').textContent =
+    `平地 ${c.clear} · 沙丘 ${c.rough} · 道路 ${c.road}\n` +
+    `岩石 ${c.rock} · 水域 ${c.water} · 可通行 ${((playable / (N * N)) * 100).toFixed(0)}%\n` +
+    `矿点 ${S.ore.length} · 矿量 ${S.ore.reduce((s, o) => s + o.amount, 0)}`;
+
+  const warn = [];
+  if (playable < N * N * 0.25) warn.push('可通行区域不足 25%');
+  if (!S.ore.length) warn.push('还没有矿点');
+  for (const s of S.spawns) {
+    let blocked = 0;
+    for (let y = s.ty - 7; y <= s.ty + 7; y++) {
+      for (let x = s.tx - 7; x <= s.tx + 7; x++) {
+        if (x < 0 || y < 0 || x >= N || y >= N) { blocked++; continue; }
+        const i = y * N + x;
+        if (S.land[i] === LAND.rock || S.land[i] === LAND.water) blocked++;
+      }
+    }
+    if (blocked) warn.push(`P${s.player} 基地 7 格内还有 ${blocked} 个阻挡格`);
+    if (S.height[s.ty * N + s.tx] !== 0) warn.push(`P${s.player} 出生点不在 0 层`);
+  }
+  document.getElementById('warn').textContent = warn.join('\n');
+}
+
+/* ------------------------------------------------------------------ */
+/* file io                                                            */
+/* ------------------------------------------------------------------ */
+document.getElementById('btnExport').onclick = () => {
+  const doc = {
+    format: 1,
+    id: document.getElementById('mId').value.trim() || 'new-map',
+    name: document.getElementById('mName').value.trim() || '新地图',
+    en: document.getElementById('mEn').value.trim() || 'NEW MAP',
+    theater: 'desert',
+    note: document.getElementById('mNote').value.trim(),
+    size: N,
+    land: pack(S.land),
+    height: pack(S.height),
+    tiles: pack(S.tile),
+    blocked: pack(S.blocked),
+    ore: S.ore,
+    spawns: S.spawns,
+  };
+  const blob = new Blob([JSON.stringify(doc)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = doc.id + '.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+document.getElementById('btnImport').onclick = () => document.getElementById('file').click();
+document.getElementById('file').onchange = (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const fr = new FileReader();
+  fr.onload = () => {
+    try {
+      const d = JSON.parse(fr.result);
+      S.land.fill(0); S.height.fill(0); S.tile.fill(0); S.blocked.fill(0);
+      unpack(d.land, S.land);
+      if (d.height) unpack(d.height, S.height);
+      if (d.tiles) unpack(d.tiles, S.tile);
+      if (d.blocked) unpack(d.blocked, S.blocked);
+      S.ore = d.ore || [];
+      S.spawns = d.spawns || S.spawns;
+      document.getElementById('mId').value = d.id || 'new-map';
+      document.getElementById('mName').value = d.name || '';
+      document.getElementById('mEn').value = d.en || '';
+      document.getElementById('mNote').value = d.note || '';
+      refreshStats(); draw();
+    } catch (err) {
+      alert('读取失败: ' + err.message);
+    }
+  };
+  fr.readAsText(f);
+};
+
+document.getElementById('btnNew').onclick = () => {
+  if (!confirm('清空当前地图？')) return;
+  snapshot();
+  S.land.fill(LAND.clear); S.height.fill(0); S.tile.fill(0); S.blocked.fill(0);
+  S.ore = [];
+  refreshStats(); draw();
+};
+
+document.getElementById('zIn').onclick = () => { zoom = Math.min(28, zoom + 2); document.getElementById('zLbl').textContent = zoom + 'px'; draw(); };
+document.getElementById('zOut').onclick = () => { zoom = Math.max(3, zoom - 2); document.getElementById('zLbl').textContent = zoom + 'px'; draw(); };
+
+/* boot */
+resize();
+panX = (cv.width - N * zoom) / 2;
+panY = (cv.height - N * zoom) / 2;
+refreshStats();
+syncPalette();
+draw();
+void showIso;
+
+/* optional: ?map=../../assets/maps/mesa.json opens that map on start */
+const qs = new URLSearchParams(location.search);
+const openPath = qs.get('map');
+if (openPath) {
+  fetch(openPath).then((r) => r.json()).then((d) => {
+    S.land.fill(0); S.height.fill(0); S.tile.fill(0); S.blocked.fill(0);
+    unpack(d.land, S.land);
+    if (d.height) unpack(d.height, S.height);
+    if (d.tiles) unpack(d.tiles, S.tile);
+    if (d.blocked) unpack(d.blocked, S.blocked);
+    S.ore = d.ore || [];
+    S.spawns = d.spawns || S.spawns;
+    document.getElementById('mId').value = d.id || '';
+    document.getElementById('mName').value = d.name || '';
+    document.getElementById('mEn').value = d.en || '';
+    document.getElementById('mNote').value = d.note || '';
+    refreshStats(); draw();
+  }).catch((e) => { document.getElementById('warn').textContent = '打开失败: ' + e.message; });
+}
+</script>
+</body>
+</html>

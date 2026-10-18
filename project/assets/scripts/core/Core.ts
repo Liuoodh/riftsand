@@ -6,7 +6,16 @@
 import { Color } from 'cc';
 
 export type Faction = 'BU' | 'DS';
-export type Armor = 'light' | 'heavy' | 'air' | 'building';
+/**
+ * Armour classes, following the retail ArmorType table (game/type/ArmorType.ts):
+ *   none / flak   infantry
+ *   light / medium / heavy   vehicles by weight
+ *   wood / steel / concrete  structures by bulk
+ *   air           aircraft (our own addition; the retail rules keep aircraft on
+ *                 the same classes but every AA weapon carries its own verses)
+ */
+export type Armor = 'none' | 'flak' | 'light' | 'medium' | 'heavy' | 'wood' | 'steel' | 'concrete' | 'air';
+/** warhead families; `type` on a weapon picks a row of VERSES */
 export type DmgType = 'small' | 'ap' | 'explosive';
 export type ProjKind = 'bullet' | 'shell' | 'rocket' | 'bomb';
 
@@ -155,6 +164,12 @@ export interface MapDef {
     en: string;
     /** one-line trait shown on the setup screen */
     trait: string;
+    /**
+     * Authored map id (see world/Maps.ts). When set, the map is loaded from
+     * assets/maps/<data>.json and every generator field below is ignored — the
+     * hand-drawn layout is authoritative.
+     */
+    data?: string;
     seed: number;
     /** noise threshold above which a cell is rock (higher = fewer rocks) */
     rocks: number;
@@ -174,7 +189,7 @@ export interface MapDef {
 export const MAPS: MapDef[] = [
     {
         id: 'basin', name: '沙海盆地', en: 'SAND BASIN',
-        trait: '标准地貌 · 中场开阔', seed: 90210,
+        trait: '随机 · 标准地貌 · 中场开阔', seed: 90210,
         rocks: 0.715, dunes: 0.575, lane: 1, ore: 1,
     },
     {
@@ -196,6 +211,22 @@ export const MAPS: MapDef[] = [
         id: 'flats', name: '盐碱平原', en: 'SALT FLATS',
         trait: '一马平川 · 无险可守', seed: 12899,
         rocks: 0.845, dunes: 0.665, lane: 3, ore: 0.85,
+    },
+    /* ---- authored maps (assets/maps/*.json, see docs/MAP-GUIDE.md) ---- */
+    {
+        id: 'twin-gates', name: '双峡口', en: 'TWIN GATES',
+        trait: '手工 · 南北岩脊 · 两条隘口', data: 'twin-gates',
+        seed: 1, rocks: 0, dunes: 0, lane: 0, ore: 1,
+    },
+    {
+        id: 'ring-lake', name: '环湖', en: 'RING LAKE',
+        trait: '手工 · 中央水域 · 环形通路', data: 'ring-lake',
+        seed: 2, rocks: 0, dunes: 0, lane: 0, ore: 1,
+    },
+    {
+        id: 'mesa', name: '台地', en: 'MESA',
+        trait: '手工 · 中央高地 · 三条坡道', data: 'mesa',
+        seed: 3, rocks: 0, dunes: 0, lane: 0, ore: 1,
     },
 ];
 
@@ -283,11 +314,65 @@ export const unitCategory = (d: UnitDef): ProdCat =>
 /* ------------------------------------------------------------------ */
 /* Damage matrix                                                       */
 /* ------------------------------------------------------------------ */
-export const DMG_TABLE: Record<DmgType, Record<Armor, number>> = {
-    small: { light: 0.75, heavy: 0.28, air: 0.55, building: 0.25 },
-    ap: { light: 0.85, heavy: 1.00, air: 0.40, building: 0.60 },
-    explosive: { light: 0.80, heavy: 0.70, air: 0.15, building: 0.95 },
+
+/**
+ * Warhead → armour multipliers (the retail `Verses=` table).
+ *
+ * Reference: WarheadRules parses `Verses` into an 11-entry array indexed by
+ * ArmorType, and `Warhead.ts:305` does `damage *= verses.get(armorType)`. Two
+ * properties of that table matter and were missing here:
+ *
+ *   1. **A column of zeroes is meaningful.** `AttackTrait.checkArmor()` returns
+ *      false when `100 * verse <= 1`, i.e. the attacker refuses to even pick a
+ *      target it cannot hurt. A rifle squad should not stand there shooting a
+ *      concrete bunker forever.
+ *   2. **Percent-at-max** (`percentAtMax`, default 1) scales splash damage at the
+ *      edge of the radius — see `splashDamage()` below.
+ *
+ * Columns marked `0` are hard counters: AP shells cannot scratch infantry, HE
+ * cannot touch aircraft. That asymmetry is what makes an army composition
+ * matter at all.
+ */
+export const VERSES: Record<DmgType, Record<Armor, number>> = {
+    // small arms: shreds infantry, useless against anything armoured
+    small: {
+        none: 1.00, flak: 1.00, light: 0.60, medium: 0.30, heavy: 0.25,
+        wood: 0.30, steel: 0.12, concrete: 0.04, air: 0.55,
+    },
+    // armour-piercing: the tank killer, deliberately cannot hit infantry
+    ap: {
+        none: 0.35, flak: 0.40, light: 0.85, medium: 1.00, heavy: 1.00,
+        wood: 0.55, steel: 0.45, concrete: 0.22, air: 0.40,
+    },
+    // high explosive: structures and crowds, weak on tanks and aircraft
+    explosive: {
+        none: 0.90, flak: 0.85, light: 0.80, medium: 0.85, heavy: 0.70,
+        wood: 0.95, steel: 0.75, concrete: 0.55, air: 0.15,
+    },
 };
+
+/** damage multiplier for one warhead against one armour class */
+export function verseMul(type: DmgType, armor: Armor): number {
+    return VERSES[type]?.[armor] ?? 1;
+}
+
+/**
+ * Can this warhead hurt that armour at all?
+ * Reference: `AttackTrait.checkArmor()` — `100 * verse > 1`.
+ */
+export function canHurt(type: DmgType, armor: Armor): boolean {
+    return 100 * verseMul(type, armor) > 1;
+}
+
+/**
+ * Splash falloff note.
+ *
+ * The reference keeps this on the warhead (`PercentAtMax`, default 1). We keep
+ * it on the projectile (`Projectile.falloff`) because the curve is a property of
+ * the shell here, and the existing `1 - (1-falloff) * d/r` already is the same
+ * linear decay. Nothing to change — just do not add a second falloff curve on
+ * top of it.
+ */
 
 /* ------------------------------------------------------------------ */
 /* Factions                                                            */
@@ -350,27 +435,27 @@ export const UNITS: Record<string, UnitDef> = {
     /* ---------------- BASTION UNION ---------------- */
     pebble: U({
         id: 'pebble', name: '石垒步枪兵', faction: 'BU', kind: 'infantry',
-        cost: 130, time: 4.5, hp: 120, armor: 'light', speed: 36, sight: 6, radius: 7,
+        cost: 130, time: 4.5, hp: 120, armor: 'flak', speed: 36, sight: 6, radius: 7,
         from: 'barracks', tech: 0,
         weapon: { dmg: 10, type: 'small', range: 118, cd: 0.75, proj: 'bullet' },
         desc: '廉价可靠的制式步兵，适合掩护与占点。',
     }),
     breaker: U({
         id: 'breaker', name: '破岩火箭兵', faction: 'BU', kind: 'infantry',
-        cost: 320, time: 8, hp: 105, armor: 'light', speed: 31, sight: 7, radius: 7,
+        cost: 320, time: 8, hp: 105, armor: 'flak', speed: 31, sight: 7, radius: 7,
         from: 'barracks', tech: 1,
         weapon: { dmg: 34, type: 'ap', range: 148, cd: 2.1, proj: 'rocket', antiAir: true },
         desc: '穿甲火箭，专治重型装甲，也能打下低空目标。',
     }),
     sapper: U({
         id: 'sapper', name: '战地工兵', faction: 'BU', kind: 'infantry',
-        cost: 480, time: 7.5, hp: 95, armor: 'light', speed: 40, sight: 6, radius: 7,
+        cost: 480, time: 7.5, hp: 95, armor: 'flak', speed: 40, sight: 6, radius: 7,
         from: 'barracks', tech: 0, engineer: true,
         desc: '潜入敌方建筑将其接管，用后即撤。对己方建筑使用可紧急抢修。',
     }),
     veil: U({
         id: 'veil', name: '帷幕潜行者', faction: 'BU', kind: 'infantry',
-        cost: 420, time: 8, hp: 100, armor: 'light', speed: 40, sight: 6, radius: 7,
+        cost: 420, time: 8, hp: 100, armor: 'flak', speed: 40, sight: 6, radius: 7,
         from: 'barracks', tech: 2, cloak: true,
         weapon: { dmg: 24, type: 'small', range: 104, cd: 0.95, proj: 'bullet' },
         desc: '光学迷彩步兵，开火前几乎无法被发现。需要探测器或警戒塔才能反制。',
@@ -391,7 +476,7 @@ export const UNITS: Record<string, UnitDef> = {
     }),
     mortar: U({
         id: 'mortar', name: '雷钵自行炮', faction: 'BU', kind: 'vehicle',
-        cost: 1100, time: 17, hp: 380, armor: 'light', speed: 32, sight: 7, radius: 13,
+        cost: 1100, time: 17, hp: 380, armor: 'medium', speed: 32, sight: 7, radius: 13,
         from: 'foundry', tech: 2,
         weapon: { dmg: 78, type: 'explosive', range: 330, cd: 3.4, splash: 52, proj: 'shell', ballistic: true },
         desc: '超远射程曲射火力，拆建筑与清兵一流，但非常脆弱。',
@@ -426,27 +511,27 @@ export const UNITS: Record<string, UnitDef> = {
     /* ---------------- DUNE SYNDICATE ---------------- */
     sandfly: U({
         id: 'sandfly', name: '沙蝇兵', faction: 'DS', kind: 'infantry',
-        cost: 105, time: 3.6, hp: 95, armor: 'light', speed: 42, sight: 6, radius: 7,
+        cost: 105, time: 3.6, hp: 95, armor: 'flak', speed: 42, sight: 6, radius: 7,
         from: 'tent', tech: 0,
         weapon: { dmg: 8, type: 'small', range: 108, cd: 0.6, proj: 'bullet' },
         desc: '便宜到可以当消耗品用的民兵，成群时非常难缠。',
     }),
     stinger: U({
         id: 'stinger', name: '刺针火箭兵', faction: 'DS', kind: 'infantry',
-        cost: 280, time: 7, hp: 88, armor: 'light', speed: 37, sight: 7, radius: 7,
+        cost: 280, time: 7, hp: 88, armor: 'flak', speed: 37, sight: 7, radius: 7,
         from: 'tent', tech: 1,
         weapon: { dmg: 30, type: 'ap', range: 156, cd: 1.9, proj: 'rocket', antiAir: true },
         desc: '轻便的反装甲火力，也能对空射击。',
     }),
     wire: U({
         id: 'wire', name: '拆解师', faction: 'DS', kind: 'infantry',
-        cost: 420, time: 6.5, hp: 85, armor: 'light', speed: 44, sight: 6, radius: 7,
+        cost: 420, time: 6.5, hp: 85, armor: 'flak', speed: 44, sight: 6, radius: 7,
         from: 'tent', tech: 0, engineer: true,
         desc: '擅长撬锁与接线，能把敌方建筑整套接管。',
     }),
     shade: U({
         id: 'shade', name: '沙影', faction: 'DS', kind: 'infantry',
-        cost: 380, time: 7, hp: 85, armor: 'light', speed: 46, sight: 6, radius: 7,
+        cost: 380, time: 7, hp: 85, armor: 'flak', speed: 46, sight: 6, radius: 7,
         from: 'tent', tech: 2, cloak: true,
         weapon: { dmg: 20, type: 'small', range: 96, cd: 0.8, proj: 'bullet' },
         desc: '沙蜥的潜行刺客，靠斗篷贴近后排，开火后才会暴露。',
@@ -467,7 +552,7 @@ export const UNITS: Record<string, UnitDef> = {
     }),
     squall: U({
         id: 'squall', name: '沙暴火箭车', faction: 'DS', kind: 'vehicle',
-        cost: 980, time: 16, hp: 300, armor: 'light', speed: 36, sight: 7, radius: 13,
+        cost: 980, time: 16, hp: 300, armor: 'medium', speed: 36, sight: 7, radius: 13,
         from: 'workshop', tech: 2,
         weapon: { dmg: 26, type: 'explosive', range: 340, cd: 3.2, splash: 58, proj: 'rocket', ballistic: true },
         desc: '多管齐射覆盖战场，对密集阵型极具威胁。',

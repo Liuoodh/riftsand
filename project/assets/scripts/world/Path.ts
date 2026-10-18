@@ -59,6 +59,18 @@ export interface PathOptions {
     radius?: number;
     /** hard cap on expanded nodes, keeps a frame from stalling */
     maxNodes?: number;
+    /**
+     * Return the closest reached cell when the goal is unreachable.
+     *
+     * Off by default. The old build always had it on, so "unreachable" came back
+     * as a perfectly valid-looking short path and every caller had to re-check
+     * the endpoint distance. The reference pathfinder takes the same flag
+     * (`PathFinderOptions.bestEffort`, PathFinder.ts:31) and its move task runs
+     * with it **off** — an empty result is what increments
+     * `unreachableTargets`. Callers that legitimately want "walk as close as
+     * you can" (relocation) ask for it explicitly.
+     */
+    bestEffort?: boolean;
 }
 
 export class PathFinder {
@@ -71,6 +83,20 @@ export class PathFinder {
     private blocked: (tx: number, ty: number) => boolean;
     private cost: (tx: number, ty: number) => number;
 
+    /**
+     * Diagnostics for the last query.
+     *
+     * `lastGoal` is the endpoint the search actually aimed at: when the clicked
+     * cell is solid (a rock, a building footprint) the query is re-aimed at the
+     * nearest standable cell, and callers must compare their arrival test
+     * against *that* point, not against the pixel the player tapped. Comparing
+     * against the tapped point rejected perfectly good routes whenever the
+     * snap was more than a tile away.
+     */
+    lastGoal = { x: 0, y: 0 };
+    lastFound = false;
+    lastExpanded = 0;
+
     constructor(blocked: (tx: number, ty: number) => boolean, cost?: (tx: number, ty: number) => number) {
         this.blocked = blocked;
         this.cost = cost || (() => 1);
@@ -79,9 +105,35 @@ export class PathFinder {
     /** Returns world-space waypoints (excluding the start), or null. */
     find(sx: number, sy: number, gx: number, gy: number, opts: PathOptions = {}): Array<{ x: number; y: number }> | null {
         const radius = opts.radius || 0;
-        const maxNodes = opts.maxNodes || 5200;
-        const stx = Math.floor((sx + HALF) / TILE);
-        const sty = Math.floor((sy + HALF) / TILE);
+        /*
+         * The cap must never be the reason a visible road is declared missing.
+         *
+         * 80x80 is 6400 cells; the old 5200 cap truncated long searches (the
+         * terrain cost weights make the heuristic optimistic, so A* expands a
+         * lot of the map before it commits). A truncated search returned a
+         * best-effort path that stopped hundreds of pixels short, the caller's
+         * endpoint check rejected it, and the player saw "无法抵达目标" while a
+         * road was plainly there. 20000 cannot be hit by this map size.
+         */
+        const maxNodes = opts.maxNodes || 20000;
+        const stx0 = Math.floor((sx + HALF) / TILE);
+        const sty0 = Math.floor((sy + HALF) / TILE);
+        /*
+         * Start cells can be occupied too.
+         *
+         * A hull squeezed into a wall (or a path query made from a tile a
+         * structure now covers) has no passable neighbour, so the search expands
+         * nothing and reports "unreachable" for the whole map. Snapping the
+         * origin to the nearest standable cell keeps the query meaningful; the
+         * caller still walks from its real position, and the rescue pass
+         * (`resolveWorldCollision`) is what actually frees a wedged unit.
+         */
+        let stx = stx0, sty = sty0;
+        if (stx >= 0 && sty >= 0 && stx < N && sty < N && !this.clear(stx, sty, radius)) {
+            const near = this.nearestFree(stx, sty, radius);
+            if (!near) { this.lastFound = false; return null; }
+            stx = near.tx; sty = near.ty;
+        }
         let gtx = Math.floor((gx + HALF) / TILE);
         let gty = Math.floor((gy + HALF) / TILE);
         if (stx < 0 || sty < 0 || stx >= N || sty >= N) return null;
@@ -89,15 +141,23 @@ export class PathFinder {
         gty = Math.max(0, Math.min(N - 1, gty));
 
         // walk out of an occupied cell so units never freeze inside each other
+        let snapped = false;
         if (!this.clear(gtx, gty, radius)) {
             const alt = this.nearestFree(gtx, gty, radius);
-            if (!alt) return null;
+            if (!alt) { this.lastFound = false; return null; }
+            snapped = alt.tx !== gtx || alt.ty !== gty;
             gtx = alt.tx; gty = alt.ty;
         }
+        this.lastGoal = snapped
+            ? { x: gtx * TILE + TILE / 2 - HALF, y: gty * TILE + TILE / 2 - HALF }
+            : { x: gx, y: gy };
+        this.lastFound = false;
+        this.lastExpanded = 0;
 
         const startId = sty * N + stx;
         const goalId = gty * N + gtx;
         if (startId === goalId) {
+            this.lastFound = true;
             return [{ x: gx, y: gy }];
         }
 
@@ -167,8 +227,11 @@ export class PathFinder {
         }
 
         // unreachable goal: head for the closest cell we actually reached
+        this.lastExpanded = expanded;
+        if (!found && !opts.bestEffort) return null;
         const endId = found ? goalId : bestId;
         if (endId === startId) return null;
+        this.lastFound = found;
 
         const cells: number[] = [];
         let c = endId;
@@ -185,7 +248,7 @@ export class PathFinder {
             pts.push({ x: tx * TILE + TILE / 2 - HALF, y: ty * TILE + TILE / 2 - HALF });
         }
         if (pts.length === 0) pts.push({ x: gx, y: gy });
-        else if (found) pts[pts.length - 1] = { x: gx, y: gy };
+        else if (found) pts[pts.length - 1] = { x: this.lastGoal.x, y: this.lastGoal.y };
 
         /*
          * Smoothing uses a wider clearance than the A* nodes.
@@ -196,6 +259,86 @@ export class PathFinder {
          * corner and stood there forever (the "ordered a reachable point, cannot
          * get there" symptom). Padding the line test keeps a real margin.
          */
+        return this.smooth(sx, sy, pts, radius + TILE * 0.32);
+    }
+
+    /**
+     * Nearest *reachable* cell to a goal, with a path to it.
+     *
+     * This is the reference's `MoveTask.findRelocationTile` / `updateTarget`:
+     * when the destination itself cannot be reached, the move task does not give
+     * up — it retargets the order at the closest tile it can actually stand on.
+     *
+     * The old code did the same thing with `findFreeNear`, which only checked
+     * "is this cell free?", never "can I get there from here?". A free cell on
+     * the far side of a wall won? then produced a null path, the unit was left
+     * with an empty path and a live order, and it stood still forever without
+     * ever reporting failure.
+     */
+    relocate(sx: number, sy: number, gx: number, gy: number, opts: PathOptions = {}): Array<{ x: number; y: number }> | null {
+        const radius = opts.radius || 0;
+        const stx = Math.floor((sx + HALF) / TILE);
+        const sty = Math.floor((sy + HALF) / TILE);
+        if (stx < 0 || sty < 0 || stx >= N || sty >= N) return null;
+        const gtx = Math.max(0, Math.min(N - 1, Math.floor((gx + HALF) / TILE)));
+        const gty = Math.max(0, Math.min(N - 1, Math.floor((gy + HALF) / TILE)));
+
+        const run = ++this.run;
+        const startId = sty * N + stx;
+        const queue = new Int32Array(N * N);
+        let head = 0, tail = 0;
+        this.stamp[startId] = run;
+        this.came[startId] = -1;
+        queue[tail++] = startId;
+
+        const goalWX = gtx * TILE + TILE / 2 - HALF;
+        const goalWY = gty * TILE + TILE / 2 - HALF;
+        let bestId = startId;
+        let bestD = Math.hypot(goalWX - sx, goalWY - sy) + 1e-6;
+
+        while (head < tail) {
+            const cur = queue[head++];
+            const cx = cur % N, cy = (cur / N) | 0;
+            for (let i = 0; i < 8; i++) {
+                const dx = DIRS[i][0], dy = DIRS[i][1];
+                const nx = cx + dx, ny = cy + dy;
+                if (nx < 0 || ny < 0 || nx >= N || ny >= N) continue;
+                const nid = ny * N + nx;
+                if (this.stamp[nid] === run) continue;
+                if (!this.clear(nx, ny, radius)) continue;
+                if (dx !== 0 && dy !== 0) {
+                    if (this.blocked(cx + dx, cy) || this.blocked(cx, cy + dy)) continue;
+                }
+                this.stamp[nid] = run;
+                this.came[nid] = cur;
+                queue[tail++] = nid;
+                const wx = nx * TILE + TILE / 2 - HALF;
+                const wy = ny * TILE + TILE / 2 - HALF;
+                const d = Math.hypot(wx - goalWX, wy - goalWY);
+                if (d < bestD) { bestD = d; bestId = nid; }
+            }
+        }
+
+        this.lastFound = bestId !== startId;
+        this.lastExpanded = tail;
+        this.lastGoal = {
+            x: (bestId % N) * TILE + TILE / 2 - HALF,
+            y: ((bestId / N) | 0) * TILE + TILE / 2 - HALF,
+        };
+        if (bestId === startId) return null;
+
+        const cells: number[] = [];
+        let c = bestId;
+        while (c !== -1 && c !== startId) {
+            cells.push(c);
+            c = this.came[c];
+        }
+        if (!cells.length) return null;
+        cells.reverse();
+        const pts = cells.map((id) => ({
+            x: (id % N) * TILE + TILE / 2 - HALF,
+            y: ((id / N) | 0) * TILE + TILE / 2 - HALF,
+        }));
         return this.smooth(sx, sy, pts, radius + TILE * 0.32);
     }
 

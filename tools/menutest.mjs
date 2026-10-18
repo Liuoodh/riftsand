@@ -47,8 +47,10 @@ const before = await uiState();
 check('主菜单已显示', before.mode === 'menu', before.mode);
 check('菜单包含地图/颜色/阵营控件', before.btns >= 20, `${before.btns} 个可点控件`);
 
-/* ---------- map: click the 3rd chip (GREAT DUNES) ---------- */
-await page.mouse.click(640, 360 - 96);
+/* ---------- map: click the 3rd chip (GREAT DUNES, left column) ---------- */
+// the list wraps into two columns once authored maps exist, so the 3rd chip sits
+// at x = -84 (left column) instead of dead centre
+await page.mouse.click(640 - 84, 360 - 96);
 await new Promise((r) => setTimeout(r, 300));
 const afterMap = await uiState();
 check('点击可切换地图', afterMap.map === 'dunes', `${before.map} → ${afterMap.map}`);

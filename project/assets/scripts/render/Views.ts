@@ -179,11 +179,36 @@ export class TerrainView {
             col = shade('#8a9459', light * jitter);
         } else if (kind === TileKind.Rock) {
             col = shade(PAL.rock, light * jitter);
+        } else if (kind === TileKind.Water) {
+            // still water: flat, cool, no dune shading — reads instantly as a hole
+            col = shade('#3c6b78', 0.92 + slope * 0.05);
+        } else if (kind === TileKind.Road) {
+            // graded road: darker, flatter than sand so the lane is legible
+            col = shade('#9a8266', 0.94 + slope * 0.08);
         } else {
             // sand -> sunlit dune top, blended by actual elevation so there is
             // no visible seam where a dune starts
             const t = Math.max(0, Math.min(1, hAvg / 1.7));
             col = mixHex(PAL.sand, PAL.sandLight, t, light * jitter);
+        }
+
+        /*
+         * Authored-map palette variation.
+         *
+         * `terrain.tile` is the per-cell tileset id. Gameplay never reads it; until
+         * a real PNG/TMP tileset is wired in, its low bits nudge the shade so a
+         * painted map does not look like one flat sheet of sand. When the tileset
+         * lands, this is the single line to replace with a sprite lookup.
+         */
+        const tid = this.terrain.tile[ty * N + tx] || 0;
+        if (tid && kind !== TileKind.Water) {
+            const f = 1 + ((tid & 3) - 1.5) * 0.025;
+            col = new Color(
+                Math.max(0, Math.min(255, col.r * f)),
+                Math.max(0, Math.min(255, col.g * f)),
+                Math.max(0, Math.min(255, col.b * f)),
+                col.a,
+            );
         }
 
         // tiny inflation removes the anti-aliased hairline between diamonds
