@@ -138,7 +138,15 @@ const out = await page.evaluate(() => {
     let giveUp = 0;
     const origGiveUp = g.giveUpOrder ? g.giveUpOrder.bind(g) : null;
     if (origGiveUp) {
-        g.giveUpOrder = function (u, reason) { giveUp++; return origGiveUp(u, reason); };
+        window.__gv = [];
+        g.giveUpOrder = function (u, reason) {
+            giveUp++;
+            window.__gv.push({ id: u.id, reason, pt: u.parkTry,
+                px: Number.isNaN(u.parkX) ? null : Math.round(u.parkX),
+                py: Number.isNaN(u.parkY) ? null : Math.round(u.parkY),
+                x: Math.round(u.x), y: Math.round(u.y), left: u.path.length });
+            return origGiveUp(u, reason);
+        };
     }
     const col = [];
     for (let i = 0; i < 10; i++) {
@@ -152,7 +160,10 @@ const out = await page.evaluate(() => {
     const stuck = col.filter((u) => !u.dead && Math.hypot(u.x - dest.x, u.y - dest.y) > 90).length;
     const arrived = col.filter((u) => !u.dead && Math.hypot(u.x - dest.x, u.y - dest.y) <= 90).length;
     const stillMoving = col.filter((u) => !u.dead && u.path.length > 0).length;
-    const column = { giveUp, stuck, arrived, stillMoving, dist: col.map((u) => Math.round(Math.hypot(u.x - dest.x, u.y - dest.y))) };
+    const column = { giveUp, stuck, arrived, stillMoving,
+        dist: col.map((u) => Math.round(Math.hypot(u.x - dest.x, u.y - dest.y))),
+        park: col.map((u) => ({ pt: u.parkTry, px: Number.isNaN(u.parkX) ? null : Math.round(u.parkX), py: Number.isNaN(u.parkY) ? null : Math.round(u.parkY), o: u.order.k, left: u.path.length })),
+        gv: window.__gv };
     col.forEach(drop);
 
     return { straight, engage, column };

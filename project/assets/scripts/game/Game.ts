@@ -1435,6 +1435,8 @@ export class Game {
         u.blockT = 0;
         u.repathTry = 0;
         u.parkTry = 0;
+        u.parkX = NaN;
+        u.parkY = NaN;
         u.repathHold = 0;
         if (u.isAir) {
             u.path = [{ x, y }];
@@ -2824,6 +2826,75 @@ export class Game {
              */
             if (u.order.k === 'harvest') { u.blockT = 0; u.trafficT = 0; continue; }
 
+            /*
+             * CloseEnough: near the goal and down to the last leg.
+             *
+             * This is the single biggest cause of "the hull keeps swinging while
+             * it drives". A unit that has almost arrived, whose last waypoint is
+             * occupied by a friend, used to go round the whole blocked-unit
+             * chain: wait 0.35 s, re-plan a detour, drive 20 px the new way,
+             * get blocked again, re-plan again — measured as a hull changing
+             * heading by 90-140 degrees three times in four seconds, which the
+             * player reads as the body wobbling. Retail checks
+             * `isCloseEnoughToDest` before it ever considers a detour and simply
+             * parks; a crowd around a destination is normal, not an obstruction.
+             */
+            if (u.path.length <= 1) {
+                const g0 = this.orderGoal(u);
+                const gtx = g0 ? Math.floor((g0.x + HALF) / TILE) : -1;
+                const gty = g0 ? Math.floor((g0.y + HALF) / TILE) : -1;
+                /*
+                 * CloseEnough only when the destination tile is genuinely full.
+                 *
+                 * Parking merely because the unit is "close" stops it 2.5 tiles
+                 * short of an empty destination — movetest caught exactly that
+                 * (`距目标 78.4px`). The distance test is a guard against
+                 * shuffling around a crowd; it is not a licence to give up on an
+                 * empty tile.
+                 */
+                const destFull = g0 ? !this.occupancy.hasRoomFor(u, gtx, gty) : false;
+                /*
+                 * Already relocated and standing on (or beside) that spot: the
+                 * order is done. Retail's move task ends on reaching the
+                 * relocation tile; searching again would pick a different tile and
+                 * swing the hull at it.
+                 */
+                if (g0 && !Number.isNaN(u.parkX)
+                    && Math.hypot(u.x - u.parkX, u.y - u.parkY) < TILE * 1.4) {
+                    u.stop();
+                    u.blockT = 0;
+                    u.waitT = 0;
+                    if (u.order.k === 'move' || u.order.k === 'attackmove') u.order = { k: 'idle' };
+                    continue;
+                }
+                if (g0 && destFull && Math.hypot(g0.x - u.x, g0.y - u.y) < TILE * 2.5) {
+                    u.stop();
+                    u.blockT = 0;
+                    u.waitT = 0;
+                    if (u.order.k === 'move' || u.order.k === 'attackmove') u.order = { k: 'idle' };
+                    continue;
+                }
+                /*
+                 * Last leg and the destination is taken: relocate once
+                 * (findRelocationTile). It has to run *now*, not after the
+                 * ten-round give-up chain — a tank three tiles from the click with
+                 * `path.length === 1` is not blocked by traffic, it simply has
+                 * nowhere to stand. Waiting eight seconds first left four of six
+                 * tanks milling around the destination for the rest of the match.
+                 */
+                if (g0 && destFull && Number.isNaN(u.parkX) && this.parkNear(u, g0.x, g0.y, 5)) {
+                    u.parkTry++;
+                    u.blockT = 0;
+                    continue;
+                }
+                /*
+                 * We already relocated and are not there yet: keep driving to the
+                 * spot. If it stays unreachable, `failMove` parks the unit after
+                 * the wait budget instead of cancelling here — cancelling on the
+                 * first blocked frame is what turned a crowd into nine dead tanks.
+                 */
+            }
+
             if (u.isAir || u.path.length === 0 || u.waitT > 0) {
                 u.trafficT = 0;
                 u.blockT = 0;
@@ -2862,17 +2933,38 @@ export class Game {
             const ahead = this.blockerAt(u) || this.nearestBlocker(u);
             /*
              * Traffic, not a wall: if the thing in front is driving off, the
-             * correct response is patience (reference: MoveTask breaks out of
-             * the obstacle loop when the blocker has velocity).
+             * correct response is patience (reference: MoveTask `break`s out of
+             * the obstacle loop the moment the blocker has velocity — it does not
+             * start a timer and re-plan after 2.6 s).
+             *
+             * The old 2.6 s cap was a re-plan generator: in a column of tanks the
+             * leader is *always* moving, so every follower re-planned its route
+             * every three seconds, and every re-plan pointed the nose somewhere
+             * new. That is the hull "swinging" the player still sees: measured 5
+             * heading changes and 9 sprite swaps on one tank in 45 s, all of them
+             * caused by detours around a friend who was already leaving.
+             *
+             * Eight seconds is the safety valve for a genuine deadlock (a ring of
+             * tanks all waiting on each other), not a normal-traffic timer.
              */
-            if (ahead && ahead.speedCur > 6 && ahead.path.length > 0 && u.trafficT < 2.6) {
+            if (ahead && ahead.speedCur > 6 && ahead.path.length > 0 && u.trafficT < 8) {
                 u.trafficT += dt;
                 u.blockT = Math.max(0, u.blockT - dt * 2);
                 continue;
             }
 
             u.blockT += dt;
-            if (u.blockT < 0.35) continue;
+            /*
+             * Wait before touching the route.
+             *
+             * Reference: WaitTicksTask(40) is 2.7 s at 15 tps before a blocked
+             * unit even looks for an alternative. 0.35 s meant a column of tanks
+             * re-planned each other's routes four times a second — every re-plan
+             * pointed the nose somewhere new, which is the other half of the
+             * "body keeps swinging" report. One second is a compromise between
+             * retail patience and how long a mobile player will wait.
+             */
+            if (u.blockT < 1.0) continue;
 
             if (this.moveDebug) {
                 this.moveLog.push({
@@ -3236,16 +3328,22 @@ export class Game {
                 const p = this.findFor(u, node.x, node.y);
                 if (p && p.length > 1) {
                     /*
-                     * Splice the detour *in front of* the remaining route.
+                     * Refuse a detour that points the hull somewhere completely
+                     * different from where it was already going.
                      *
-                     * Replacing the whole path with the detour is the easy
-                     * mistake here: the detour ends at an intermediate waypoint,
-                     * so the unit drives there, its path empties 300 px short of
-                     * the destination, the watchdog re-plans, and it repeats —
-                     * measured as a permanent stall at a fixed distance in
-                     * pathsim. Retail's `path.splice(freeWaypointIndex, ...)`
-                     * keeps everything after the anchor.
+                     * A* is free to come back with a route that leaves in the
+                     * opposite direction, and the hull has to physically turn
+                     * around to follow it — 140 degrees, four times a second,
+                     * while the column shuffles. If the first leg of the detour
+                     * is more than ~50 degrees off the first leg of the current
+                     * path, this anchor is not a useful detour; try the next one.
                      */
+                    const a0 = Math.atan2(u.path[0].y - u.y, u.path[0].x - u.x);
+                    const a1 = Math.atan2(p[0].y - u.y, p[0].x - u.x);
+                    let dd = a1 - a0;
+                    while (dd > Math.PI) dd -= Math.PI * 2;
+                    while (dd < -Math.PI) dd += Math.PI * 2;
+                    if (Math.abs(dd) > (50 * Math.PI) / 180) continue;
                     u.path = p.concat(u.path.slice(i + 1));
                     u.repath = 2;
                     return true;
@@ -3268,30 +3366,96 @@ export class Game {
      * exactly the "friendly units jam each other" report.
      */
     private parkNear(u: Unit, cx: number, cy: number, maxR = 5): boolean {
+        /*
+         * Rank candidates, then verify reachability.
+         *
+         * The scan-order version (nearest ring first, row by row) took whichever
+         * tile came first, which is often *behind* the hull — the unit then swung
+         * 150 degrees to park and the player saw the body turn around for no
+         * reason. pickParkingSpot scores by distance plus a turn penalty, so a
+         * spot two tiles further along the direction of travel wins over one
+         * behind us. A* is then run only on the winner; if it turns out to be
+         * unreachable, that tile is excluded and the next best is tried.
+         */
+        const skip = new Set<number>();
+        for (let attempt = 0; attempt < 6; attempt++) {
+            const spot = this.pickParkingSpot(u, cx, cy, maxR, skip);
+            if (!spot) break;
+            const p = this.findFor(u, spot.x, spot.y);
+            /*
+             * A one-node path is legal: smooth() collapses a clear line of sight
+             * into a single point. What must be rejected is bestEffort, which
+             * returns a path ending at the unit's own cell — lastFound tells the
+             * two apart.
+             */
+            if (p && p.length > 0 && this.finder.lastFound) {
+                u.path = p;
+                u.repath = 2;
+                u.parkX = spot.x;
+                u.parkY = spot.y;
+                return true;
+            }
+            const tx = Math.floor((spot.x + HALF) / TILE);
+            const ty = Math.floor((spot.y + HALF) / TILE);
+            skip.add(ty * MAP_TILES + tx);
+        }
+        (this as any).__parkFail = skip.size ? 'unreachable' : 'no-spot';
+        return false;
+    }
+
+    /**
+     * Pick the best parking tile, then verify it is reachable.
+     *
+     * Scan order alone (nearest ring first, row by row) picks whichever tile
+     * happens to come first, which is often *behind* the hull: the unit then has
+     * to swing 150 degrees to park, and the player sees the body turn around for
+     * no reason. Scoring candidates by `distance + 30 x |turn|` prefers a spot a
+     * couple of tiles further along the direction of travel — the same preference
+     * retail's MovePositionHelper expresses.
+     */
+    private pickParkingSpot(u: Unit, cx: number, cy: number, maxR = 5, skip?: Set<number>): { x: number; y: number } | null {
         const ctx = Math.floor((cx + HALF) / TILE);
         const cty = Math.floor((cy + HALF) / TILE);
         const curD = Math.hypot(u.x - cx, u.y - cy);
+        const out: Array<{ x: number; y: number; score: number }> = [];
         for (let r = 0; r <= maxR; r++) {
             for (let dy = -r; dy <= r; dy++) {
                 for (let dx = -r; dx <= r; dx++) {
                     if (r > 0 && Math.abs(dx) !== r && Math.abs(dy) !== r) continue;
                     const tx = ctx + dx, ty = cty + dy;
                     if (tx < 0 || ty < 0 || tx >= MAP_TILES || ty >= MAP_TILES) continue;
+                    if (skip && skip.has(ty * MAP_TILES + tx)) continue;
                     if (this.isBlocked(tx, ty)) continue;
                     if (!this.occupancy.hasRoomFor(u, tx, ty)) continue;
+                    if (this.cellClaimedBy(tx, ty, u)) continue;
                     const wx = tx * TILE + TILE / 2 - HALF;
                     const wy = ty * TILE + TILE / 2 - HALF;
-                    // never wander away from the goal just to find elbow room:
-                    // a parking search that can move backwards makes a full
-                    // group orbit the destination forever
-                    if (Math.hypot(wx - cx, wy - cy) > curD + TILE * 0.5) continue;
+                    const candD = Math.hypot(wx - cx, wy - cy);
+                    if (candD > curD + TILE * 0.5) continue;
                     if (this.worldBlockedAt(wx, wy, u.steerRadius)) continue;
-                    const p = this.findFor(u, wx, wy);
-                    if (!p || p.length === 0) continue;
-                    u.path = p;
-                    u.repath = 2;
-                    return true;
+                    let turn = Math.atan2(wy - u.y, wx - u.x) - u.face;
+                    while (turn > Math.PI) turn -= Math.PI * 2;
+                    while (turn < -Math.PI) turn += Math.PI * 2;
+                    out.push({ x: wx, y: wy, score: candD + Math.abs(turn) * 30 });
                 }
+            }
+        }
+        if (out.length === 0) return null;
+        out.sort((a, b) => a.score - b.score);
+        return out[0];
+    }
+
+    /**
+     * Has another unit already reserved this parking tile?
+     *
+     * See parkNear: without this, a group relocating in the same tick picks the
+     * same empty tile and fights over it forever.
+     */
+    private cellClaimedBy(tx: number, ty: number, self: Unit): boolean {
+        for (const o of this.units) {
+            if (o === self || o.dead || Number.isNaN(o.parkX)) continue;
+            if (Math.floor((o.parkX + HALF) / TILE) === tx && Math.floor((o.parkY + HALF) / TILE) === ty) {
+                return true;
             }
         }
         return false;
@@ -3307,19 +3471,12 @@ export class Game {
         if (u.order.k === 'move' || u.order.k === 'attackmove') {
             const goal = this.orderGoal(u);
             /*
-             * findRelocationTile before Fail.
-             *
-             * Reference: MoveTask never ends an order just because the wall of
-             * friends is thick — it runs a radial search (0..5 tiles) for a tile
-             * this unit can stand on and reach, retargets there and keeps driving.
-             * Only when that search comes back empty does it report CloseEnough
-             * or Fail. Without this, nine of ten tanks ordered onto one tile
-             * cancelled their orders and printed a warning.
+             * Relocation already happened in handleBlocked, once per order, the
+             * moment the last leg turned out to be occupied. Repeating the search
+             * here used a different anchor after `parkX` had been recorded, and
+             * the two fought each other — measured as four of ten tanks cancelling
+             * as "unreachable" while standing three tiles from the goal.
              */
-            if (goal && u.parkTry < 4 && this.parkNear(u, goal.x, goal.y, 5)) {
-                u.parkTry++;
-                return;
-            }
             const near = goal ? Math.hypot(goal.x - u.x, goal.y - u.y) : 0;
             /*
              * Nowhere to stand within five tiles of the goal.

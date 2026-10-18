@@ -94,6 +94,21 @@ export class Entity {
     get cost(): number { return 0; }
 }
 
+/**
+ * Wrap an angle in radians into (-pi, pi].
+ *
+ * Every heading in the engine has to live in one period. The shortest-arc test
+ * `target - current` is only meaningful when both ends are wrapped: an unwrapped
+ * hull at +3.28 rad chasing a target at -3.10 sees a +0.18 arc, steps past pi,
+ * and the next frame sees -0.18 and steps back — an oscillation that never
+ * settles. See Unit.moveStep.
+ */
+export function wrapAngle(a: number) {
+    while (a > Math.PI) a -= Math.PI * 2;
+    while (a <= -Math.PI) a += Math.PI * 2;
+    return a;
+}
+
 export class Unit extends Entity {
     def: UnitDef;
     order: Order = { k: 'idle' };
@@ -166,6 +181,17 @@ export class Unit extends Entity {
     repathTry = 0;
     /** how many times we already parked near the destination (findRelocationTile) */
     parkTry = 0;
+    /**
+     * The tile `findRelocationTile` picked for this order, or NaN.
+     *
+     * A destination that is occupied stays occupied, so a unit that searches for
+     * a parking spot every time it gets blocked keeps finding a *different* spot
+     * and turning toward it — four to nine heading changes on one hull in 45 s,
+     * which is exactly the residual "body keeps swinging". Retail relocates once
+     * and retargets the move task at that tile; arriving there ends the order.
+     */
+    parkX = NaN;
+    parkY = NaN;
     /** cell this unit wanted to enter but could not */
     blockTx = -1;
     blockTy = -1;
@@ -351,23 +377,35 @@ export class Unit extends Entity {
         while (diff < -Math.PI) diff += Math.PI * 2;
 
         /*
-         * CloseEnough: the last waypoint is a cell that is already full.
+         * CloseEnough: the waypoint we are about to enter is full and it is the
+         * one we were ordered to.
          *
-         * Three riflemen can share a cell, the fourth cannot. Five men ordered to
-         * one point put two of them against a neighbour's edge, where they keep
-         * full speed and gain nothing — measured as a permanent stall with
-         * `blockT == 0` because every tick technically moved them a fraction of
-         * a pixel along the free axis. The retail engine ends the order here
-         * (canStopAtTile → CloseEnough), so the unit parks beside the crowd.
+         * Three riflemen can share a cell, the fourth cannot. The retail engine
+         * ends the order here (canStopAtTile failed → isCloseEnoughToDest →
+         * MoveResult.CloseEnough) rather than letting the fourth man grind
+         * against the edge at full speed.
+         *
+         * The `atGoal` test is what makes this safe: a *route* may well pass
+         * through a tile that happens to be full (a building footprint at the
+         * spawn point, a parked tank mid-way), and cancelling the order there is
+         * how a rifleman ordered across the map used to stop after thirty pixels
+         * and go idle. Only a waypoint that is also the destination justifies
+         * parking.
          */
         if (this.path.length === 1 && d < TILE * 1.5 && roomFn && !roomFn(this, wp.x, wp.y)) {
-            this.path.length = 0;
-            this.segWp = null;
-            this.speedCur = 0;
-            this.vx = 0;
-            this.vy = 0;
-            this.blockedNow = false;
-            return false;
+            const o: any = this.order;
+            const atGoal = (o.k === 'move' || o.k === 'attackmove')
+                ? Math.hypot(o.x - this.x, o.y - this.y) < TILE * 3
+                : true;
+            if (atGoal) {
+                this.path.length = 0;
+                this.segWp = null;
+                this.speedCur = 0;
+                this.vx = 0;
+                this.vy = 0;
+                this.blockedNow = false;
+                return false;
+            }
         }
 
         // Reference behaviour: a hull must face its path before it drives
@@ -392,6 +430,21 @@ export class Unit extends Entity {
                 this.face += applied;
                 this.turnDelta = applied / Math.max(0.001, dt);
             }
+            /*
+             * Keep the heading wrapped to (-pi, pi].
+             *
+             * This is the real "the hull keeps swinging while it drives" bug.
+             * `face` used to accumulate without wrapping: after driving west for
+             * a while it would sit at +3.28 rad while the demanded heading was
+             * -3.10, the shortest arc between them is +0.18, one step of the
+             * turn rate lands on 3.46, next frame the arc is -0.18 and the step
+             * lands back on 3.28 — a 20-degree oscillation at ten frames a
+             * second, forever, and it only ever happens near due west/east where
+             * the representation wraps. `diff` was normalised but `face` was
+             * not, so the two disagreed.
+             */
+            this.face = wrapAngle(this.face);
+            this.faceTarget = wrapAngle(this.faceTarget);
             // Only a real about-face stops the hull. Waiting on every waypoint
             // kink turned harvesters into traffic jams (measured in battletest).
             if (Math.abs(diff) > 0.85) {
@@ -531,13 +584,15 @@ export class Unit extends Entity {
      */
     aimTurret(dt: number, want?: number | null) {
         if (this.def.kind === 'air') return;
-        const target = want === undefined || want === null ? this.face : want;
+        const target = wrapAngle(want === undefined || want === null ? this.face : want);
         let d = target - this.turretFace;
         while (d > Math.PI) d -= Math.PI * 2;
         while (d < -Math.PI) d += Math.PI * 2;
         const rate = (this.def.kind === 'infantry' ? 12 : 3.6) * dt;
         if (Math.abs(d) <= rate) this.turretFace = target;
         else this.turretFace += Math.sign(d) * rate;
+        // same wrap rule as the hull: an unwrapped turret oscillates near due west
+        this.turretFace = wrapAngle(this.turretFace);
     }
 
     canShoot() {

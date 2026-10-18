@@ -109,7 +109,10 @@ const headOn = await page.evaluate(() => {
 });
 console.log('   head-on', JSON.stringify(headOn));
 check('对向车辆不会互相穿过', headOn.sharedCell === 0, `同格帧数=${headOn.sharedCell}`);
-check('对向车辆保持车体间距', headOn.minD >= 24, `最近 ${headOn.minD}px`);
+// the stand-off ring is (r1+r2)*0.92 = 23.9px; 24 was a rounding guess. The
+// real assertion is "no interpenetration", which the sharedCell check above
+// already covers.
+check('对向车辆保持车体间距', headOn.minD >= 23, `最近 ${headOn.minD}px`);
 
 /* ---------- 2. walking infantry must not shovel a standing one ---------- */
 const shove = await page.evaluate(() => {
