@@ -66,8 +66,29 @@ function sliceSheet(tex: Texture2D, fw: number, fh: number, count: number): Spri
     for (let i = 0; i < count; i++) {
         const col = i % cols, row = Math.floor(i / cols);
         const x = col * fw;
-        const y = H - (row + 1) * fh;      // PNG rows are top-down, rects bottom-up
-        if (x + fw > W || y < 0) { out.push(null as unknown as SpriteFrame); continue; }
+        /*
+         * Row 0 is the TOP row of the PNG, and `rect.y` is measured from the top.
+         *
+         * This used to be `y = H - (row + 1) * fh` ("PNG rows are top-down, rects
+         * are bottom-up"). That assumption is wrong for the textures Cocos
+         * uploads: the image is flipped on upload, so a rect measured from the
+         * bottom ends up sampling the vertically mirrored row. Every body frame
+         * was therefore showing `row' = rows - 1 - row`:
+         *
+         *   ready (row 0)      -> showed row 4, i.e. walk frames of facings 6/7
+         *   walk  facing 6 (4) -> showed row 0, i.e. the READY row
+         *
+         * So a tank driving to the lower-right played the four *ready* frames of
+         * facings 0..3 as its walk cycle — four different orientations in a row,
+         * which is exactly "the hull keeps rotating while it drives". The turret
+         * sheet is a single row, so the mirror was invisible there: that is why
+         * the turret always looked right and only the body was wrong.
+         *
+         * Verified by setting rect.y directly on a live sprite: y = 0 shows the
+         * top row of the file.
+         */
+        const y = row * fh;
+        if (x + fw > W || y + fh > H) { out.push(null as unknown as SpriteFrame); continue; }
         const sf = new SpriteFrame();
         sf.texture = tex;
         sf.rect = new Rect(x, y, fw, fh);
@@ -248,6 +269,6 @@ export function frameIndexFromRect(sf: SpriteFrame): number {
     const fw = sf.rect.width, fh = sf.rect.height;
     const cols = Math.max(1, Math.floor(tex.width / fw));
     const col = Math.round(sf.rect.x / fw);
-    const row = Math.round((tex.height - sf.rect.y - fh) / fh);
+    const row = Math.round(sf.rect.y / fh);
     return row * cols + col;
 }

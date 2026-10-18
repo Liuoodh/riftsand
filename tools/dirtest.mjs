@@ -69,7 +69,8 @@ const rows = await page.evaluate(async () => {
         const t = sf.texture, r = sf.rect;
         const fw = r.width, fh = r.height;
         const cols = Math.max(1, Math.floor(t.width / fw));
-        return Math.round((t.height - r.y - fh) / fh) * cols + Math.round(r.x / fw);
+        // rect.y is measured from the TOP (see ArtPack.sliceSheet)
+        return Math.round(r.y / fh) * cols + Math.round(r.x / fw);
     };
 
     const out = [];

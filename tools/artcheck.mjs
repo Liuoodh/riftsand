@@ -119,7 +119,7 @@ if (info.ids.includes(UNIT)) {
             const src = cache.get(tex);
             const r = sf.rect;
             // PNG rows run top-down, SpriteFrame rects bottom-up
-            const top = tex.height - r.y - r.height;
+            const top = r.y;
             const d = src.getImageData(r.x, top, r.width, r.height).data;
             let bottom = -1;
             for (let y = r.height - 1; y >= 0 && bottom < 0; y--) {

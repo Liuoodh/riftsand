@@ -6,7 +6,7 @@
 - 引擎：Cocos Creator 3.8.8
 - 语言：TypeScript
 - 仓库：https://github.com/Liuoodh/riftsand
-- 当前版本：**v0.19.0-dev — 车身晃动＝行走帧在颠（已归零）；血条按原版重画**
+- 当前版本：**v0.20.0-dev — 摇晃根因：图集行方向反了（整行上下镜像）**
 
 ![主菜单](docs/shots/menu.png)
 
@@ -160,6 +160,29 @@ frameIndex = startFrame + facingMult * facingIndex + animFrame
 
 等距下屏幕矩形对应世界**菱形**，把两个角反投影成世界 AABB 必然漏选。
 现在框选是「逐单位投影到屏幕再判断是否在矩形内」——这是等距下唯一正确的做法。
+
+## v0.20：摇晃的根因是图集「行方向反了」（整行上下镜像）
+
+你说“炮台是对的、车体不对”，这句话直接指向答案：炮塔图集只有一行，行镜像看不出来；
+车体图集有 5 行，镜像后每帧都取到另一行。
+
+证据：用 `bodyFrame(6, 0..3)` 逐帧换图截图，四帧是「正面 / 3/4 / 长侧面 / 3/4」——
+四个不同朝向；而同样四个下标去图集里裁，四张图一模一样。矛盾只能来自行被颠倒读。
+
+原因：`sliceSheet` 的 `y = H - (row+1)*fh` 假设 rect 自下而上，但 Cocos 上传时把图翻了，
+于是取到镜像行。结果：ready 行（站姿）显示行走行，facing 6 的行走行（第 4 行）显示**ready 行**
+——四个行走帧播的是四个不同朝向，往右下走时车体每帧转一次。
+
+修正：`y = row * fh`。一处改动同时修好站姿与走姿（站姿此前也错了）。
+`artcheck` / `frameIndexFromRect` 里同样的反向假设一起改。
+
+顺带：
+- 去掉前视点转向上的 EMA（低通让“先转向再行驶”判定永不通过，单位带路径原地不动）
+- 新增“有路不走”看门狗：有路径但 1.5 秒无位移 → 绕行 → 重定位 → 停车
+
+回归：artcheck 9/9、dirtest 9/9、pathsim 停滞 0/62、crowdtest 7/7、movetest 18/18、
+harvesttest 6/6、phystest 10/10、maptest 21/21、menutest 11/11、assettest 20/20、
+inputtest 20/20、featuretest 14/14、speedtest 12/12、6 分钟对战 0 报错。
 
 ## v0.19：车身晃动的真身是素材在颠、血条按原版重画
 

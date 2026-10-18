@@ -199,6 +199,8 @@ export class Unit extends Entity {
     repathHold = 0;
     /** how long a live move order has had an empty path (engine watchdog) */
     stallT = 0;
+    /** has a route but has not moved; catches stalls `blockedNow` misses */
+    stillT = 0;
     /** >0 while this unit is moving aside for someone else */
     asideT = 0;
     /** cached "engaged" target for attack-move */
@@ -405,21 +407,19 @@ export class Unit extends Entity {
          * here: take a point ~1.7 tiles along the polyline and steer at that.
          */
         const look = this.pathLookAhead(TILE * 1.7);
-        const wantDir = Math.atan2(look.y - this.y, look.x - this.x);
         /*
-         * ...and let the demanded heading settle instead of snapping to it.
+         * The look-ahead point IS the smoothing.
          *
-         * Popping a waypoint moves the look-ahead point, which moves the demanded
-         * bearing in one step. Smoothing it here (the reference's TurnTask does
-         * the same job by turning at `rot` per tick, but our faceTarget also feeds
-         * the stand-still-while-turning test) keeps the 8-way image on one bucket
-         * through a staircase.
+         * It already averages a grid staircase (two or three waypoints ahead), so
+         * the demanded bearing changes continuously with position and needs no
+         * extra low-pass. An EMA on top of it was tried and had to be removed: it
+         * lagged behind the hull's own turning, the "face your path before
+         * driving" test below never saw the hull settle, and a unit could stand
+         * still with a perfectly good one-waypoint path forever (pathsim: 9-11
+         * permanent stalls, `blockT` 0, `repathTry` 0 — the give-up chain never
+         * even ran because the unit was "turning", not "blocked").
          */
-        let dWant = wantDir - this.faceTarget;
-        while (dWant > Math.PI) dWant -= Math.PI * 2;
-        while (dWant < -Math.PI) dWant += Math.PI * 2;
-        this.faceTarget = this.faceTarget + dWant * Math.min(1, dt * 6);
-        this.faceTarget = wrapAngle(this.faceTarget);
+        this.faceTarget = wrapAngle(Math.atan2(look.y - this.y, look.x - this.x));
         let diff = this.faceTarget - this.face;
         while (diff > Math.PI) diff -= Math.PI * 2;
         while (diff < -Math.PI) diff += Math.PI * 2;

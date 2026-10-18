@@ -2994,6 +2994,32 @@ export class Game {
                  */
             }
 
+            /*
+             * Watchdog 2: a route but no movement.
+             *
+             * `blockedNow` only covers "the step I tried was refused". A unit can
+             * also sit still while *not* trying to step: the hull-first rule stops
+             * it while it turns, and a path that ends on a tile a friend occupies
+             * leaves nothing to drive into. Those states never reach the chain
+             * below, so the unit held a move order for the rest of the match
+             * (pathsim: units parked 500 px from their goal with pathLeft 1,
+             * blockT 0, repathTry 0).
+             *
+             * Anything that has a route and has not moved for 1.5 s gets the same
+             * remedies as a blocked unit: detour, then relocate, then park.
+             */
+            if (!u.isAir && u.path.length > 0 && u.waitT <= 0) {
+                if (u.speedCur < 2) u.stillT += dt; else u.stillT = 0;
+                if (u.stillT > 1.5) {
+                    u.stillT = 0;
+                    const blk = this.blockerAt(u) || this.nearestBlocker(u);
+                    if (!this.repathAround(u, blk)) {
+                        const g2 = this.orderGoal(u);
+                        if (!g2 || !this.relocateTo(u, g2.x, g2.y)) this.failMove(u);
+                    }
+                }
+            }
+
             if (u.isAir || u.path.length === 0 || u.waitT > 0) {
                 u.trafficT = 0;
                 u.blockT = 0;
