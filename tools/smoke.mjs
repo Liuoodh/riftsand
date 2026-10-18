@@ -78,7 +78,7 @@ const shot = async (name, ms = 0) => {
 };
 
 // start match (design y = -238 -> screen y = 598)
-await page.mouse.click(640, 598);
+await page.mouse.click(640, 570);   // start button (v0.11 layout: y=-210)
 await shot('02-start.png', 2500);
 
 // probe internal state

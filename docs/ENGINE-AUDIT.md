@@ -30,9 +30,9 @@
 | 路径消费 | 瓦片序列，逐格推进 | 瓦片序列 + 视线平滑 | 🟡 平滑是我们加的（观感更好） |
 | 到达判定 | 到格中心 | `d < 3` 切下一个点 | 🟡 |
 | 卡住处理 | `MoveResult.Fail` / 等待 / 重算 | 等待 0.55s → 螺旋找替代点 → 5 次后放弃 | ✅ |
-| 单位互斥 | `TileOccupation: Set<obj>` + `CollisionState.Waiting` + `MoveAsideTask` | `TileOccupation`（新建）+ `push()` 让路 + 圆盘占位检测 | ✅ v0.10 |
+| 单位互斥 | `TileOccupation: Set<obj>` + `CollisionState.Waiting` + `MoveAsideTask` | 格子容量 + 步进许可 + 让路/重算/放弃（无坐标推送） | ✅ v0.11 |
 | 碾压 | 进入新格时判定 `crusher`（`MoveTrait.ts:240`） | 同（`Game.syncCell`），不看速度 | ✅ v0.10 |
-| 步兵 subCell | 每格 3 个 sub-position | 权重 1/3 + 圆盘软分离 | 🟡 未做真实 sub-position |
+| 步兵 subCell | 每格 3 个 sub-position | `subCell 0..2` + 同格 11px 铺开 | ✅ v0.11 |
 
 ---
 
@@ -90,7 +90,7 @@
 | 迷雾状态 | `Unexplored / TemporaryReveal / Explored`（`MapShroud.ts:4-8`） | unexplored / explored（v0.10 去掉了「已探索半透明」这一档） | ✅ v0.10 |
 | 已探索是否永久可见 | 是（`isShrouded` 只判 Unexplored） | 是（`isVisibleTo` 用 `explored`） | ✅ v0.10 |
 | 迷雾绘制 | 4×4 子块拼 `SHROUD.SHP`，边缘抖动 | 按行合并菱形 + 边界噪声抖动 | 🟡 无纹理版 |
-| 高度对迷雾的影响 | `tileElevation` 参与投影 | 未做（单层迷雾） | ⬜ v0.11 |
+| 高度对迷雾的影响 | `tileElevation` 参与投影 | 未做（单层迷雾） | ⬜ 待桥梁/多层 |
 | 临时揭示（间谍/超武） | `TemporaryReveal` | 无 | ⬜ |
 
 ---
@@ -121,9 +121,9 @@
 
 | 项 | 影响 | 计划 |
 |---|---|---|
-| `Warhead.Verses` 10 种装甲 | 兵种克制不够细 | v0.11 |
-| 真实步兵 sub-position | 步兵拥挤时偶尔重叠 | v0.11 |
-| 按 `SpeedType` 分层通行图 | 悬浮/履带绕路差异不明显 | v0.11 |
+| `Warhead.Verses` 10 种装甲 | 兵种克制不够细 | v0.12 |
+| 按 `SpeedType` 分层通行图 | 悬浮/履带绕路差异不明显 | v0.12 |
+| 运输载具 / 建筑驻防 | 玩法缺失 | v0.12 |
 | 迷雾按高度投影 | 高台边缘会露 | v0.12（要桥梁/多层） |
 | `ActiveAnim` 建筑动画 | 建筑「不动」 | 等素材 |
 | 桥梁 / 高低差 / 运输载具 | 玩法缺失 | 见 ROADMAP |

@@ -187,7 +187,16 @@ export class PathFinder {
         if (pts.length === 0) pts.push({ x: gx, y: gy });
         else if (found) pts[pts.length - 1] = { x: gx, y: gy };
 
-        return this.smooth(sx, sy, pts, radius);
+        /*
+         * Smoothing uses a wider clearance than the A* nodes.
+         *
+         * The search itself only needs "a hull fits on this cell", but a
+         * straightened segment cuts corners: with the same radius it happily ran
+         * a line that grazed a refinery wall by 6px, the unit walked into the
+         * corner and stood there forever (the "ordered a reachable point, cannot
+         * get there" symptom). Padding the line test keeps a real margin.
+         */
+        return this.smooth(sx, sy, pts, radius + TILE * 0.32);
     }
 
     private heur(x: number, y: number, gx: number, gy: number) {
@@ -196,7 +205,18 @@ export class PathFinder {
     }
 
     /** tile is free, and wide enough for the unit footprint */
+    /**
+     * Cells to treat as blocked for the next query only.
+     *
+     * Reference: MoveTask passes `blockedPathNodes` into computePath() after a
+     * unit fails to get past a blocker, so the re-route does not immediately
+     * choose the same cell again. We hold the same set here and clear it after
+     * the search.
+     */
+    avoid: Set<number> | null = null;
+
     private clear(tx: number, ty: number, radius: number) {
+        if (this.avoid && this.avoid.has(ty * N + tx)) return false;
         if (this.blocked(tx, ty)) return false;
         // Wide hulls need the disc centred on the cell to fit; below ~1/3 of a
         // tile the unit is narrower than a cell and the single check is exact.

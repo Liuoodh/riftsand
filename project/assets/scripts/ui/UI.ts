@@ -19,7 +19,11 @@ import {
 import { Game } from '../game/Game';
 import { Building } from '../game/Entities';
 import { drawBuilding, drawUnit, pen } from '../render/Art';
+import { MAPS, PLAYER_COLORS, mapById } from '../core/Core';
 import { Overlay } from './Overlay';
+
+/** selected-state stroke colour */
+const SEL = (on: boolean) => HEX(on ? PAL.white : '#2b3540');
 
 const W = 1280;
 const H = 720;
@@ -46,7 +50,10 @@ export interface UIHooks {
     /** cycle the retail game-speed ladder */
     onSpeed: () => void;
     onResume: () => void;
-    onStart: (faction: Faction, diff: 'easy' | 'normal' | 'hard', credits: number, superWeapons: boolean) => void;
+    onStart: (
+        faction: Faction, diff: 'easy' | 'normal' | 'hard', credits: number, superWeapons: boolean,
+        mapId: string, colorId: string,
+    ) => void;
     onRestart: () => void;
     onQuit: () => void;
     onMinimap: (wx: number, wy: number) => void;
@@ -297,6 +304,8 @@ export class UI {
     private modalBtns: UIButton[] = [];
 
     private selFaction: Faction = 'BU';
+    private selMap = 'basin';
+    private selColor = 'azure';
     private selDiff: 'easy' | 'normal' | 'hard' = 'normal';
     private selCredits = 4200;
     private selSuper = true;
@@ -807,9 +816,9 @@ export class UI {
         this.menuBtns = [];
         const dim = mkNode(ov, 'dim').addComponent(Graphics);
         dim.rect(-HW, -HH, W + 4, H + 4);
-        dim.fillColor = HEX('#0a0e13', 244);
+        dim.fillColor = HEX('#0a0e13', 246);
         dim.fill();
-        dim.strokeColor = HEX(PAL.cyanDim, 34);
+        dim.strokeColor = HEX(PAL.cyanDim, 26);
         dim.lineWidth = 1;
         for (let i = -8; i <= 8; i++) { dim.moveTo(-HW, i * 54); dim.lineTo(HW, i * 54); }
         dim.stroke();
@@ -817,125 +826,177 @@ export class UI {
         dim.fillColor = HEX(PAL.cyan, 60);
         dim.fill();
 
-        const title = mkLabel(ov, '裂 沙 战 线', 54, PAL.white, true);
-        title.node.setPosition(0, 258, 0);
+        const title = mkLabel(ov, '裂 沙 战 线', 46, PAL.white, true);
+        title.node.setPosition(0, 306, 0);
         alignLabel(title, 'center');
-
-        const sub = mkLabel(ov, 'R I F T S A N D   ·   沙海之上，钢铁与风的战争', 15, PAL.cyan);
-        sub.node.setPosition(0, 214, 0);
+        const sub = mkLabel(ov, 'R I F T S A N D   ·   沙海之上，钢铁与风的战争', 13, PAL.cyan);
+        sub.node.setPosition(0, 270, 0);
         alignLabel(sub, 'center');
+        const line = mkNode(ov, 'rule').addComponent(Graphics);
+        line.rect(-210, 250, 420, 1);
+        line.fillColor = HEX(PAL.cyan, 70);
+        line.fill();
 
-        this.factionCard(ov, 'BU', -196);
-        this.factionCard(ov, 'DS', 196);
+        // ---- factions: one card per side, like the retail skirmish screen ----
+        this.factionCard(ov, 'BU', -322, 145);
+        this.factionCard(ov, 'DS', 322, 145);
 
-        const dLabel = mkLabel(ov, '难度', 14, '#93a3b0');
-        dLabel.node.setPosition(-330, -152, 0);
+        // ---- map list (centre column) ----
+        const mLabel = mkLabel(ov, '战 场', 13, '#93a3b0');
+        mLabel.node.setPosition(-166, 198, 0);
+        let my = 172;
+        for (const m of MAPS) {
+            const b = new UIButton(ov, 332, 32, `${m.name}   ·   ${m.en}`, 13, () => {
+                this.selMap = m.id;
+                this.rebuildMenu();
+            }, PAL.cyan);
+            b.setPosition(0, my);
+            b.setActive(this.selMap === m.id);
+            this.menuBtns.push(b);
+            my -= 38;
+        }
+        const picked = mapById(this.selMap);
+        const trait = mkLabel(ov, picked.trait, 11, '#8fa0ae');
+        trait.node.setPosition(-166, -14, 0);
+
+        // ---- player colour ----
+        const cLabel = mkLabel(ov, '颜色', 13, '#93a3b0');
+        cLabel.node.setPosition(-166, -44, 0);
+        let cxp = -166;
+        for (const c of PLAYER_COLORS) {
+            const sw = mkNode(ov, 'sw' + c.id);
+            sw.setPosition(cxp + 13, -76, 0);
+            const g = sw.addComponent(Graphics);
+            const sel = this.selColor === c.id;
+            g.circle(0, 0, 13);
+            g.fillColor = HEX(c.hex, sel ? 255 : 180);
+            g.fill();
+            g.circle(0, 0, 13);
+            g.strokeColor = SEL(sel);
+            g.lineWidth = sel ? 2.4 : 1;
+            g.stroke();
+            if (sel) {
+                g.circle(0, 0, 17);
+                g.strokeColor = HEX(c.hex, 190);
+                g.lineWidth = 1.4;
+                g.stroke();
+            }
+            const hit = new UIButton(ov, 32, 32, '', 1, () => {
+                this.selColor = c.id;
+                this.rebuildMenu();
+            });
+            hit.setPosition(cxp + 13, -76);
+            hit.g.clear();
+            this.menuBtns.push(hit);
+            cxp += 42;
+        }
+
+        // ---- options ----
+        const dLabel = mkLabel(ov, '难度', 13, '#93a3b0');
+        dLabel.node.setPosition(-600, -128, 0);
         const diffs: Array<['easy' | 'normal' | 'hard', string]> = [['easy', '轻松'], ['normal', '标准'], ['hard', '残酷']];
-        let dx = -266;
+        let dx = -522;
         for (const [key, text] of diffs) {
-            const b = new UIButton(ov, 84, 32, text, 13, () => {
+            const b = new UIButton(ov, 82, 32, text, 13, () => {
                 this.selDiff = key;
                 this.rebuildMenu();
             });
-            b.setPosition(dx, -152);
+            b.setPosition(dx, -128);
             b.setActive(this.selDiff === key);
             this.menuBtns.push(b);
-            dx += 90;
+            dx += 88;
         }
 
-        // skirmish options, like the classic set-up screen
-        const cLabel = mkLabel(ov, '资金', 14, '#93a3b0');
-        cLabel.node.setPosition(20, -152, 0);
-        let cx = 84;
+        const crLabel = mkLabel(ov, '资金', 13, '#93a3b0');
+        crLabel.node.setPosition(-244, -128, 0);
+        let cx = -166;
         for (const amount of [4200, 7000, 10000]) {
-            const b = new UIButton(ov, 76, 32, `${amount / 1000}k`, 13, () => {
+            const b = new UIButton(ov, 74, 32, `${amount / 1000}k`, 13, () => {
                 this.selCredits = amount;
                 this.rebuildMenu();
             });
-            b.setPosition(cx, -152);
+            b.setPosition(cx, -128);
             b.setActive(this.selCredits === amount);
             this.menuBtns.push(b);
-            cx += 82;
+            cx += 80;
         }
 
-        const sw = new UIButton(ov, 150, 32, `超级武器 ${this.selSuper ? '开' : '关'}`, 13, () => {
+        const sw = new UIButton(ov, 178, 32, `超级武器 ${this.selSuper ? '开' : '关'}`, 13, () => {
             this.selSuper = !this.selSuper;
             this.rebuildMenu();
         }, this.selSuper ? PAL.cyan : PAL.cyanDim);
-        sw.setPosition(432, -152);
+        sw.setPosition(196, -128);
         sw.setActive(this.selSuper);
         this.menuBtns.push(sw);
 
-        const start = new UIButton(ov, 250, 54, '开 始 战 斗', 21, () => {
+        const start = new UIButton(ov, 320, 54, '开 始 战 斗', 21, () => {
             this.mode = 'game';
             this.menuLayer.active = false;
-            this.hooks.onStart(this.selFaction, this.selDiff, this.selCredits, this.selSuper);
+            this.hooks.onStart(
+                this.selFaction, this.selDiff, this.selCredits, this.selSuper,
+                this.selMap, this.selColor,
+            );
         }, PAL.cyan);
-        start.setPosition(0, -238);
+        start.setPosition(0, -210);
         this.menuBtns.push(start);
 
-        const tip = mkLabel(ov, '单击选中 · 拖拽框选 · 双指平移缩放 · 长按呼出指令盘', 12, '#8a99a6');
-        tip.node.setPosition(0, -300, 0);
+        const tip = mkLabel(ov, '单击选中 · 拖拽框选 · 双指平移缩放 · 长按呼出指令盘', 11, '#7f8e9b');
+        tip.node.setPosition(0, -286, 0);
         alignLabel(tip, 'center');
     }
 
-    private factionCard(ov: Node, f: Faction, x: number) {
+    /** selected-state colour for the swatch ring */
+    private factionCard(ov: Node, f: Faction, x: number, y: number) {
         const fd = FACTIONS[f];
+        const w = 300, h = 186;
         const n = mkNode(ov, 'fc' + f);
-        n.setPosition(x, 40, 0);
+        n.setPosition(x, y, 0);
         const g = n.addComponent(Graphics);
         const sel = this.selFaction === f;
-        g.roundRect(-172, -112, 344, 224, 12);
-        g.fillColor = HEX(sel ? '#1b2530' : '#131920', 242);
+        g.roundRect(-w / 2, -h / 2, w, h, 12);
+        g.fillColor = HEX(sel ? '#1b2530' : '#121820', 242);
         g.fill();
         g.strokeColor = sel ? HEX(fd.color, 235) : HEX('#28323c', 220);
         g.lineWidth = sel ? 2.4 : 1.2;
         g.stroke();
-        g.rect(-172, 108, 344, 3);
+        g.rect(-w / 2, h / 2 - 3, w, 3);
         g.fillColor = HEX(fd.color, sel ? 235 : 80);
         g.fill();
 
         const em = mkNode(n, 'em').addComponent(Graphics);
-        em.node.setPosition(104, 30, 0);
-        circ(em, 0, 0, 34, null, HEX(fd.color, sel ? 200 : 90), 1.4);
-        circ(em, 0, 0, 22, HEX(fd.color, sel ? 34 : 12), null);
+        em.node.setPosition(w / 2 - 52, h / 2 - 46, 0);
+        circ(em, 0, 0, 26, null, HEX(fd.color, sel ? 210 : 80), 1.4);
+        circ(em, 0, 0, 17, HEX(fd.color, sel ? 30 : 10), null);
         if (f === 'BU') {
-            em.moveTo(-14, -12); em.lineTo(0, 18); em.lineTo(14, -12); em.close();
-            em.fillColor = HEX(fd.color, 210); em.fill();
-            em.rect(-6, -16, 12, 5); em.fillColor = HEX(fd.color, 150); em.fill();
+            em.moveTo(-11, -9); em.lineTo(0, 14); em.lineTo(11, -9); em.close();
+            em.fillColor = HEX(fd.color, 220); em.fill();
+            em.rect(-5, -13, 10, 4); em.fillColor = HEX(fd.color, 150); em.fill();
         } else {
-            em.moveTo(-16, 10); em.quadraticCurveTo(0, -22, 16, 10);
-            em.strokeColor = HEX(fd.color, 220); em.lineWidth = 3; em.stroke();
-            em.moveTo(-8, 16); em.lineTo(8, 16);
-            em.strokeColor = HEX(fd.color, 160); em.lineWidth = 2; em.stroke();
+            em.moveTo(-12, 8); em.quadraticCurveTo(0, -17, 12, 8);
+            em.strokeColor = HEX(fd.color, 220); em.lineWidth = 2.6; em.stroke();
+            em.moveTo(-6, 13); em.lineTo(6, 13);
+            em.strokeColor = HEX(fd.color, 160); em.lineWidth = 1.8; em.stroke();
         }
 
-        const t = mkLabel(n, fd.name, 25, fd.color, true);
-        t.node.setPosition(-150, 74, 0);
-        const en = mkLabel(n, fd.en, 10, '#7c8b98');
-        en.node.setPosition(-150, 50, 0);
-        const blurb = mkLabel(n, fd.blurb, 12, '#b6c4d0');
-        blurb.node.setPosition(-150, 12, 0);
-        blurb.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
-        blurb.node.getComponent(UITransform)!.setContentSize(250, 44);
-        blurb.lineHeight = 19;
+        const t = mkLabel(n, fd.name, 23, fd.color, true);
+        t.node.setPosition(-w / 2 + 18, h / 2 - 30, 0);
+        const en = mkLabel(n, fd.en, 9, '#7c8b98');
+        en.node.setPosition(-w / 2 + 18, h / 2 - 52, 0);
+        const blurb = mkLabel(n, fd.blurb, 11, '#b6c4d0');
+        blurb.node.setPosition(-w / 2 + 18, h / 2 - 84, 0);
+        blurb.node.getComponent(UITransform)!.setContentSize(w - 36, 40);
+        blurb.lineHeight = 17;
         blurb.overflow = Label.Overflow.RESIZE_HEIGHT;
-        const style = mkLabel(n, `▸ ${fd.style}`, 12, fd.glow);
-        style.node.setPosition(-150, -40, 0);
-        const motto = mkLabel(n, `「${fd.motto}」`, 12, '#8092a0');
-        motto.node.setPosition(-150, -74, 0);
+        const style = mkLabel(n, `▸ ${fd.style}`, 11, fd.glow);
+        style.node.setPosition(-w / 2 + 18, -h / 2 + 44, 0);
+        const motto = mkLabel(n, `「${fd.motto}」`, 10, '#8092a0');
+        motto.node.setPosition(-w / 2 + 18, -h / 2 + 22, 0);
 
-        /*
-         * The hit target must be parented to the MENU layer, not the card: UIButton
-         * keeps its own cx/cy for hit-testing (`onTap` compares against them), and
-         * parenting it to the card left every card's hit box at (0,0) — which is
-         * exactly why faction selection appeared to do nothing.
-         */
-        const hit = new UIButton(ov, 344, 224, '', 1, () => {
+        const hit = new UIButton(ov, w, h, '', 1, () => {
             this.selFaction = f;
             this.rebuildMenu();
         });
-        hit.setPosition(x, 40);
+        hit.setPosition(x, y);
         hit.g.clear();
         this.menuBtns.push(hit);
     }

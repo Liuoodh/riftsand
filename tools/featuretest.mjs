@@ -38,12 +38,12 @@ const app = () => `window.cc.director.getScene().getChildByName('Canvas').getChi
 
 // ---- 1. faction selection by tapping the card ----
 const before = await page.evaluate(`(${app()}).ui.selFaction`);
-await page.mouse.click(640 + 196, 360 - 40);       // DS card
+await page.mouse.click(640 + 322, 360 - 145);      // DS card (v0.11 layout)
 await new Promise((r) => setTimeout(r, 300));
 const after = await page.evaluate(`(${app()}).ui.selFaction`);
 check('点击阵营卡能切换阵营', before === 'BU' && after === 'DS', `${before} → ${after}`);
 
-await page.mouse.click(640 - 196, 360 - 40);       // back to BU
+await page.mouse.click(640 - 322, 360 - 145);      // back to BU
 await new Promise((r) => setTimeout(r, 200));
 const back = await page.evaluate(`({ sel: (${app()}).ui.selFaction, start: (${app()}).ui.menuBtns.length })`);
 check('可以切回另一阵营', back.sel === 'BU', back.sel);
@@ -81,16 +81,28 @@ const raise = await page.evaluate(async () => {
     }
     if (!spot) return { err: 'no spot' };
     const b = g.place(window.__riftsandDefs.BUILDINGS.furnace, 0, spot.tx, spot.ty, false);
+    const hpAtPlace = b.hp / b.maxHp;
+    const t0 = g.time;
     const samples = [];
     for (let i = 0; i < 400 && !b.done; i++) {
-        g.update(0.1);
-        if (i % 20 === 0) samples.push({ p: +b.progress.toFixed(2), st: b.status });
+        g.update(0.05);
+        if (i % 4 === 0) samples.push({ p: +b.progress.toFixed(2), st: b.status });
     }
     samples.push({ p: +b.progress.toFixed(2), st: b.status });
-    return { samples, id: b.id, done: b.done, status: b.status };
+    return {
+        samples, id: b.id, done: b.done, status: b.status,
+        buildSeconds: +(g.time - t0).toFixed(2), hpAtPlace: +hpAtPlace.toFixed(3),
+    };
 });
 const seenMid = raise.samples?.some((s) => s.p > 0.05 && s.p < 0.95);
 check('建筑有建造过程（进度 0→1）', !!seenMid, JSON.stringify(raise.samples?.slice(0, 5)));
+// The retail engine finishes the structure in the sidebar; placing it only plays
+// the rise animation (~BuildupTime). Anything close to def.time here means the
+// old "build it twice" behaviour is back.
+check('摆放后只播放升起动画（≤1.6s，不是重新建造）',
+    raise.buildSeconds !== undefined && raise.buildSeconds <= 1.6,
+    `${raise.buildSeconds}s`);
+check('摆放时建筑已满血（不是工地）', raise.hpAtPlace === 1, `hp=${raise.hpAtPlace}`);
 check('建造完成后状态为 ready', raise.status === 'ready' && raise.done, raise.status);
 
 // ---- 4. sell: builddown, refund on completion, rubble left ----

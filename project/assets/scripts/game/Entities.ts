@@ -41,6 +41,22 @@ export function setWorldBlocked(fn: ((x: number, y: number, r: number) => boolea
     worldBlockedFn = fn;
 }
 
+/**
+ * Unit-vs-unit occupancy probe, injected by Game.
+ *
+ * The reference never resolves a unit collision by moving both units apart: a
+ * cell holds at most one vehicle, or three infantry on distinct sub-cells
+ * (MoveTask.canStopAtTile). A unit that would violate that simply does not step
+ * — it waits, the blocker is asked to move aside, or the path is recomputed.
+ * That is what stops a walking soldier from shoving a standing one across the
+ * map, and what stops enemies walking through each other.
+ */
+let unitBlockedFn: ((u: Unit, x: number, y: number) => boolean) | null = null;
+
+export function setUnitBlocked(fn: ((u: Unit, x: number, y: number) => boolean) | null) {
+    unitBlockedFn = fn;
+}
+
 export class Entity {
     id = nextId++;
     owner: PlayerId = 0;
@@ -90,6 +106,27 @@ export class Unit extends Entity {
     /** cell this unit is registered on in the occupation table */
     cellX = -1;
     cellY = -1;
+    /** infantry sub-position inside its cell, 0..2 (reference: position.subCell) */
+    subCell = 0;
+    /** how long this unit has been unable to enter its next cell */
+    blockT = 0;
+    /** progress sampler: position at the last sample and time since it */
+    progX = 0;
+    progY = 0;
+    progT = 0;
+    /** distance to the current goal at the last sample (0 = not measured yet) */
+    progGoalD = 0;
+    /** how long we have been politely queued behind a moving unit */
+    trafficT = 0;
+    /** re-routes attempted for the current order, capped like MoveResult.Fail */
+    repathTry = 0;
+    /** cell this unit wanted to enter but could not */
+    blockTx = -1;
+    blockTy = -1;
+    /** >0 means "do not ask for a new path" (avoids oscillating on failure) */
+    repathHold = 0;
+    /** >0 while this unit is moving aside for someone else */
+    asideT = 0;
     /** cached "engaged" target for attack-move */
     engage: Entity | null = null;
     bob = Math.random() * Math.PI * 2;
@@ -149,6 +186,20 @@ export class Unit extends Entity {
     }
 
     get radius() { return this.def.radius; }
+
+    /**
+     * Radius used for *movement* tests.
+     *
+     * The drawn hull deliberately overhangs its cell (that is how a tank reads
+     * as bigger than a tile). Using the full visual radius for collision made a
+     * truck unable to drive along a cell row next to a building: the cell centre
+     * is exactly 16px from the wall and the test needs 16px of clearance, so any
+     * one-pixel drift was rejected and the unit ground to a halt. The retail
+     * engine is cell-based here (`getPassableSpeed(tile)`) and lets the sprite
+     * overhang; 0.45 reproduces that — the hull may graze a wall by a few pixels
+     * but can never end up half-buried in it.
+     */
+    get steerRadius() { return this.def.radius * 0.45; }
     get speed() { return this.def.speed; }
     get mass() { return unitMass(this.def); }
     get turnRate() { return unitTurn(this.def); }
@@ -173,11 +224,31 @@ export class Unit extends Entity {
     get slowed() { return this.slowUntil > -1; }
     get invulnerable() { return this.invulnUntil > -1; }
 
-    /** can a hull of this radius sit here? airborne units always can */
+    /** can a hull of this radius sit here (terrain + structures)? */
     canOccupy(x: number, y: number) {
         if (this.isAir) return true;
         if (!worldBlockedFn) return true;
         return !worldBlockedFn(x, y, this.radius);
+    }
+
+    /**
+     * Can this unit take one step to (x, y)?
+     *
+     * Terrain first, then the occupancy table. The reference does the same two
+     * checks in MoveTask.canStopAtTile before it lets a unit finish a move.
+     */
+    canStepTo(x: number, y: number) {
+        if (this.isAir) return true;
+        if (worldBlockedFn && worldBlockedFn(x, y, this.steerRadius)) return false;
+        if (unitBlockedFn && unitBlockedFn(this, x, y)) return false;
+        return true;
+    }
+
+    /** remember which cell we could not enter, for the blocker lookup */
+    private noteBlocked(ux: number, uy: number) {
+        const look = this.radius + 6;
+        this.blockTx = Math.floor((this.x + ux * look + HALF) / TILE);
+        this.blockTy = Math.floor((this.y + uy * look + HALF) / TILE);
     }
 
     moveStep(dt: number, speedMul: number): boolean {
@@ -246,36 +317,56 @@ export class Unit extends Entity {
         const ax = ux * step;
         const ay = uy * step;
 
-        // Move, but never into solid ground. Sliding along one axis is what keeps
-        // a column hugging a wall instead of grinding to a halt, and when both
-        // axes are blocked the unit simply stays put and reports it — the old
-        // code instead teleported it to the nearest free cell centre, which is
-        // what made harvesters appear to "reset" over and over at the start.
-        if (!this.canOccupy(this.x + ax, this.y + ay)) {
-            const slideX = this.canOccupy(this.x + ax, this.y);
-            const slideY = this.canOccupy(this.x, this.y + ay);
-            if (slideX) {
-                this.x += ax;
-                this.vx = ux * this.speedCur;
-                this.vy = 0;
-            } else if (slideY) {
-                this.y += ay;
-                this.vx = 0;
-                this.vy = uy * this.speedCur;
-            } else {
-                this.speedCur = 0;
-                this.vx = 0;
-                this.vy = 0;
-                this.blockedNow = true;
-                return this.path.length > 0;
-            }
-        } else {
+        /*
+         * One step, three candidates: straight, then either axis alone.
+         *
+         * The straight step is refused when the destination cell has no room
+         * (one vehicle per cell, three infantry per cell — MoveTask.canStopAtTile)
+         * or when the hull would overlap solid ground. Sliding along an axis is
+         * what lets a column hug a wall instead of grinding to a halt; when all
+         * three are refused the unit stops and reports the cell it wanted, which
+         * is what drives the aside / re-path / give-up chain in Game.
+         */
+        const beforeD = d;
+        let moved = false;
+        if (this.canStepTo(this.x + ax, this.y + ay)) {
             this.x += ax;
             this.y += ay;
             this.vx = ux * this.speedCur;
             this.vy = uy * this.speedCur;
+            moved = true;
+        } else if (this.canStepTo(this.x + ax, this.y)) {
+            // partial progress along one axis: keep going
+            this.x += ax;
+            this.vx = ux * this.speedCur;
+            this.vy = 0;
+            moved = true;
+        } else if (this.canStepTo(this.x, this.y + ay)) {
+            this.y += ay;
+            this.vx = 0;
+            this.vy = uy * this.speedCur;
+            moved = true;
         }
-        this.blockedNow = false;
+
+        /*
+         * "Blocked" means *no progress toward the waypoint*, not "the straight
+         * step was refused". A unit pressed square against a parked hull can
+         * still slide a hundredth of a pixel sideways, and treating that as
+         * movement left it standing there forever with blockedNow = false — the
+         * aside / re-route chain never ran. Measuring the actual gain fixes both
+         * that and the wall-hugging case in one rule.
+         */
+        if (!moved) {
+            this.speedCur = 0;
+            this.vx = 0;
+            this.vy = 0;
+            this.blockedNow = true;
+            this.noteBlocked(ux, uy);
+            return true;
+        }
+        const gained = beforeD - Math.hypot(wp.x - this.x, wp.y - this.y);
+        this.blockedNow = gained < Math.min(step, 9) * 0.4;
+        if (this.blockedNow) this.noteBlocked(ux, uy);
         return true;
     }
 

@@ -17,7 +17,7 @@ import {
 import {
     BUILDINGS, UNITS, Faction, HALF, TILE, MAP_TILES, clamp, dist,
     TAP_MAX_MS, TAP_SLOP, LONG_PRESS_MS, BOX_MIN_PX, SNAP_PX,
-    ProdCat, SuperWeaponId, SUPER_WEAPONS,
+    ProdCat, SuperWeaponId, SUPER_WEAPONS, PLAYER_COLORS, MAPS,
 } from './core/Core';
 import { Game } from './game/Game';
 import { Building, Unit, Entity } from './game/Entities';
@@ -29,7 +29,7 @@ import { ShpFile } from './assets/Shp';
 import { TmpFile, encodeTmp, tmpTileToRgba, tmpRowWidth } from './assets/Tmp';
 import { encodeShp } from './assets/ShpEncode';
 import { parsePal, remapTeam, syntheticPal } from './assets/Palette';
-import { frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable } from './assets/Assets';
+import { frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable, clearFrameCache } from './assets/Assets';
 import { UI, mkNode } from './ui/UI';
 import { RadialItem } from './ui/Overlay';
 import { sfx } from './audio/Sfx';
@@ -84,6 +84,8 @@ export class RiftApp extends Component {
     private diff: 'easy' | 'normal' | 'hard' = 'normal';
     private credits = 4200;
     private superWeapons = true;
+    private mapId = 'basin';
+    private colorId = 'azure';
     private started = false;
     /** world point the build ghost sticks to while no finger is down */
     private lastBuildWorld: { x: number | null; y: number | null } = { x: null, y: null };
@@ -121,8 +123,9 @@ export class RiftApp extends Component {
                 this.ui.setSpeedLabel(this.game.speedMul);
             },
             onResume: () => this.resume(),
-            onStart: (f, d, credits, superWeapons) => this.startGame(f, d, credits, superWeapons),
-            onRestart: () => this.startGame(this.faction, this.diff, this.credits, this.superWeapons),
+            onStart: (f, d, credits, superWeapons, mapId, colorId) =>
+                this.startGame(f, d, credits, superWeapons, mapId, colorId),
+            onRestart: () => this.startGame(this.faction, this.diff, this.credits, this.superWeapons, this.mapId, this.colorId),
             onQuit: () => this.quitToMenu(),
             onMinimap: (wx, wy) => this.cam?.focus(wx, wy),
             onCancelBuild: () => {
@@ -732,12 +735,23 @@ export class RiftApp extends Component {
         if (this.ui) { this.ui.game = null; this.ui.cam = null; }
     }
 
-    private startGame(faction: Faction, diff: 'easy' | 'normal' | 'hard', credits = 4200, superWeapons = true) {
+    private startGame(
+        faction: Faction, diff: 'easy' | 'normal' | 'hard', credits = 4200, superWeapons = true,
+        mapId = 'basin', colorId = 'azure',
+    ) {
         this.ensureAudio();
         this.faction = faction;
         this.diff = diff;
         this.credits = credits;
         this.superWeapons = superWeapons;
+        this.mapId = mapId;
+        this.colorId = colorId;
+        // the enemy takes a colour from the far end of the ramp so the two armies
+        // never share a silhouette colour
+        const ci = Math.max(0, PLAYER_COLORS.findIndex((c) => c.id === colorId));
+        const enemyColor = PLAYER_COLORS[(ci + 4) % PLAYER_COLORS.length].id;
+        // baked unit frames embed the team colour, so the cache must be dropped
+        clearFrameCache();
         this.disposeGame();
         const seed = (Math.random() * 1000000) | 0;
         const game = new Game(seed, faction, diff, {
@@ -751,7 +765,7 @@ export class RiftApp extends Component {
                 sfx.play(name, gain);
             },
             onShake: (strength) => this.cam?.addShake(strength),
-        }, { credits, superWeapons, crates: true });
+        }, { credits, superWeapons, crates: true, mapId, colors: [colorId, enemyColor] });
         const app = this.ui;
 
         // world sits behind the HUD
@@ -985,7 +999,7 @@ function tryBoot(): boolean {
     anyObj.__riftsandConst = { TILE, HALF, MAP_TILES };
     anyObj.__riftsandAssets = {
         ShpFile, TmpFile, encodeShp, parsePal, remapTeam, syntheticPal,
-        frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable,
+        frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable, clearFrameCache,
         encodeTmp, tmpTileToRgba, tmpRowWidth,
     };
     let appNode = canvas.getChildByName('App');

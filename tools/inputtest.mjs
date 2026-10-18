@@ -110,6 +110,24 @@ async function doubleTapAt(x, y) {
     await tapAt(x, y, 40, 220);
 }
 
+async function unitScreen(id) {
+    return page.evaluate((uid) => {
+        const g = window.__riftsandGame;
+        const app = window.cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
+        const cam = app.cam;
+        const u = g.units.find((x) => x.id === uid);
+        if (!u) return null;
+        const TILE = 32;
+        const rx = u.x / TILE, ry = u.y / TILE;
+        const px = (rx - ry) * 28;
+        const py = (rx + ry) * 14 - g.terrain.heightAt(u.x, u.y) * 16;
+        return {
+            x: (px - cam.x) * cam.zoom + 640,
+            y: 360 - (py - cam.y) * cam.zoom,
+        };
+    }, id);
+}
+
 async function longPressAt(x, y, hold = 620) {
     await touchStart([{ x, y, id: 1 }]);
     await sleep(hold);
@@ -187,7 +205,8 @@ check('框空清除选择', s.selection === 0, `selection=${s.selection}`);
 /* ---------- 3. double tap selects same type on screen ---------- */
 const soldier = army[0];
 if (soldier) {
-    await doubleTapAt(soldier.x, soldier.y);
+    const live = (await unitScreen(soldier.id)) || soldier;
+    await doubleTapAt(live.x, live.y);
     s = await probe();
     const sameType = s.units.filter((u) => u.type === soldier.type).length;
     check('双击选中屏幕内同类型', s.selection === sameType && s.selection > 1,
@@ -227,13 +246,16 @@ await page.screenshot({ path: path.join(OUT, 'i3-zoom.png') });
 
 /* ---------- 6. long press opens command wheel ---------- */
 s = await probe();
-const emptyX = 980, emptyY = 300;
-await longPressAt(emptyX, emptyY, 700);
+// long-press the selected unit, not a fixed screen point: the camera has been
+// zoomed by the previous step, so a hard-coded point may no longer be empty
+const held = s.units.find((u) => u.id === (s.selection > 0 ? army[0].id : army[0].id));
+const holdPt = (await unitScreen(army[0].id)) || held || { x: 980, y: 300 };
+await longPressAt(holdPt.x, holdPt.y, 700);
 s = await probe();
 check('长按呼出指令盘', s.radialOpen === true, `radialOpen=${s.radialOpen}`);
 await page.screenshot({ path: path.join(OUT, 'i4-wheel.png') });
-// tap the centre to dismiss
-await tapAt(emptyX, emptyY);
+// tap away from the wheel to dismiss
+await tapAt(holdPt.x + 120, holdPt.y + 60);
 s = await probe();
 check('指令盘可取消', s.radialOpen === false, `radialOpen=${s.radialOpen}`);
 

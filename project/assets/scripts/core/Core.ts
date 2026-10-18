@@ -137,6 +137,111 @@ export const TILE = 32;
  * an edge with the base off-centre.
  */
 export const MAP_TILES = 80;
+
+/**
+ * Seconds a placed structure takes to rise out of the ground.
+ * Reference: GeneralRules.buildupTime (~16 ticks at 15 tick/s); long enough to
+ * read as an animation, short enough not to feel like construction.
+ */
+export const BUILDUP_TIME = 1.1;
+
+/* ------------------------------------------------------------------ */
+/* Skirmish setup: maps and player colours                             */
+/* ------------------------------------------------------------------ */
+
+export interface MapDef {
+    id: string;
+    name: string;
+    en: string;
+    /** one-line trait shown on the setup screen */
+    trait: string;
+    seed: number;
+    /** noise threshold above which a cell is rock (higher = fewer rocks) */
+    rocks: number;
+    /** noise threshold above which a cell is a dune (higher = fewer dunes) */
+    dunes: number;
+    /** half-width of the carved mid lane, in cells */
+    lane: number;
+    /** ore richness multiplier */
+    ore: number;
+}
+
+/**
+ * Playable maps. Terrain is procedural, so a "map" is a seed plus a handful of
+ * generation constants — the same recipe the retail random-map generator uses
+ * (seed + terrain mix + ore density).
+ */
+export const MAPS: MapDef[] = [
+    {
+        id: 'basin', name: '沙海盆地', en: 'SAND BASIN',
+        trait: '标准地貌 · 中场开阔', seed: 90210,
+        rocks: 0.715, dunes: 0.575, lane: 1, ore: 1,
+    },
+    {
+        id: 'ridges', name: '岩脊走廊', en: 'RIDGE PASS',
+        trait: '岩石密集 · 隘口多', seed: 51473,
+        rocks: 0.663, dunes: 0.60, lane: 1, ore: 0.9,
+    },
+    {
+        id: 'dunes', name: '大沙丘', en: 'GREAT DUNES',
+        trait: '起伏剧烈 · 车辆减速', seed: 33017,
+        rocks: 0.775, dunes: 0.487, lane: 2, ore: 1.1,
+    },
+    {
+        id: 'oasis', name: '绿洲环带', en: 'OASIS BELT',
+        trait: '矿脉富集 · 环形通路', seed: 70241,
+        rocks: 0.735, dunes: 0.545, lane: 2, ore: 1.25,
+    },
+    {
+        id: 'flats', name: '盐碱平原', en: 'SALT FLATS',
+        trait: '一马平川 · 无险可守', seed: 12899,
+        rocks: 0.845, dunes: 0.665, lane: 3, ore: 0.85,
+    },
+];
+
+export const mapById = (id: string): MapDef => MAPS.find((m) => m.id === id) ?? MAPS[0];
+
+export interface PlayerColor {
+    id: string;
+    name: string;
+    /** vehicle/hull team colour */
+    hex: string;
+}
+
+/**
+ * Player colour ramp. The reference lets each side pick a house colour that is
+ * applied to every unit and structure it owns, independently of the side.
+ */
+export const PLAYER_COLORS: PlayerColor[] = [
+    { id: 'azure', name: '钢蓝', hex: '#3fa9d8' },
+    { id: 'crimson', name: '赤红', hex: '#d9534f' },
+    { id: 'moss', name: '苔绿', hex: '#63a95a' },
+    { id: 'amber', name: '琥珀', hex: '#d9a13f' },
+    { id: 'violet', name: '紫晶', hex: '#9a6ad8' },
+    { id: 'teal', name: '青碧', hex: '#3fbfa8' },
+    { id: 'bone', name: '骨白', hex: '#c9c3b4' },
+    { id: 'rust', name: '铁锈', hex: '#b56b3a' },
+];
+
+/**
+ * Team colour currently applied to each side. Set when a match starts, read by
+ * every painter, so units and structures wear the player's chosen colour instead
+ * of a fixed faction colour.
+ */
+const activeTeamColor: Record<Faction, string> = {
+    BU: PAL.teamBU,
+    DS: PAL.teamDS,
+};
+
+export function setActiveTeamColor(f: Faction, hex: string) {
+    activeTeamColor[f] = hex;
+}
+
+export const activeTeamColorOf = (f: Faction): string => activeTeamColor[f];
+
+export const colorById = (id: string): PlayerColor =>
+    PLAYER_COLORS.find((c) => c.id === id) ?? PLAYER_COLORS[0];
+
 export const MAP_SIZE = TILE * MAP_TILES;
 export const HALF = MAP_SIZE / 2;
 

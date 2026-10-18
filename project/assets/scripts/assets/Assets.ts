@@ -19,7 +19,7 @@
  */
 
 import { SpriteFrame, Texture2D, Rect, Size, Vec2 } from 'cc';
-import { UnitDef, Faction } from '../core/Core';
+import { UnitDef, Faction, activeTeamColorOf } from '../core/Core';
 import { CanvasPen } from './Pen';
 import { paintUnit, paintHull } from '../render/Art';
 import { ShpFile } from './Shp';
@@ -146,7 +146,9 @@ const isVehicleHull = (def: UnitDef) => def.kind === 'vehicle';
 export function unitBodyFrame(
     def: UnitDef, faction: Faction, dir8: number, frame: number,
 ): SpriteFrame | null {
-    const key = `u|${def.id}|${faction}|${dir8}|${frame}`;
+    // the team colour is part of the identity of a baked frame: two matches with
+    // different player colours must not reuse each other's textures
+    const key = `u|${def.id}|${faction}|${activeTeamColorOf(faction)}|${dir8}|${frame}`;
     const hit = cache.get(key);
     if (hit) return hit;
     return bakeFrame(FRAME_W, FRAME_H, (pen) => {

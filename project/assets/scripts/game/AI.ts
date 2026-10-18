@@ -175,6 +175,26 @@ export class AIController {
         this.g.queueBuild(id, this.pid);
     }
 
+    /**
+     * Would this footprint eat into a refinery's working apron?
+     *
+     * A refinery needs its surrounding cells free: trucks approach from any side
+     * and have to be able to stand next to it. Two cells of clearance keeps the
+     * dock usable and the lanes into the ore field open.
+     */
+    private blocksRefineryApron(def: { size: number }, tx: number, ty: number): boolean {
+        const pad = 2;
+        for (const b of this.g.buildings) {
+            if (b.dead || b.owner !== this.pid || !b.def.dropoff) continue;
+            const x0 = b.tx - pad, y0 = b.ty - pad;
+            const x1 = b.tx + b.size + pad, y1 = b.ty + b.size + pad;
+            const ox = tx + def.size > x0 && tx < x1;
+            const oy = ty + def.size > y0 && ty < y1;
+            if (ox && oy) return true;
+        }
+        return false;
+    }
+
     /** called by Game when the structure queue finishes for this player */
     placeStructure(defId: string) {
         const def = BUILDINGS[defId];
@@ -198,6 +218,12 @@ export class AIController {
                 const tx = Math.round(core.tx + Math.cos(ang) * r);
                 const ty = Math.round(core.ty + Math.sin(ang) * r);
                 if (!this.g.canPlace(def, tx, ty, this.pid).ok) continue;
+                // Keep a two-cell apron around every refinery. Retail AI bases
+                // reserve their refinery dock; without this the AI surrounds its
+                // own drop-off with buildings and its trucks can never deliver
+                // (measured: AI income 0 for the whole match).
+                if (!def.dropoff && this.blocksRefineryApron(def, tx, ty)) continue;
+                if (this.g.wouldSealBase(def, tx, ty, this.pid)) continue;
                 // keep anti-air and defenses facing the enemy side
                 const towardEnemy = this.pid === 1 ? tx > core.tx : tx < core.tx;
                 const score = (towardEnemy ? -3 : 0) + r * 0.4 + Math.abs(Math.sin(ang)) * 2;
@@ -213,6 +239,7 @@ export class AIController {
                     const tx = Math.round(core.tx + Math.cos(ang) * r);
                     const ty = Math.round(core.ty + Math.sin(ang) * r);
                     if (!this.g.canPlace(def, tx, ty, this.pid, true).ok) continue;
+                    if (this.g.wouldSealBase(def, tx, ty, this.pid)) continue;
                     this.g.place(def, this.pid, tx, ty, false);
                     return true;
                 }

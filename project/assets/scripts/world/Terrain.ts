@@ -163,7 +163,11 @@ export class TerrainMap {
         }
     }
 
-    generate(seed: number) {
+    generate(seed: number, preset?: { rocks?: number; dunes?: number; lane?: number; ore?: number }) {
+        const rockT = preset?.rocks ?? 0.715;
+        const duneT = preset?.dunes ?? 0.575;
+        const laneW = preset?.lane ?? 1;
+        const oreMul = preset?.ore ?? 1;
         const rng = makeRng(seed);
         const N = this.size;
         this.kind.fill(TileKind.Sand);
@@ -196,10 +200,10 @@ export class TerrainMap {
                 const n = noise(u, v) * 0.65 + noise(u * 2.7 + 3.1, v * 2.7 + 1.7) * 0.35;
                 const i = this.idx(x, y);
                 this.tint[i] = n;
-                if (n > 0.715) {
+                if (n > rockT) {
                     this.kind[i] = TileKind.Rock;
                     this.solid[i] = 1;
-                } else if (n > 0.575) {
+                } else if (n > duneT) {
                     this.kind[i] = TileKind.Dune;
                 }
             }
@@ -221,7 +225,7 @@ export class TerrainMap {
         // a passable mid lane so early scouting is possible
         for (let x = 8; x < N - 8; x++) {
             const y = Math.round(N / 2 + Math.sin(x * 0.22) * 4);
-            for (let d = -1; d <= 1; d++) {
+            for (let d = -laneW; d <= laneW; d++) {
                 const yy = y + d;
                 if (!this.inside(x, yy)) continue;
                 const i = this.idx(x, yy);
@@ -266,8 +270,9 @@ export class TerrainMap {
         this.nodes = [];
         let nid = 1;
         for (const [tx, ty, amount] of spots) {
-            this.addNode(tx, ty, amount, nid++, rng);
-            this.addNode(N - 1 - tx, N - 1 - ty, amount, nid++, rng);
+            const rich = Math.round(amount * oreMul);
+            this.addNode(tx, ty, rich, nid++, rng);
+            this.addNode(N - 1 - tx, N - 1 - ty, rich, nid++, rng);
         }
         this.rebuildSpeed();
         this.rebuildHeight();

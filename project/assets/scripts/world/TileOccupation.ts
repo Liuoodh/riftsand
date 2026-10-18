@@ -85,11 +85,62 @@ export class TileOccupation {
         return this.fill[this.idx(tx, ty)];
     }
 
-    /** can another unit of this weight step onto the cell? */
+    /**
+     * Can `u` enter this cell?
+     *
+     * Reference: MoveTask.canStopAtTile() rejects a cell when two other infantry
+     * already stand on it, or when the infantry would land on an occupied
+     * sub-cell. Vehicles are not counted there at all; we additionally refuse to
+     * let infantry walk into a cell a vehicle is parked on, and refuse to let a
+     * vehicle into a cell another vehicle occupies. Infantry caught under a
+     * vehicle are scattered by the caller (reference: ScatterTask).
+     */
     hasRoomFor(u: Unit, tx: number, ty: number) {
-        const w = TileOccupation.weightOf(u);
-        if (w >= 1) return this.fillAt(tx, ty) <= 0.001;
-        return this.fillAt(tx, ty) + w <= 1.001;
+        if (!this.inside(tx, ty)) return false;
+        const set = this.cells[this.idx(tx, ty)];
+        if (!set) return true;
+        const isInfantry = u.def.kind === 'infantry';
+        let infantry = 0;
+        let vehicles = 0;
+        for (const o of set) {
+            if (o === u || o.dead) continue;
+            if (o.def.kind === 'infantry') infantry++;
+            else vehicles++;
+        }
+        if (isInfantry) return infantry < 3 && vehicles === 0;
+        /*
+         * Two harvesters may share a cell while docking.
+         *
+         * They are civilians working the same field and the same refinery apron;
+         * with strict one-per-cell they lock nose to nose in a one-cell lane and
+         * neither ever mines (measured: income 0 for a whole match). Retail
+         * harvesters visibly overlap while unloading, so the looseness is
+         * faithful as well as necessary.
+         */
+        if (u.isHarvester) {
+            let harvesters = 0;
+            for (const o of set) {
+                if (o === u || o.dead) continue;
+                if (o.isHarvester) harvesters++;
+            }
+            return harvesters < 2;
+        }
+        return vehicles === 0;
+    }
+
+    /** infantry sharing a cell get distinct sub-positions, 0..2 */
+    claimSubCell(u: Unit, tx: number, ty: number) {
+        const set = this.cells[this.idx(tx, ty)];
+        if (!set) return 0;
+        const used = [false, false, false];
+        for (const o of set) {
+            if (o === u || o.dead) continue;
+            if (o.def.kind !== 'infantry') continue;
+            const c = (o as any).subCell as number;
+            if (c >= 0 && c < 3) used[c] = true;
+        }
+        for (let i = 0; i < 3; i++) if (!used[i]) return i;
+        return 0;
     }
 
     clear() {

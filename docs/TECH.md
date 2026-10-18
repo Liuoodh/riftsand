@@ -347,3 +347,77 @@ tx   = (rx - ry) · ISO_HW ; ty = (rx + ry) · ISO_HH
 | 迷雾多边形 | 每行 1–3 段 + 边界格，约 300–600 |
 | 单位帧 | 8 方向 × 4 帧 / 单位 / 阵营，LRU 900 |
 | 分离 | 空间网格 `query(r+36)`，成对解算一次 |
+
+---
+
+## 7. 移动与碰撞实现（v0.11）
+
+### 7.1 一帧的顺序
+
+```
+update(dt)
+  grid.rebuild()            // 上一帧位置，够用
+  updateBuildings()         // buildup / builddown 计时
+  updateUnits()             // 每种指令调用 moveStep
+  resolveCollisions()       // 出墙、子格铺开、同步占格表、blocked 链
+  updateProjectiles / fx
+```
+
+`moveStep` 只负责"这一步能不能走"，不负责解决阻挡。
+
+### 7.2 步进许可
+
+```ts
+canStepTo(x, y) =
+    !terrainBlockedAt(x, y, steerRadius)     // 岩石/建筑，格子判定
+ && !stepBlockedByUnit(this, x, y)           // 格子容量 + 车体互穿
+```
+
+- `steerRadius = radius * 0.45`：车体贴图允许压住墙角，和原版一致。用完整半径会让
+  "贴着建筑那一行的格心"（距墙正好 16px）恒定非法，采集车直接卡死。
+- 车体互穿只对**车辆之间**生效；步兵靠格子容量与子格，车辆可以开进有步兵的格子
+  （随后散射/碾压）。给步兵加半径判定会让一个路过的步枪兵把卡车永久顶住。
+
+`moveStep` 依次尝试 `(x+ax, y+ay)`、`(x+ax, y)`、`(x, y+ay)`；三者都被拒时置
+`blockedNow` 并记录想进入的格子，交给 `resolveCollisions`。
+
+### 7.3 blocked 链
+
+| 时间 | 动作 |
+|---|---|
+| 前方单位在移动 | 等待（`trafficT` ≤ 2.6s），不重算 |
+| 0.3s | 友军静止 → `requestAside`（下一条侧移指令）；步兵 vs 步兵 → `sidestepInfantry` |
+| 0.6s | `repathAround`：挡路者 3×3 加入 `avoid` 重算 |
+| 1.2s | 第二次重算 |
+| 1.8s | 目标附近找最近可达点 |
+| 2.4s | `failMove`：清路径，`repathHold=1.5`，move/attackmove 结束指令 |
+
+计时用**目标距离**是否缩短来复位（2px / 0.2s），而不是逐帧 `blockedNow`——后者会被
+子格铺开造成的微小抖动反复清零，导致链条永不触发。
+
+### 7.4 采集车的独立策略
+
+采集车不进入通用 blocked 链（`order.k === 'harvest'` 直接跳过），因为它的目标会随
+矿点/卸货点变化：
+
+| 阶段 | 卡住时的处理 |
+|---|---|
+| toMine | 1.2s：友军挡路→让路；对方也是采集车→后退一格；否则换矿点（冷却 5s） |
+| toBase | 2.2s：重新在建筑四周找卸货格 |
+
+卸货目标是**建筑脚印外围的可用格**，并按该格已有采集车数量加权（×70），避免六台车
+挤同一格。到达判定是"贴在建筑轮廓 0.95 格内"，不再要求精确点位。
+
+### 7.5 路径后处理
+
+- `find()` 对 `bestEffort` 的结果做**终点校验**：终点离目标超过阈值即视为不可达，
+  避免"原地一步"被当成成功（曾导致单位对着墙反复起步）。
+- `smooth()` 的视线检测半径 = `radius + 0.32 格`：A* 只需保证格子可站，但拉直后的
+  线段会切角，用同样的半径会贴着建筑墙角切过去，单位撞上去就停。
+- `avoid` 集合只在单次查询内有效，且**排除自身周围 3×3**，否则 A* 连起点都不合法。
+
+### 7.6 主界面
+
+- 5 张地图 = 5 组生成参数（`Core.MAPS`），选择即改 `terrain.generate(seed, preset)`。
+- 8 色队色（`Core.PLAYER_COLORS`）→ `setActiveTeamColor`，作用于所有绘制函数。
+- 队色写入烘焙帧缓存键：`u|id|faction|color|dir8|frame`；换局 `clearFrameCache()`。

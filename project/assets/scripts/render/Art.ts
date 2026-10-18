@@ -21,7 +21,7 @@
 import { Color, Graphics } from 'cc';
 import { Pen, GfxPen } from '../assets/Pen';
 import { facingDeg } from './Frames';
-import { PAL, HEX, Faction, UnitDef, BuildingDef, TILE, makeRng } from '../core/Core';
+import { PAL, HEX, Faction, UnitDef, BuildingDef, TILE, makeRng, activeTeamColorOf } from '../core/Core';
 
 const C = {
     sand: HEX(PAL.sand),
@@ -53,9 +53,16 @@ const C = {
 };
 
 const hexA = (c: Color, a: number) => new Color(c.r, c.g, c.b, a);
-const team = (f: Faction) => (f === 'BU' ? C.bu : C.ds);
-const teamDim = (f: Faction) => (f === 'BU' ? HEX(PAL.cyanDim) : C.dsDim);
-const glow = (f: Faction) => (f === 'BU' ? C.cyan : C.violet);
+/** lighten a #rrggbb colour toward white by `amt` (0..1) */
+function lightenHex(h: string, amt: number): string {
+    const v = h.replace('#', '');
+    const c = (i: number) => Math.min(255, Math.round(parseInt(v.substring(i, i + 2), 16) + (255 - parseInt(v.substring(i, i + 2), 16)) * amt));
+    return `#${c(0).toString(16).padStart(2, '0')}${c(2).toString(16).padStart(2, '0')}${c(4).toString(16).padStart(2, '0')}`;
+}
+// team colour comes from the skirmish setup, not from the faction
+const team = (f: Faction) => HEX(activeTeamColorOf(f));
+const teamDim = (f: Faction) => HEX(lightenHex(activeTeamColorOf(f), -0.35), 190);
+const glow = (f: Faction) => HEX(lightenHex(activeTeamColorOf(f), 0.45));
 
 /* ---------------- low level helpers ---------------- */
 function poly(g: Pen, pts: number[][], fill?: Color, stroke?: Color, lw = 1.5) {
