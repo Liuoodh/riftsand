@@ -518,6 +518,13 @@ export class EntityView {
     private lastRepair = false;
     private lastPrimary = false;
     private wasSelected = false;
+    /** last selection state the hp bar was painted for (it changes the rim) */
+    private lastHpSelected = false;
+    /** pending 8-way image + how many consecutive frames asked for it */
+    private facePend = -1;
+    private facePendN = 0;
+    private tFacePend = -1;
+    private tFacePendN = 0;
     private hpTimer = 0;
     /** sprite facing / frame cache: only repaint when one of them changes */
     private anim = new Anim();
@@ -570,6 +577,43 @@ export class EntityView {
     }
 
     /** fetch the sprite frame for this unit's current facing / walk frame */
+    /**
+     * 8-way image index with hysteresis AND a two-frame debounce.
+     *
+     * `facingIndexSticky` alone keeps the current image until the bearing is
+     * ~19 degrees off its centre, then jumps to the nearest one. That is right
+     * for a turret tracking a moving target, but wrong for a hull whose bearing
+     * is recomputed from a path: a re-plan can shift the bearing by a degree or
+     * two across a bucket edge, the image jumps 45 degrees, and on the next
+     * re-plan it jumps back. The result is a hull that "keeps turning and shaking
+     * while it drives" — always in the directions where the path's legs sit near
+     * a bucket boundary, which is why it survived several rounds of steering
+     * fixes and why it looked direction-specific.
+     *
+     * Requiring the new bucket on two consecutive frames removes the single-frame
+     * flips while costing a genuine turn only one frame of latency.
+     */
+    private stableDir(deg: number, prev: number, isTurret: boolean): number {
+        const want = facingIndexSticky(deg, prev);
+        if (want === prev) {
+            if (isTurret) { this.tFacePend = -1; this.tFacePendN = 0; }
+            else { this.facePend = -1; this.facePendN = 0; }
+            return prev;
+        }
+        if (prev < 0) return want;                    // first paint: take it at once
+        const pend = isTurret ? this.tFacePend : this.facePend;
+        if (pend !== want) {
+            if (isTurret) { this.tFacePend = want; this.tFacePendN = 1; }
+            else { this.facePend = want; this.facePendN = 1; }
+            return prev;
+        }
+        const n = isTurret ? ++this.tFacePendN : ++this.facePendN;
+        if (n < 2) return prev;
+        if (isTurret) { this.tFacePend = -1; this.tFacePendN = 0; }
+        else { this.facePend = -1; this.facePendN = 0; }
+        return want;
+    }
+
     private applyFrame(u: Unit, faction: Faction) {
         const moving = this.anim.seq === Seq.Walk;
         const sf = unitBodyFrame(u.def, faction, Math.max(0, this.dir8), Math.max(0, this.frame), moving);
@@ -612,8 +656,8 @@ export class EntityView {
                 // ground units use discrete facing images: never spin the node
                 this.node.angle = 0;
                 const deg = (u.face * 180) / Math.PI;
-                const dir8 = facingIndexSticky(deg, this.dir8);
-                const tDir8 = facingIndexSticky((u.turretFace * 180) / Math.PI, this.tDir8);
+                const dir8 = this.stableDir(deg, this.dir8, false);
+                const tDir8 = this.stableDir((u.turretFace * 180) / Math.PI, this.tDir8, true);
 
                 /*
                  * Sequence clock: moving plays Walk, standing holds Ready.
@@ -623,11 +667,19 @@ export class EntityView {
                  * visible symptom — a 9fps four-frame cycle on a heavy hull reads
                  * as a nervous jitter when the vehicle is barely moving. Retail
                  * sequences are tied to locomotor progress for the same reason.
+                 *
+                 * Walk/Ready has hysteresis. A single threshold made a hull
+                 * crawling at 4 px/s flicker between two images every frame,
+                 * because the speed dribbles across the cutoff: the Walk frame is
+                 * a track-scrolled copy of the Ready frame, so the sprite visibly
+                 * buzzed while the tank stood almost still.
                  */
-                const moving = u.speedCur > 4;
-                this.anim.play(moving ? Seq.Walk : Seq.Ready);
                 const baseSpeed = Math.max(1, u.def.speed);
-                this.anim.step(dt, moving ? Math.max(0.2, Math.min(1, u.speedCur / baseSpeed)) : 1);
+                const walking = this.anim.seq === Seq.Walk
+                    ? u.speedCur > baseSpeed * 0.08
+                    : u.speedCur > Math.max(7, baseSpeed * 0.2);
+                this.anim.play(walking ? Seq.Walk : Seq.Ready);
+                this.anim.step(dt, walking ? Math.max(0.2, Math.min(1, u.speedCur / baseSpeed)) : 1);
 
                 const flip = u.def.kind === 'infantry'
                     && Math.cos((facingDeg(dir8) * Math.PI) / 180) < -0.15;
@@ -712,38 +764,32 @@ export class EntityView {
             }
         }
 
-        // selection ring
+        /*
+         * No selection ring.
+         *
+         * The glowing ellipse under every selected unit is not how the retail
+         * interface marks a selection: RA2 draws a health bar under the unit and
+         * leaves the sprite untouched. Two rings also overlapped into one blob
+         * whenever a group was packed together, which read as "these units are
+         * stuck on each other" even when they were fine.
+         */
         if (selected !== this.wasSelected) {
             this.wasSelected = selected;
             this.ring.clear();
-            if (selected) {
-                const r = e.isBuilding ? (e as Building).radius : (e as Unit).radius + 4;
-                this.ring.ellipse(0, -2, r + 3, (r + 3) * 0.55);
-                this.ring.strokeColor = new Color(80, 240, 210, 230);
-                this.ring.lineWidth = 2;
-                this.ring.stroke();
-                this.ring.ellipse(0, -2, r + 6, (r + 6) * 0.55);
-                this.ring.strokeColor = new Color(80, 240, 210, 60);
-                this.ring.lineWidth = 4;
-                this.ring.stroke();
-            }
         }
 
         // health bar
-        const hpRatio = Math.max(0, e.hp / e.maxHp);
+        const hpRatio = Math.max(0, Math.min(1, e.hp / e.maxHp));
         const showHp = hpRatio < 0.999 || selected;
-        const changed = Math.abs(hpRatio - this.lastHp) > 0.01;
-        if (changed || (selected !== (this.lastHp >= 0 && this.hp.node.active))) {
+        const changed = Math.abs(hpRatio - this.lastHp) > 0.005;
+        if (changed || selected !== this.lastHpSelected) {
             this.lastHp = hpRatio;
+            this.lastHpSelected = selected;
             this.drawHp(hpRatio, selected);
         }
-        if (!showHp) {
-            if (this.hp.node.active) this.hp.node.active = false;
-        } else {
-            if (!this.hp.node.active) this.hp.node.active = true;
-            // keep bars upright for rotated vehicles
-            this.hp.node.angle = 0;
-        }
+        if (this.hp.node.active !== showHp) this.hp.node.active = showHp;
+        // keep bars upright for rotated vehicles
+        this.hp.node.angle = 0;
     }
 
     private drawRepair(b: Building) {
@@ -793,19 +839,42 @@ export class EntityView {
         g.stroke();
     }
 
+    /**
+     * Retail-style health bar.
+     *
+     * RA2 marks a selected unit with a bar, not with a ring: a dark trough, a
+     * green/yellow/red fill and a thin bright edge while selected. It sits under
+     * the unit's feet for ground units (where the original puts it) and above the
+     * roof for buildings, which would otherwise cover it.
+     */
     private drawHp(ratio: number, selected: boolean) {
         const g = this.hp;
         g.clear();
-        const w = this.e.isBuilding ? Math.min(86, (this.e as Building).size * TILE * 0.8) : 30;
-        const y = this.e.isBuilding ? (this.e as Building).radius * 0.72 : ((this.e as Unit).isAir ? 26 : (this.e as Unit).radius + 10);
-        g.roundRect(-w / 2 - 1, y - 1, w + 2, 5, 2);
-        g.fillColor = new Color(6, 9, 12, 190);
+        const isB = this.e.isBuilding;
+        const w = isB ? Math.min(86, (this.e as Building).size * TILE * 0.8) : 32;
+        const h = isB ? 4 : 3.5;
+        const y = isB
+            ? (this.e as Building).radius * 0.72
+            : ((this.e as Unit).isAir ? 24 : -13);
+        // trough
+        g.roundRect(-w / 2 - 1, y - 1, w + 2, h + 2, 1);
+        g.fillColor = new Color(4, 7, 10, 205);
         g.fill();
+        // fill
         const col = ratio > 0.55 ? hex(PAL.green) : ratio > 0.28 ? hex(PAL.amber) : hex(PAL.red);
-        g.rect(-w / 2, y, w * ratio, 3);
-        g.fillColor = col;
-        g.fill();
-        if (this.e.isBuilding && !(this.e as Building).done) {
+        if (ratio > 0) {
+            g.rect(-w / 2, y, w * ratio, h);
+            g.fillColor = col;
+            g.fill();
+        }
+        // selection: a bright rim, so the bar reads as "this one is mine"
+        if (selected) {
+            g.rect(-w / 2 - 1.5, y - 1.5, w + 3, h + 3);
+            g.strokeColor = new Color(235, 245, 255, 120);
+            g.lineWidth = 1;
+            g.stroke();
+        }
+        if (isB && !(this.e as Building).done) {
             const b = this.e as Building;
             g.rect(-w / 2, y + 6, w * b.progress, 3);
             g.fillColor = hex(PAL.cyan, 220);

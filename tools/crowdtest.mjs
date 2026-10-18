@@ -158,6 +158,10 @@ const out = await page.evaluate((COUNT) => {
         moving: us.filter((u) => u.path.length > 0).length,
         idle: us.filter((u) => u.path.length === 0).length,
         dists: us.map((u) => +Math.hypot(u.x - to.x, u.y - to.y).toFixed(0)),
+        cells: us.map((u) => u.cellX + ',' + u.cellY),
+        sharedCells: us.length - new Set(us.map((u) => u.cellX + ',' + u.cellY)).size,
+        minPair: +us.reduce((m, a, i) => us.reduce((mm, b, j) => (i === j ? mm
+            : Math.min(mm, Math.hypot(a.x - b.x, a.y - b.y))), m), 1e9).toFixed(1),
     };
 }, COUNT);
 
@@ -172,6 +176,14 @@ check('没有误报"无法抵达"', out.events.giveUp === 0,
 check('直行时不左右摇摆', out.flipsPerSec < 1.2 && out.dirPerSec < 2.5,
     `朝向翻转 ${out.flipsPerSec}/s，贴图切换 ${out.dirPerSec}/s，横向修正 ${out.latReversals} 次，最大横向偏移 ${out.latMax}px`);
 check('停下后不再乱晃', out.shake <= 4, `${out.shake}px ${out.shakeWho}`);
+/*
+ * Two hulls in one cell is the state that produced the "they are stuck in one
+ * blob" screenshot: the cell table said one vehicle, the geometry said 24 px
+ * apart, and both hulls vetoed each other's next step. One vehicle per cell is a
+ * hard rule now, so this must never happen.
+ */
+check('没有两辆车共格', out.sharedCells === 0, `${JSON.stringify(out.cells)}`);
+check('车体之间保持一格间距', out.minPair >= 26, `最近 ${out.minPair}px`);
 check('运行无报错', errors.length === 0, errors.slice(0, 2).join(' | '));
 
 console.log(`\n${pass}/${pass + fail} checks passed`);

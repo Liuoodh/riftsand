@@ -3178,55 +3178,24 @@ export class Game {
          * behind a moving tank forever, ran out of re-path attempts and cancelled
          * its order ("cannot reach" on an empty plane).
          */
-        const set = this.occupancy.at(tx, ty);
-        let vacating = false;
-        if (set && set.size > 0) {
-            /*
-             * `sameLane` must start false: a cell that only contains US is not a
-             * "lane being vacated", it is just our own cell, and returning early
-             * there skipped the hull stand-off test entirely — which is how two
-             * tanks driving head-on were allowed to walk right through each other
-             * (measured 1.3px apart) even with the rule in place.
-             */
-            let sameLane = false;
-            let others = 0;
-            for (const o of set) {
-                if (o === u || o.dead) continue;
-                others++;
-                /*
-                 * "Going the same way **and about to leave this tile**".
-                 *
-                 * Reference: MoveTask breaks out of the obstacle loop for a
-                 * blocker with velocity unless
-                 * `blocker.moveTrait.currentWaypoint?.tile === node.tile` — i.e.
-                 * it only trusts the tile to clear if the blocker's next waypoint
-                 * is somewhere else. Our version dropped that second half, so a
-                 * leader that was merely rolling to a stop *inside* the tile still
-                 * counted as "vacating", the follower moved in, and when the
-                 * leader halted the two hulls sat in one cell 25 px apart, each
-                 * one's next step vetoed by the other. That is the pile-up in the
-                 * screenshot: two selection rings on one tile, neither moving.
-                 */
-                const sameDir = Math.cos(o.face - u.face) > 0.55;
-                const oNext = o.path.length > 0 ? o.path[0] : null;
-                const leaving = !!oNext
-                    && (Math.floor((oNext.x + HALF) / TILE) !== tx || Math.floor((oNext.y + HALF) / TILE) !== ty);
-                if (!(o.speedCur > 6 && o.path.length > 0 && sameDir && leaving)) { sameLane = false; break; }
-                sameLane = true;
-            }
-            /*
-             * A vacating cell is exempt from the *capacity* test only.
-             *
-             * This used to `return false` outright, which also skipped the hull
-             * stand-off test below — the capacity rule only ever meant "one hull
-             * per tile", and a column needs the leader's tile to be reusable
-             * while the leader is still driving out of it. Skipping the radius
-             * check as well is what let a group of tanks ordered to one point
-             * overlap each other on the way there.
-             */
-            vacating = others > 0 && sameLane;
-        }
-        if (!vacating && !this.occupancy.hasRoomFor(u, tx, ty)) return true;
+        /*
+         * One vehicle per cell. Always.
+         *
+         * There used to be a "vacating" exemption here: if the cell was held by a
+         * vehicle that was rolling out of it, the moving one was allowed in. The
+         * idea came from the reference's obstacle loop, which ignores a blocker
+         * that still has velocity — but the reference also *reserves* the tile
+         * (`reservedPathNodes`), so two hulls never end up registered on it. With
+         * the exemption and no reservation, the follower entered while the leader
+         * was still inside, the leader then stopped inside the same cell, and the
+         * pair sat 24 px apart with both of their next steps vetoed by the other.
+         * That is the two-selection-rings-on-one-tile screenshot.
+         *
+         * A follower now waits for the cell to actually clear (about 0.7 s at tank
+         * speed), which is exactly what retail does and what keeps a column
+         * visibly separated.
+         */
+        if (!this.occupancy.hasRoomFor(u, tx, ty)) return true;
 
         this.grid.query(x, y, u.radius + 42, this.tmp);
         for (const e of this.tmp) {
@@ -3250,8 +3219,19 @@ export class Game {
              * standing beside a parked truck wedge it permanently.
              */
             if (u.def.kind === 'infantry' || o.def.kind === 'infantry') continue;
-            const share = u.isHarvester && o.isHarvester ? 0.46 : 0.92;
-            const minD = (u.radius + o.radius) * share;
+            /*
+             * Hull stand-off is a whole tile, not just "sprites are not
+             * concentric".
+             *
+             * `(r1 + r2) * 0.92` is 24 px for two tanks: they can legally park
+             * nose to tail 8 px apart either side of a cell border, where the
+             * sprites (86 px wide) are almost completely on top of each other.
+             * The player reads that as "two tanks stuck in one blob" even though
+             * the cell table is perfectly correct. Retail keeps a cell between
+             * hulls because it reserves waypoints, so a tile is the right target.
+             */
+            const share = u.isHarvester && o.isHarvester ? 0.62 : 0.95;
+            const minD = Math.max((u.radius + o.radius) * share, TILE * 0.95);
             const dNew = Math.hypot(o.x - x, o.y - y);
             if (dNew >= minD) continue;
             const dCur = Math.hypot(o.x - u.x, o.y - u.y);
