@@ -28,6 +28,7 @@ import { worldToProj, projToWorld } from './world/Iso';
 import { ShpFile } from './assets/Shp';
 import { TmpFile, encodeTmp, tmpTileToRgba, tmpRowWidth } from './assets/Tmp';
 import { encodeShp } from './assets/ShpEncode';
+import * as Sim from './sim';
 import { parsePal, remapTeam, syntheticPal } from './assets/Palette';
 import { frameFromShp, unitBodyFrame, unitTurretFrame, cachedFrameCount, canvasAvailable, clearFrameCache } from './assets/Assets';
 import { loadArt, artIds, artError, describeArt, frameIndexFromRect } from './assets/ArtPack';
@@ -1032,7 +1033,8 @@ function tryBoot(): boolean {
     anyObj.__RIFTSAND_BOOTED__ = true;
     // exposed for the headless test / showcase tooling
     anyObj.__riftsandDefs = { UNITS, BUILDINGS };
-        anyObj.__riftsandConst = { TILE, HALF, MAP_TILES, maps: MAPS.map((m) => m.id), mapLib: MAPS_LIBRARY.map((m) => m.id) };
+    anyObj.__riftsandConst = { TILE, HALF, MAP_TILES, maps: MAPS.map((m) => m.id), mapLib: MAPS_LIBRARY.map((m) => m.id) };
+    anyObj.__riftsandSim = Sim;
     anyObj.__riftsandAssets = {
         ShpFile, TmpFile, encodeShp, parsePal, remapTeam, syntheticPal,
         frameFromShp, unitBodyFrame, cachedFrameCount, canvasAvailable, clearFrameCache,

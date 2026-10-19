@@ -1288,3 +1288,88 @@ assettest 20/20              inputtest 20/20   featuretest 14/14 harvesttest 6/6
 maptest 21/21                buildingtest 13/13
 battletest 6 分钟 ERRORS 0（earned 12650 / kills 16 / lost 6 / 建筑 10 vs 9）
 ```
+
+---
+
+## 23. v0.25-B1：数学地基（原版 40 文件 / 1,411 行）
+
+从这一批开始，移植不再是"补某个系统"，而是**把原版 `src/` 里所有非豁免文件逐个搬完**。
+矩阵见 `docs/PORT-MATRIX.md`：豁免 605 文件 / 74,160 行（UI、3D 渲染、多人、战役、资源解析），
+应移植 602 文件 / 51,639 行。
+
+### 23.1 本轮范围
+
+```
+sim/math/GameMath.ts        532 行   逐字复制（含 1296 项 SIN_TABLE）
+sim/math/Vector2.ts         three.Vector2 + 原版 4 个覆盖
+sim/math/linear.ts          Vector3 / Quaternion / Euler / Matrix4（自研，见 23.2）
+sim/math/{Box2,polar,curves,geometry}.ts
+sim/Coords.ts                         逐字复制
+sim/Prng.ts                            MT19937 内联 + 原版种子构造
+sim/type/*.ts              11 个枚举，逐字复制
+sim/util/*.ts              15 个工具，逐字复制（Base64/logger 见 23.3）
+sim/index.ts                          引擎层统一出口
+```
+
+### 23.2 关键决策：three.js 的四个类，改"自研同算法"
+
+原版的 `Vector3` / `Quaternion` / `Euler` / `Matrix4` 全部 `extends THREE.*`，
+只覆盖了少数必须走 `GameMath` 的方法。我们不发布 three（25MB 源码 + 与本项目 2D 渲染无关），
+所以把 three 的**基础实现**逐行搬进 `sim/math/linear.ts`，并保留原版的每个覆盖方法原样：
+
+| 类 | three 提供 | 原版覆盖（必须保留） |
+|---|---|---|
+| Vector2 | 全部基础运算 | `length` / `distanceTo`（GameMath.sqrt）、`angle`（GameMath.atan2）、`rotateAround`（GameMath.cos/sin） |
+| Vector3 | 全部基础运算 | `length` / `distanceTo` / `angleTo`（GameMath.acos）、`applyEuler`、`applyAxisAngle`、`projectOnPlane`、`reflect`、`setFromSpherical/Cylindrical` |
+| Quaternion | set/copy/dot/multiply | `setFromEuler`（六 order）、`setFromAxisAngle`、`setFromRotationMatrix`、`length`、`slerp`（全部分支） |
+| Matrix4 | set/copy/invert/determinant/compose | `extractRotation`、`makeRotationFromEuler`（六 order）、`lookAt`、`getMaxScaleOnAxis`、`makeRotationX/Y/Z/Axis`、`decompose` |
+
+四个类放在**一个模块**里，因为原版靠 three 的打包避免循环引用；拆开会形成
+`Matrix4 → Vector3 → Quaternion → Matrix4` 的 import 环。静态暂存对象全部改成**惰性 getter**
+（`Vector3.scratch` / `Matrix4.scratch`），否则 `private static _quaternion = new Quaternion()`
+会在模块求值期撞上 TDZ（`Quaternion` 声明在 `Vector3` 之后）。
+
+### 23.3 两处"载体换掉、能力补全"
+
+**Base64**：原版 `encode` 是裸 `btoa`，超过 U+00FF 直接抛；它的兜底
+`unescape(encodeURIComponent(s))` 产出的字节串，`atob` 永远还原不回原文 —— 这条分支在
+Android WebView 上不可达所以没暴露，但在小程序运行时就是坏的。
+现在 `encode`/`decode` 保持原版的**二进制串**语义（`binaryStringToUint8Array(decode(x))` 依赖它），
+另加 `encodeUtf8`/`decodeUtf8` 做真正的文本往返。
+
+**logger**：原版 `import Logger from 'js-logger'`。改成同调用面（`Logger.get(name)` + 四级）的
+极简实现，不实现 handler / formatter / timer（游戏代码一处都没用到）。
+
+### 23.4 两个"看起来像 bug 但其实要照抄"的地方
+
+1. **`CubicBezierCurve3` 不是贝塞尔**。three 的 `getPoint` 走的是 Catmull-Rom 基函数，
+   曲线**经过 v1 和 v2**，v0/v3 是控制手柄。所以 `getPoint(0) === v1`、`getPoint(1) === v2`。
+   导弹下降弹道（`MissileLocomotor`）直接建在这个语义上，改成标准贝塞尔会让弹道抬头。
+2. **`rotateVec2` 先 `Math.floor` 角度**。`rotateVec2(v, 44.9°)` 实际按 44° 转。
+   配合 `angleDegFromVec2` 的 `Math.round`，整条链路都在整数度上工作。
+
+### 23.5 验证：`tools/mathtest.mjs`（40 条断言）
+
+不强求"和 Math 一致"，而是断言**原版特征值**：
+
+```
+PASS  GameMath.sin(π/6) = 0.5（π/6 恰好落在采样点上，1296/12）
+PASS  GameMath.sin(π/7) 与 Math.sin 不同（离网格角度走查表）
+PASS  GameMath.cos(a) 就是 GameMath.sin(a + π/2)（原版定义）
+PASS  GameMath.sqrt 误差 < 1e-14（牛顿迭代）
+PASS  GameMath.atan2 误差 < 1e-3（三次多项式近似）
+PASS  GameMath.pow 整数走精确幂，小数走 6 位定点
+PASS  MT19937 标准测试向量（seed 5489 → 3499211612）
+PASS  MT19937 第二个输出与标准一致（581869302）
+PASS  seed 与 sequence 是字符串拼接而非数值相加
+PASS  makeRotationFromEuler 六个 order 全部正交且 det=1
+PASS  Quaternion.slerp 在 t=0 / 0.5 / 1 处正确
+PASS  Coords 常量与参考一致（30px 瓦片 / 256 leptons）
+PASS  CurvePath 按弧长参数化（14 单位折线，半程落点在拐角）
+PASS  CubicBezierCurve3 走 Catmull-Rom（getPoint(0)=v1, getPoint(1)=v2）
+PASS  Crc32 标准向量 "123456789" → 0xCBF43926
+```
+
+全量回归：`smoke 0 error / movetest 18 / crowdtest 7 / phystest 10 / occltest 5 /
+dirtest 9 / speedtest 12 / menutest 11 / assettest 20 / inputtest 20 / featuretest 14 /
+harvesttest 6 / maptest 21 / buildingtest 13` —— 全部通过。
