@@ -54,7 +54,23 @@ export function projToWorld(px: number, py: number, z = 0): Proj {
     };
 }
 
-/** depth key: larger = closer to the viewer, drawn later */
-export function depthOf(wx: number, wy: number) {
-    return wx + wy;
+/** how many screen px one terrain level lifts a tile */
+export const ISO_DEPTH_PER_LEVEL = ISO_HH * 0.3333;
+
+/**
+ * Depth key along the camera axis: larger = closer to the viewer = drawn later.
+ *
+ * The reference is a real 3D scene with an orthographic camera at
+ * ISO_CAMERA_ALPHA (30°) / ISO_CAMERA_BETA (45°), so occlusion is decided by the
+ * z-buffer. Painter's order has to use the same quantity the z-buffer would:
+ *
+ *   depth = cos(a)sin(b)*x + sin(a)*y_up + cos(a)cos(b)*z
+ *
+ * With that camera one (rx+ry) step contributes ISO_HH screen units (14 here),
+ * and one terrain level contributes sin(a)/cos(a)*... = 1/3 of a step, i.e.
+ * ISO_HH/3. Sorting by screen y instead (the old key) moved a tank on a dune
+ * 16px the wrong way and let the hull in front cover it.
+ */
+export function depthOf(wx: number, wy: number, z = 0) {
+    return ((wx + wy) / TILE) * ISO_HH + z * ISO_DEPTH_PER_LEVEL;
 }

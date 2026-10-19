@@ -339,6 +339,45 @@ export class Passability {
         }
     }
 
+    /**
+     * Flood fill over the *cached* graph, treating `blocked` cells as walls.
+     *
+     * Returns a per-cell mask (1 = reachable) rather than a Set of string ids:
+     * an AI build scan asks this question a dozen times per placement and a
+     * Set<string> over 6400 cells cost ~8 ms per call in the debug build, which
+     * showed up as a visible freeze every time the AI picked a spot.
+     *
+     * The graph itself is never mutated, so no invalidate / rebuild / island
+     * pass is triggered.
+     */
+    computeReachableMask(
+        startTile: Tile,
+        speedType: SpeedType,
+        isInfantry: boolean,
+        blocked: (tile: Tile) => boolean,
+    ): Uint8Array {
+        const graph = this.computePassabilityGraph(speedType, isInfantry);
+        const size = this.world.tiles.size;
+        const mask = new Uint8Array(size * size);
+        const startId = this.getNodeId(startTile, false);
+        const startNode = graph.getNode(startId);
+        if (!startNode) return mask;
+        const stack: any[] = [startNode];
+        mask[startTile.ry * size + startTile.rx] = 1;
+        while (stack.length) {
+            const node = stack.pop()!;
+            for (const nb of node.neighbors) {
+                const t = nb.data.tile;
+                const idx = t.ry * size + t.rx;
+                if (mask[idx]) continue;
+                mask[idx] = 1;
+                if (blocked(t)) continue;
+                stack.push(nb);
+            }
+        }
+        return mask;
+    }
+
     getIslandIdMap(speedType: SpeedType, isInfantry: boolean) {
         const graph = this.computePassabilityGraph(speedType, isInfantry);
         return {
@@ -367,11 +406,14 @@ export class Passability {
         const speedModifier = this.world.speedAt(tile.rx, tile.ry, isInfantry, speedType === SpeedType.Hover);
         if (!speedModifier) return 0;
         if (!skipBlockerCheck) {
-            for (const obj of this.world.tileOccupation.getObjectsOnTile(tile)) {
+            let blocked = false;
+            this.world.tileOccupation.forEachOnTile(tile, (obj) => {
+                if (blocked) return;
                 if (this.isBlockerObject(obj, tile, bridgeLevel, speedType, isInfantry) && ignoredBlockers.indexOf(obj) === -1) {
-                    return 0;
+                    blocked = true;
                 }
-            }
+            });
+            if (blocked) return 0;
         }
         return speedModifier;
     }
@@ -409,8 +451,9 @@ export class Passability {
         const speedType: SpeedType = unit.rules.speedType;
         const isInfantry = unit.isInfantry();
         const obstacles: Obstacle[] = [];
-        for (const obj of this.world.tileOccupation.getGroundObjectsOnTile(pathNode.tile)) {
-            if (obj === unit) continue;
+        this.world.tileOccupation.forEachOnTile(pathNode.tile, (obj) => {
+            if (obj === unit) return;
+            if (obj.isAircraft?.()) return;
             const isStaticBlocker = this.isBlockerObject(obj, pathNode.tile, !!pathNode.onBridge, speedType, isInfantry);
             let shouldInclude = false;
             if (isStaticBlocker) {
@@ -434,7 +477,7 @@ export class Passability {
                     obstacles.push(obstacle);
                 }
             }
-        }
+        });
         return obstacles;
     }
 }

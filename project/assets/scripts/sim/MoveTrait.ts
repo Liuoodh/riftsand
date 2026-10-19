@@ -97,8 +97,13 @@ export class MoveTrait {
      */
     handleTileChange(oldTile: any, bridge: any, teleporting: boolean, isTeleport = false): void {
         const obj = this.gameObject;
-        this.tileOccupation.unoccupyTileRange(oldTile, obj);
-        this.tileOccupation.occupyTileRange(obj.tile, obj);
+        /*
+         * Units cover exactly one cell, so the single-tile API is enough and —
+         * unlike occupyTileRange — it does not allocate a tile array nor fire
+         * the "passability changed" event on every cell crossing.
+         */
+        this.tileOccupation.unoccupySingleTile(oldTile, obj);
+        this.tileOccupation.occupySingleTile(obj.tile, obj);
 
         // reserved path nodes that are now behind us must be released, or other
         // units keep treating already-driven cells as claimed forever

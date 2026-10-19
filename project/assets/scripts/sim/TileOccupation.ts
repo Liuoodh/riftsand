@@ -94,6 +94,21 @@ export class TileOccupation {
         return out.length ? out : [tile];
     }
 
+    /**
+     * Allocation-free iteration over the occupants of a cell.
+     *
+     * `getObjectsOnTile` builds a fresh array on every call, and the locomotor
+     * asks "what is on this cell" several times per unit per tick — thousands of
+     * throwaway arrays per second, which is exactly the kind of garbage that
+     * shows up as a periodic GC hitch. Hot paths use this instead.
+     */
+    forEachOnTile(tile: any, fn: (obj: Occupant) => void): void {
+        if (!tile || !this.inside(tile.rx, tile.ry)) return;
+        const set = this.cells[this.idx(tile.rx, tile.ry)];
+        if (!set) return;
+        for (const obj of set) fn(obj);
+    }
+
     getObjectsOnTile(tile: any): Occupant[] {
         if (!tile || !this.inside(tile.rx, tile.ry)) return [];
         const set = this.cells[this.idx(tile.rx, tile.ry)];

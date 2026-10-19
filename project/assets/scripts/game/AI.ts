@@ -210,8 +210,17 @@ export class AIController {
             this.g.place(def, this.pid, tx, ty, false);
             return true;
         }
-        // spiral outward from the core, preferring spots that do not wall it in
-        let best: { tx: number; ty: number; score: number } | null = null;
+        /*
+         * Spiral outward from the core, preferring spots that do not wall it in.
+         *
+         * `wouldSealBase` is the expensive part (~1ms: a flood fill over the
+         * passability graph), so it must NOT run for every candidate — a wide
+         * fallback scan used to call it 300+ times in one tick and froze the
+         * game for a couple of hundred milliseconds. Instead every cheap test
+         * runs first, the candidates are ranked, and only the best few are
+         * checked for sealing.
+         */
+        const cands: Array<{ tx: number; ty: number; score: number }> = [];
         for (let r = 4; r <= 15; r++) {
             for (let a = 0; a < 24; a++) {
                 const ang = (a / 24) * Math.PI * 2 + r * 0.41;
@@ -223,31 +232,39 @@ export class AIController {
                 // own drop-off with buildings and its trucks can never deliver
                 // (measured: AI income 0 for the whole match).
                 if (!def.dropoff && this.blocksRefineryApron(def, tx, ty)) continue;
-                if (this.g.wouldSealBase(def, tx, ty, this.pid)) continue;
                 // keep anti-air and defenses facing the enemy side
                 const towardEnemy = this.pid === 1 ? tx > core.tx : tx < core.tx;
                 const score = (towardEnemy ? -3 : 0) + r * 0.4 + Math.abs(Math.sin(ang)) * 2;
-                if (!best || score < best.score) best = { tx, ty, score };
+                cands.push({ tx, ty, score });
             }
-            if (best && r >= 6) break;
+            if (cands.length && r >= 6) break;
         }
-        if (!best) {
-            // fall back to the relaxed radius rule so the AI never stalls
-            for (let r = 4; r <= 18; r++) {
-                for (let a = 0; a < 24; a++) {
-                    const ang = (a / 24) * Math.PI * 2 + r * 0.41;
-                    const tx = Math.round(core.tx + Math.cos(ang) * r);
-                    const ty = Math.round(core.ty + Math.sin(ang) * r);
-                    if (!this.g.canPlace(def, tx, ty, this.pid, true).ok) continue;
-                    if (this.g.wouldSealBase(def, tx, ty, this.pid)) continue;
-                    this.g.place(def, this.pid, tx, ty, false);
-                    return true;
-                }
+        cands.sort((a, b) => a.score - b.score);
+        for (let i = 0; i < Math.min(cands.length, 4); i++) {
+            const c = cands[i];
+            if (this.g.wouldSealBase(def, c.tx, c.ty, this.pid)) continue;
+            this.g.place(def, this.pid, c.tx, c.ty, false);
+            return true;
+        }
+
+        // fall back to the relaxed radius rule so the AI never stalls
+        const fallback: Array<{ tx: number; ty: number }> = [];
+        for (let r = 4; r <= 18; r++) {
+            for (let a = 0; a < 24; a++) {
+                const ang = (a / 24) * Math.PI * 2 + r * 0.41;
+                const tx = Math.round(core.tx + Math.cos(ang) * r);
+                const ty = Math.round(core.ty + Math.sin(ang) * r);
+                if (!this.g.canPlace(def, tx, ty, this.pid, true).ok) continue;
+                fallback.push({ tx, ty });
             }
-            return false;
         }
-        this.g.place(def, this.pid, best.tx, best.ty, false);
-        return true;
+        for (let i = 0; i < Math.min(fallback.length, 4); i++) {
+            const c = fallback[i];
+            if (this.g.wouldSealBase(def, c.tx, c.ty, this.pid)) continue;
+            this.g.place(def, this.pid, c.tx, c.ty, false);
+            return true;
+        }
+        return false;
     }
 
     /* ---------------- army ---------------- */

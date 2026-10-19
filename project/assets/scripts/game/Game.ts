@@ -167,6 +167,12 @@ export class Game {
 
     /* ---- mobile command layer ---- */
     groupIds: number[][] = Array.from({ length: GROUP_COUNT }, () => []);
+    /**
+     * Probe hook: the regression scripts set this to false to measure movement
+     * without the AI opponent interfering. It used to be a phantom field that
+     * nothing read, so those runs were quietly fighting a live AI.
+     */
+    aiEnabled = true;
     holdFormation = true;    // group moves march at the slowest member's speed
     waypointMode = false;    // taps append to the order queue instead of replacing
     autoReplace = true;      // warn / auto-queue a harvester when one dies
@@ -473,43 +479,45 @@ export class Game {
         const core = this.buildings.find((b) => !b.dead && b.owner === owner && b.def.isCore);
         if (!refineries.length && !core) return false;
         /*
-         * Ask the *passability graph* whether the base would still reach its
-         * income, not a separate geometric test. The hypothetical footprint is
-         * inserted into the occupation table for the duration of the query, so
-         * the graph sees exactly what it would see after placement.
+         * "Would this structure cut its owner off from income?"
+         *
+         * The candidate is hypothetical, so it must NOT be written into the
+         * shared occupation table: doing that invalidates the passability graph
+         * twice per candidate and forces a full rebuild + island pass, which is
+         * what made the AI freeze for a few frames every time it picked a build
+         * spot. Instead we flood the *cached* graph with the footprint treated
+         * as walls — one pass, no mutation, no rebuild.
          */
-        const ghostTile = this.tiles.getByMapCoords(tx, ty);
-        if (!ghostTile) return false;
-        const ghost: any = {
-            isBuilding: true,
-            dead: false,
-            size: def.size,
-            tile: ghostTile,
-            art: { foundation: { width: def.size, height: def.size } },
-            rules: {},
-        };
-        this.occupancy.occupyTileRange(ghostTile, ghost);
+        const blocked = (t: Tile) => tx <= t.rx && t.rx < tx + def.size && ty <= t.ry && t.ry < ty + def.size;
+        const origin = core ? this.freeCellNear(core) : refineries.length ? this.freeCellNear(refineries[0]) : null;
+        if (!origin) return false;
+        const reach = this.passability.computeReachableMask(origin, SpeedType.Track, false, blocked);
+        const reachable = (t: Tile) => reach[t.ry * MAP_TILES + t.rx] === 1;
         let sealed = false;
-        try {
-            const reach = (ax: number, ay: number, bx: number, by: number) => {
-                const a = this.tileAt(ax, ay);
-                const b = this.tileAt(bx, by);
-                return this.passability.computePath(SpeedType.Track, false, a, false, b, false, { bestEffort: false }).length > 0;
-            };
-            for (const r of refineries) {
-                const node = this.nearestNode(r.x, r.y);
-                if (!node) continue;
-                if (!reach(r.x, r.y, node.x, node.y)) { sealed = true; break; }
+        for (const r of refineries) {
+            const cell = this.freeCellNear(r);
+            if (!cell || !reachable(cell)) { sealed = true; break; }
+            const node = this.nearestNode(r.x, r.y);
+            if (node) {
+                const oreCell = this.tileAt(node.x, node.y);
+                if (!reachable(oreCell)) { sealed = true; break; }
             }
-            if (!sealed && core) {
-                for (const r of refineries) {
-                    if (!reach(core.x, core.y, r.x, r.y)) { sealed = true; break; }
-                }
-            }
-        } finally {
-            this.occupancy.unoccupyTileRange(ghostTile, ghost);
         }
         return sealed;
+    }
+
+    /** a driveable cell touching the structure's footprint (building centres are walls) */
+    private freeCellNear(b: Building): Tile | null {
+        for (let ty = b.ty - 1; ty <= b.ty + b.size; ty++) {
+            for (let tx = b.tx - 1; tx <= b.tx + b.size; tx++) {
+                const onRing = tx === b.tx - 1 || ty === b.ty - 1 || tx === b.tx + b.size || ty === b.ty + b.size;
+                if (!onRing) continue;
+                const t = this.tiles.getByMapCoords(tx, ty);
+                if (!t) continue;
+                if (this.passability.getPassableSpeed(t, SpeedType.Track, false) > 0) return t;
+            }
+        }
+        return null;
     }
 
     /** nearest cell that has room for this unit, preferring close ones */
@@ -1680,7 +1688,7 @@ export class Game {
         this.tickSuperWeapons(dt);
         this.tickCrates(dt);
 
-        this.players[1].ai?.update(dt);
+        if (this.aiEnabled) this.players[1].ai?.update(dt);
 
         this.regenTimer += dt;
         if (this.regenTimer >= 2) {

@@ -6,7 +6,7 @@
 - 引擎：Cocos Creator 3.8.8
 - 语言：TypeScript
 - 仓库：https://github.com/Liuoodh/riftsand
-- 当前版本：**v0.21.0-dev — 寻路 / 碰撞 / 让路整套改为原版移植（逐行对应）**
+- 当前版本：**v0.22.0-dev — 修掉周期性卡顿；遮挡改为原版相机深度排序**
 
 ![主菜单](docs/shots/menu.png)
 
@@ -160,6 +160,57 @@ frameIndex = startFrame + facingMult * facingIndex + animFrame
 
 等距下屏幕矩形对应世界**菱形**，把两个角反投影成世界 AABB 必然漏选。
 现在框选是「逐单位投影到屏幕再判断是否在矩形内」——这是等距下唯一正确的做法。
+
+## v0.22：周期性卡顿的根因是 AI 选址；遮挡改用原版相机深度
+
+### 1. 大约每几秒顿一下
+
+用逐帧归因的探针（`perf2`）抓到的尖峰全部落在 `wouldSealBase` 上：一次 AI 选址会在
+一个 tick 里对它扫过的**每个候选格**调用一次，而那次调用会
+
+1. 把假想建筑写进占格表 → 通行图失效；
+2. 下一次寻路重建整张图 + 全图岛屿洪水（~9ms）；
+3. 结束时再退格 → 再失效一次。
+
+一次选址 12~80 个候选 = 一帧里 80~700ms 的阻塞。用户看到的“顿一下”就是它；
+它同时也是 pathsim 从 2m45s 掉到 8s 的原因（测试里 AI 一直在跑）。
+
+修法（三处）：
+
+- `wouldSealBase` 改成**只读**：在缓存好的通行图上做一次洪水
+  （`Passability.computeReachableMask`，返回 `Uint8Array` 而不是 `Set<string>`），
+  候选footprint 当墙，全程不改占格表、不触发重建。
+- AI 选址改成「先廉价筛选 + 打分排序，只对前 4 名做封家校验」，
+  再也不会为 300 个候选各跑一次洪水。
+- 移动热路径去分配：`TileOccupation.forEachOnTile`（不再 `Array.from(Set)`）、
+  单位越格改用 `occupySingleTile`（不再分配格子数组、不再触发通行图事件）。
+- 顺带：弹坑（decal）不再每帧重画 Graphics，只画一次 + `UIOpacity` 淡出。
+
+实测（无头 Chrome，25s 采样）：`seal` 尖峰 78~115ms → **0**；AI tick 1830ms/20s → 5ms/20s；
+`update` 单帧 145ms → 无。
+
+### 2. 坦克互相遮挡
+
+原版是**真 3D 场景**：正交相机在 `ISO_CAMERA_ALPHA=30° / BETA=45°`，
+谁挡住谁由 z-buffer 沿相机轴决定。我们的 2D 等距渲染器要用画家算法复现同一个量：
+
+```
+depth = (x + y) / TILE * ISO_HH + z * ISO_HH/3
+```
+
+（该相机下，一个地形高度 ≈ 1/3 个 (rx+ry) 步长。）
+
+之前用的是投影后的屏幕 y（`(rx+ry)*14 - z*16`），高度项方向是反的：站在沙丘上的车
+被当成“更远”，于是被前面的车盖住。现在：
+
+- 单位/水晶/废墟/弹坑统一用相机深度；
+- **建筑用它 footprint 的前角**（屏幕上精灵的底边），而不是中心——
+  否则一栋 3×3 会把它正前方的坦克盖住。
+
+新增回归 `tools/occltest.mjs`：世界层深度升序、斜列四车从远到近、建筑前方单位绘制在其后。
+
+回归：movetest 18/18、crowdtest 7/7、phystest 10/10、pathsim 停滞 0/27、harvesttest 6/6、
+occltest 5/5、maptest 21/21、inputtest 20/20。
 
 ## v0.21：碰撞与寻路整套改成原版移植
 

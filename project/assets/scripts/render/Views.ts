@@ -11,7 +11,7 @@ import {
     BUILDINGS, UNITS, TILE, HALF, MAP_SIZE, MAP_TILES, PAL, HEX, Faction, FACTIONS, makeRng, clamp,
 } from '../core/Core';
 import { TerrainMap, TileKind } from '../world/Terrain';
-import { worldToProj, ISO_HW, ISO_HH, HEIGHT_PX, PROJ_HALF_X, PROJ_HALF_Y } from '../world/Iso';
+import { worldToProj, depthOf, ISO_HW, ISO_HH, HEIGHT_PX, PROJ_HALF_X, PROJ_HALF_Y } from '../world/Iso';
 import { Anim, Seq, facingIndex, facingIndexSticky, facingDeg } from './Frames';
 import { Game, PlayerState } from '../game/Game';
 import { Unit, Building, Entity, Projectile, Fx, Zone, Crate, Decal } from '../game/Entities';
@@ -71,9 +71,10 @@ export class TerrainView {
         this.crystalRoot = plainNode(parent, 'Crystals');
         for (const n of terrain.nodes) {
             const g = gfxNode(this.crystalRoot, 'crystal' + n.id);
-            const p = worldToProj(n.x, n.y, terrain.heightAt(n.x, n.y));
+            const nz = terrain.heightAt(n.x, n.y);
+            const p = worldToProj(n.x, n.y, nz);
             g.node.setPosition(p.x, p.y, 0);
-            (g.node as any).__depth = p.y;
+            (g.node as any).__depth = depthOf(n.x, n.y, nz);
             drawCrystal(pen(g), n.seed, 1);
             (g.node as any).__node = n;
         }
@@ -536,7 +537,7 @@ export class EntityView {
         this.node = plainNode(parent, (e.isBuilding ? 'B:' : 'U:') + e.id);
         const p0 = worldToProj(e.x, e.y, terrain.heightAt(e.x, e.y));
         this.node.setPosition(p0.x, p0.y, 0);
-        (this.node as any).__depth = p0.y;
+        (this.node as any).__depth = this.computeDepth();
         this.ring = gfxNode(this.node, 'ring');
         this.body = gfxNode(this.node, 'body');
         this.spriteNode = plainNode(this.node, 'sprite');
@@ -620,6 +621,30 @@ export class EntityView {
         if (sf) this.sprite.spriteFrame = sf;
     }
 
+    /**
+     * Depth key for the painter's sort.
+     *
+     * Reference: the 3D scene resolves occlusion with a z-buffer along the
+     * camera axis, so the key is that same axis distance (world/Iso.depthOf),
+     * including the terrain height — NOT the projected screen y, which moves the
+     * wrong way when a hull sits on a dune.
+     *
+     * A structure's sprite stands for its whole footprint, so its order is
+     * decided by the FRONT corner (the cell nearest the camera): a unit in front
+     * of a 3x3 has to be drawn after the building even though its centre is
+     * still "behind" the building's centre.
+     */
+    private computeDepth(): number {
+        const e = this.e;
+        if (e instanceof Building) {
+            const b = e;
+            const frontX = (b.tx + b.size - 0.5) * TILE - HALF;
+            const frontY = (b.ty + b.size - 0.5) * TILE - HALF;
+            return depthOf(frontX, frontY, 0);
+        }
+        return depthOf(e.x, e.y, this.terrain.heightAt(e.x, e.y));
+    }
+
     redraw(selFaction: Faction) {
         if (this.e instanceof Unit) {
             this.applyFrame(this.e, selFaction);
@@ -638,7 +663,7 @@ export class EntityView {
             const lift = this.terrain.heightAt(u.x, u.y);
             const p = worldToProj(u.x, u.y, lift);
             this.node.setPosition(p.x, p.y + (air ? u.altitude + Math.sin(u.bob * 2) * 1.6 : 0), 0);
-            (this.node as any).__depth = p.y + (e.isBuilding ? 2 : 0);
+            (this.node as any).__depth = this.computeDepth();
             if (air) {
                 // aircraft are continuous 3D models in the reference, so a real
                 // rotation (plus bank) is correct for them
@@ -1133,9 +1158,9 @@ export class WorldRenderer {
         g.fill();
     }
 
-    private drawDecal(g: Graphics, d: Decal) {
+    /** geometry is static; only `fade` changes over the decal's life */
+    private drawDecal(g: Graphics, d: Decal, fade = 1) {
         g.clear();
-        const fade = 1 - Math.max(0, (d.k - 0.6) / 0.4);
         const a = d.alpha * fade;
         g.ellipse(0, 0, d.r, d.r * 0.62);
         g.fillColor = new Color(24, 18, 13, Math.floor(a * 0.7));
@@ -1214,9 +1239,10 @@ export class WorldRenderer {
         for (const c of this.ruinLayer.children.slice()) c.destroy();
         for (const r of ruins) {
             const n = gfxNode(this.ruinLayer, 'ruin');
-            const p = worldToProj(r.x, r.y, this.game.terrain.heightAt(r.x, r.y));
+            const rz = this.game.terrain.heightAt(r.x, r.y);
+            const p = worldToProj(r.x, r.y, rz);
             n.node.setPosition(p.x, p.y, 0);
-            (n.node as any).__depth = p.y;
+            (n.node as any).__depth = depthOf(r.x, r.y, rz);
             drawRuin(pen(n), r.size, r.seed);
         }
     }
@@ -1262,16 +1288,26 @@ export class WorldRenderer {
         // rally marker for the selected structure
         this.drawRally(g);
 
-        // craters left by explosions
+        /*
+         * Craters left by explosions.
+         *
+         * The shape never changes — only its fade-out does — so the Graphics is
+         * built once when the decal appears and the fade is applied through
+         * UIOpacity afterwards. Redrawing 2-3 ellipses per decal per frame (up
+         * to 48 of them) was pure per-frame garbage and a real cost on phones.
+         */
         for (const d of g.decals) {
             let gg = this.decalViews.get(d);
             if (!gg) {
                 gg = gfxNode(this.decalLayer, 'decal');
                 this.decalViews.set(d, gg);
+                this.drawDecal(gg, d, 1);
+                const dp = worldToProj(d.x, d.y, g.terrain.heightAt(d.x, d.y));
+                gg.node.setPosition(dp.x, dp.y, 0);
             }
-            const dp = worldToProj(d.x, d.y, g.terrain.heightAt(d.x, d.y));
-            gg.node.setPosition(dp.x, dp.y, 0);
-            this.drawDecal(gg, d);
+            const fade = 1 - Math.max(0, (d.k - 0.6) / 0.4);
+            const op = gg.node.getComponent(UIOpacity) ?? gg.node.addComponent(UIOpacity);
+            op.opacity = Math.max(0, Math.min(255, Math.round(255 * fade)));
         }
         for (const [d, gg] of this.decalViews) {
             if (d.dead || g.decals.indexOf(d) < 0) { gg.node.destroy(); this.decalViews.delete(d); }
