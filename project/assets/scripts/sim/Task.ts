@@ -8,7 +8,7 @@
  * WaitTicksTask and returns `false`, so the unit stands still while the child
  * runs.
  */
-import { GENERAL } from './rules/GeneralRules';
+import { TICKS_PER_SECOND } from './Constants';
 
 export enum TaskStatus {
     Running = 0,
@@ -104,7 +104,7 @@ export class CallbackTask extends Task {
 /** Port of WaitMinutesTask: minutes → ticks at the reference's 15 ticks/s. */
 export class WaitMinutesTask extends WaitTicksTask {
     constructor(minutes: number) {
-        super(Math.floor(GENERAL.baseTicksPerSecond * minutes * 60));
+        super(Math.floor(TICKS_PER_SECOND * minutes * 60));
     }
 }
 

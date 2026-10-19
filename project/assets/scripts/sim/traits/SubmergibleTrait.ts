@@ -12,7 +12,7 @@
  *
  * No naval unit exists in this roster yet; the trait is ported intact.
  */
-import { GENERAL } from '../rules/GeneralRules';
+import { TICKS_PER_SECOND } from '../Constants';
 
 export interface SubmergeWorld {
     /** `[General] CloakDelay`, in minutes */
@@ -43,10 +43,10 @@ export class SubmergibleTrait {
         if (world.isAttacking(unit) && !world.isMoving(unit)) {
             this.cooldownTicks = Math.max(
                 this.cooldownTicks ?? 0,
-                5 * GENERAL.baseTicksPerSecond,
+                5 * TICKS_PER_SECOND,
             );
         } else {
-            this.cooldownTicks ??= Math.floor(60 * world.cloakDelay * GENERAL.baseTicksPerSecond);
+            this.cooldownTicks ??= Math.floor(60 * world.cloakDelay * TICKS_PER_SECOND);
         }
         if (this.cooldownTicks > 0) this.cooldownTicks--;
         if (this.cooldownTicks <= 0) {

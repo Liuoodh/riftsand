@@ -9,7 +9,7 @@
  * Retail gates the cooldown on "some docked unit can still take ammo", so a pad
  * full of full aircraft burns no timer at all.
  */
-import { GENERAL } from '../rules/GeneralRules';
+import { TICKS_PER_SECOND } from '../Constants';
 
 export interface ReloadWorld {
     /** `[General] ReloadRate`, in minutes, per round */
@@ -33,10 +33,10 @@ export class UnitReloadTrait {
             return;
         }
         if (this.cooldownTicks === undefined) {
-            this.cooldownTicks = Math.max(1, Math.round(GENERAL.baseTicksPerSecond * world.reloadRateMinutes * 60));
+            this.cooldownTicks = Math.max(1, Math.round(TICKS_PER_SECOND * world.reloadRateMinutes * 60));
         }
         if (this.cooldownTicks <= 0) {
-            this.cooldownTicks = Math.max(1, Math.round(GENERAL.baseTicksPerSecond * world.reloadRateMinutes * 60));
+            this.cooldownTicks = Math.max(1, Math.round(TICKS_PER_SECOND * world.reloadRateMinutes * 60));
             const unitsToReload = docked[0].ammoTrait?.ammo === 0 ? docked.slice(0, 1) : docked;
             for (const unit of unitsToReload) {
                 if (this.canReloadUnit(unit)) unit.ammoTrait!.ammo++;

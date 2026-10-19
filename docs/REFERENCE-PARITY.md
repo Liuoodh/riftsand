@@ -1373,3 +1373,143 @@ PASS  Crc32 标准向量 "123456789" → 0xCBF43926
 全量回归：`smoke 0 error / movetest 18 / crowdtest 7 / phystest 10 / occltest 5 /
 dirtest 9 / speedtest 12 / menutest 11 / assettest 20 / inputtest 20 / featuretest 14 /
 harvesttest 6 / maptest 21 / buildingtest 13` —— 全部通过。
+
+## 24. v0.25-B2：规则全表（原版 37 文件 / 2,635 行）
+
+B1 搬的是数学地基，B2 搬的是**所有规则**——原版 `src/game/rules/**` 整个目录。
+这一层没有"手感"，只有数据、派生和几处刻意的取整，所以验收方式也变了：
+不再看画面，而是逐条断言**原版的派生结果**。
+
+### 24.1 本轮范围
+
+```
+sim/rules/Rules.ts              610 行   根容器（原版 555 行）
+sim/rules/TechnoRules.ts        997 行   ~300 字段全派生（B2 前半完成）
+sim/rules/GeneralRules.ts       292 行   主容器 + PrereqCategory（原版 183 行）
+sim/rules/general/*.ts         ×12       Crew/DMisl/Hover/LightningStorm/Missile/
+                                         Paradrop/Prism/Radar/Repair/Threat/V3Rocket/Veteran
+sim/rules/ObjectRules.ts         87 行   基类 + 两个单位换算
+sim/rules/WarheadRules.ts       138 行   verses 缺失槽位 = 满伤
+sim/rules/WeaponRules.ts        131 行   Range=-2 → Infinity；speed 双存
+sim/rules/CombatDamageRules.ts   74 行
+sim/rules/{Land,Terrain}Rules.ts 65 + 110  原版两个类，替代旧的单文件混合体
+sim/rules/{Overlay,Smudge,Debris,Projectile,Radiation,Tiberium}.ts
+sim/rules/{SuperWeapon,Ai,Country,Crate,ElevationModel,Powerups,AudioVisual,MpDialogSettings}.ts
+sim/rules/ObjectRulesFactory.ts  58 行   按 ObjectType 分派
+sim/rules/rulesContent.ts       308 行   本项目自己的 rules.ini（内容）
+sim/type/TheaterType.ts          20 行
+sim/util/Color.ts                92 行   [Colors] 的 HSV 读取
+```
+
+引擎侧合计 4,432 行（原版同目录 2,351 行），差额是注释、`XxxRulesData` 类型和 308 行内容数据。
+
+### 24.2 数据格式：`readIni(ini)` → `read(data)`
+
+原版每个规则类都是 `readIni(ini: IniReader)`，逐键 `ini.getNumber('Cost')`。
+按既定决策（TS 对象 + 字段逐一对齐，不移植 INI 解析器），本轮统一改成：
+
+```ts
+export interface XxxRulesData { cost?: number; /* ... 键名 = ini 键的 camelCase */ }
+export class XxxRules { cost = 0; read(data: XxxRulesData = {}): this { ... } }
+```
+
+只换**取值方式**，不换**字段语义**：默认值仍取原版 `getXxx(key, default)` 的回落值，
+派生仍在 `read` 里算一次（不在使用点重算），一个字段两份含义的（`WeaponRules.speed` /
+`iniSpeed`、`ProjectileRules.rot` / `iniRot`、`TechnoRules.rot`）保持双存。
+
+`Rules` 构造参数从 `IniFile` 换成 `RulesContent`，但 `init()` 的**装配顺序原样保留**
+（AudioVisual → CombatDamage → Radiation → General → AI → Crate → Elevation → MpDialog →
+类型表 → Colors → Countries → Warheads → Tiberiums → SuperWeapons → 对象表 → 武器索引）。
+这条顺序有意义：`TechnoRules` 在构造时就要读 `general.unitsUnsellable` / `returnStructures`。
+
+### 24.3 `GENERAL` 常量的每一站
+
+旧的自研 `GENERAL` 常量共被 9 个文件、19 个字段读用，本轮全部拆解，**不留兼容对象**：
+
+| 旧读点 | 新归属 | 备注 |
+|---|---|---|
+| `baseTicksPerSecond` ×14 | `sim/Constants.TICKS_PER_SECOND` | 时钟常量，原版在任何 `[General]` 里都没有这个键 |
+| `closeEnough` ×3 | `RULES.general.closeEnough` | |
+| `harvesterTooFarDistance` ×3 | `RULES.general.harvesterTooFarDistance` | |
+| `refundPercent` ×2 | `RULES.general.refundPercent` | 读取时 clamp 到 [0,1] |
+| `multipleFactory` ×2 | `RULES.general.multipleFactory` | |
+| `buildupTime` ×2 | `RULES.general.buildupTime` | 分钟 |
+| `maximumQueuedObjects` | `RULES.general.maximumQueuedObjects` | 队列容量 = 值 + 1 |
+| `wallBuildSpeedCoefficient` | `RULES.general.wallBuildSpeedCoefficient` | |
+| `purifierBonus` | `RULES.general.purifierBonus` | |
+| `repair` | `RULES.general.repair` | 整个 `RepairRules` 实例 |
+| `reloadRate` | `RULES.general.repair.reloadRate` | 原版就在 Repair 块里，不在 `[General]` 顶层 |
+| `c4Delay` | `RULES.combatDamage.c4Delay` | 原版在 `[CombatDamage]` |
+| `crew.*` ×6 | `RULES.general.crew.*` | `CrewRules` 实例 |
+| `harvesterStorage` | `sim/Constants.HARVESTER_STORAGE` | 原版无此键：容量在 `TechnoRules.Storage`，等 B5 迁到单位定义上 |
+| `crew.alliedEngineer` / `sovietEngineer` | `Game.ts` 的 `CREW_ENGINEER` | 原版 `CrewRules` 没有工程师字段；这是本项目的阵营内容 |
+
+三个字段直接删除，因为它们从来没有读点：`oreValue` / `gemValue`（矿价已由
+`RULES.getTiberium(id).value` 承担）、`buildTimeFloorMs`。
+
+### 24.4 四处"看起来多余、其实必须照抄"
+
+1. **`LandRules.getSpeedModifier` 的三条 early-out**，第三条把 **Foot 也夹成 1**：
+   ```ts
+   if (speedType !== SpeedType.Track && speedType !== SpeedType.Wheel && modifier > 0) modifier = 1;
+   ```
+   `[Rock]` 写 `Foot=80`，步兵踩上去并不是 0.8 倍速，而是 1 倍——**只有履带和轮式保留小数**。
+   我第一版断言写成"Foot 0.8"就挂了，查回原版才发现这条。同时：
+   `Track=0` 会让 Foot 也变 0（墙就是墙）；缺失列按 1 而不是 0。
+2. **`ProjectileRules` 的加速度三段推导**，顺序不能动：
+   ```ts
+   if (rot === 1 && !acceleration) acceleration = Infinity;
+   acceleration = acceleration || 3;   // Infinity || 3 仍是 Infinity
+   ```
+   `ROT=1`（瞬时转向）意味着可以任意急转，所以是无穷大而不是 0；把 `|| 3` 提到前面会让
+   瞬时转向的弹道变成每秒加速 3。
+3. **`ElevationModelRules.bonusCap` 卡的是步数，不是百分比**：
+   `min(bonusCap, floor(高差/步长)) * incrementBonus`。步长 4、加成 5、cap 50 时，
+   400 点高差的收益是 `min(50,100)*5 = 250`，不是 50。
+4. **`TerrainRules.normalizeOccupationBits`** 把越界掩码折回 `[0,8)`：
+   `(bits + 8*|floor(bits/8)|) % 8`。零售树写 `OccupationBits=-1`，不折的话每个位测试都会意外通过。
+   配套的 `testOccupationBit` 对子格 0/1 恒返回 true——子格 0 是格心、1 是共用位，永远被占。
+
+另外两个"推导出来的默认值"也保住了：`OverlayRules.radarInvisible` 缺省是
+`!isWall && !isARock`（墙和石头默认不上雷达，其它默认上）；
+`DebrisRules.elasticity` 读取时 clamp 到 [0,1]（大于 1 会每次弹跳加能量，永不落地）。
+
+### 24.5 两个载体换掉
+
+**INI section → TS 内容对象**。原版 `Rules` 从 `rules.ini` 读；本项目仓库里没有也不该有
+规则文本。所有数值搬进 `sim/rules/rulesContent.ts`，形态与 `[General]` / `[Clear]` /
+`[Colors]` 等段落一一对应（`landRules` 以**段名**为键，好让 `getLandRules` 的
+`Cliff → Rock` 回退仍然成立）。空表（warheads / weapons / projectiles / 单位类型表）
+是刻意的——留给 B3 与内容梳理，而不是填占位值让错误延后暴露。
+
+**`private` → `public`**。原版 `AudioVisualRules` / `AiRules` / `CrateRules` / `DebrisRules`
+的字段都写了 `private`，但 `engine/renderable/**` 与 `trait/**` 一直在读它们——
+TS 的 `private` 只是编译期约定，从没真正拦住。照抄会编译不过，所以改成 `public`，
+**只改可见性，不改语义**。
+
+### 24.6 验证：`tools/rulestest.mjs`（62 条断言）
+
+```
+PASS  refundPercent 1.5 被夹到 1 / -1 被夹到 0
+PASS  revealTriggerRadius 50 被压到 10
+PASS  缺 prerequisiteProc 时 readPrereqCategories 抛错
+PASS  getMissileRules("V3Rocket") 返回 v3Rocket 实例，未知类型抛错
+PASS  Track=0 时 Foot 也被挡住 → 0
+PASS  非 Track/Wheel 的正 modifier 被夹成 1（Hover / Foot 都不吃减速）
+PASS  Rock: 只有 Track/Wheel 保留小数（0.7 / 0.5），Foot 被夹成 1
+PASS  Cliff 走显式 [Cliff] 段而不是回落 [Rock]
+PASS  occupationBits -1 → 7 / 8 → 0 / 9 → 1
+PASS  Snow 与 Temperate 的占用掩码分开取值
+PASS  Overlay: Wall / IsARock 默认不上雷达，显式值可覆盖
+PASS  Projectile: ROT=1 且无加速度 → Infinity；无加速度 → 3；显式 5 保留
+PASS  Projectile: ROT 128 → 180 度/帧；AG 默认 true / AA 默认 false
+PASS  ElevationModel: bonusCap 卡步数（50 步 × 5 = 250）
+PASS  Color.fromHsv(0,0,255) → 白，(0,255,255) → 红，h=255 绕回红
+PASS  CrateRules: UnitCrateType="NONE" → undefined
+PASS  MpDialogSettings: 缺 key 保持 undefined，0 保持 0
+PASS  PowerupsRules: IonStorm/Gas/Pod/Squad 在读取时被剔除
+```
+
+全量回归：`mathtest 40 / rulestest 62 / movetest 18 / crowdtest / phystest / occltest /
+dirtest / speedtest / menutest / assettest / inputtest / featuretest / harvesttest /
+maptest / buildingtest / battletest`，`smoke ERRORS 0`。

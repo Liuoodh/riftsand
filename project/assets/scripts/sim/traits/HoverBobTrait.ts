@@ -9,7 +9,7 @@
  * and applies it to the hull elevation, so it never fights the terrain height
  * (a hover unit driving up a ramp still tracks the ramp).
  */
-import { GENERAL } from '../rules/GeneralRules';
+import { TICKS_PER_SECOND } from '../Constants';
 
 export interface HoverWorld {
     /** reference `rules.general.hover.height`, in leptons (px) */
@@ -55,7 +55,7 @@ export class HoverBobTrait {
 
     private computeHoverBobLeptons(currentTick: number, bob: number): number {
         const timeInSeconds =
-            (currentTick - this.spawnTick) / GENERAL.baseTicksPerSecond / (60 * Math.max(0.0001, bob));
+            (currentTick - this.spawnTick) / TICKS_PER_SECOND / (60 * Math.max(0.0001, bob));
         return 0.1 * Math.sin(2 * timeInSeconds * Math.PI);
     }
 

@@ -29,6 +29,37 @@ export {
 /* spatial / random / projection */
 export { Coords } from './Coords';
 export { Prng } from './Prng';
+export { TICKS_PER_SECOND, HARVESTER_STORAGE } from './Constants';
+
+/* rules */
+export { RULES, Rules, RULES_CONTENT } from './rules';
+export type { RulesContent } from './rules';
+export { GeneralRules, PrereqCategory } from './rules/GeneralRules';
+export type { GeneralRulesData } from './rules/GeneralRules';
+export { ObjectRules } from './rules/ObjectRules';
+export type { ObjectRulesData } from './rules/ObjectRules';
+export { ObjectRulesFactory } from './rules/ObjectRulesFactory';
+export { TechnoRules } from './rules/TechnoRules';
+export type { TechnoRulesData } from './rules/TechnoRules';
+export { WarheadRules } from './rules/WarheadRules';
+export { WeaponRules } from './rules/WeaponRules';
+export { CombatDamageRules } from './rules/CombatDamageRules';
+export { LandRules } from './rules/LandRules';
+export { TerrainRules, OccupationBits, testOccupationBit } from './rules/TerrainRules';
+export { OverlayRules } from './rules/OverlayRules';
+export { SmudgeRules } from './rules/SmudgeRules';
+export { DebrisRules } from './rules/DebrisRules';
+export { ProjectileRules } from './rules/ProjectileRules';
+export { RadiationRules } from './rules/RadiationRules';
+export { SuperWeaponRules } from './rules/SuperWeaponRules';
+export { AiRules } from './rules/AiRules';
+export { CountryRules } from './rules/CountryRules';
+export { CrateRules } from './rules/CrateRules';
+export { ElevationModelRules } from './rules/ElevationModelRules';
+export { PowerupsRules } from './rules/PowerupsRules';
+export { AudioVisualRules } from './rules/AudioVisualRules';
+export { MpDialogSettings } from './rules/MpDialogSettings';
+export { mpAllowedColors } from './rules/mpAllowedColors';
 
 /* reference vocabulary */
 export { ArmorType } from './type/ArmorType';
@@ -39,11 +70,17 @@ export { LocomotorType } from './type/LocomotorType';
 export { LandTargeting } from './type/LandTargeting';
 export { NavalTargeting } from './type/NavalTargeting';
 export { SuperWeaponType } from './type/SuperWeaponType';
-export { PowerupType } from './type/PowerupType';
+export { PowerupType, UNSUPPORTED_POWERUP_TYPES } from './type/PowerupType';
 export { PipColor } from './type/PipColor';
 export { VhpScan } from './type/VhpScan';
+export { ObjectType } from './type/ObjectType';
+export { SideType } from './type/SideType';
+export { TheaterType } from './type/TheaterType';
+export { WeaponType } from './type/WeaponType';
+export { VeteranAbility, VeteranLevel } from './type/VeteranAbility';
 
 /* util */
+export { Color } from './util/Color';
 export {
     clamp, lerp, isBetween, getRandomInt, floorTo,
     truncToDecimals, roundToDecimals, fnv32a,

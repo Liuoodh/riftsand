@@ -7,7 +7,7 @@
  * up to 20 cells and takes the first legal one.
  */
 import { RadialTileFinder } from '../Tiles';
-import { SpeedType } from '../rules/TerrainRules';
+import { SpeedType } from '../type/SpeedType';
 
 export class RallyTrait {
     private rallyPoint: any;

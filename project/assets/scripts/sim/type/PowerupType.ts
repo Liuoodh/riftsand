@@ -19,3 +19,17 @@ export enum PowerupType {
     Napalm = 17,
     Squad = 18
 }
+
+/**
+ * Payouts that exist in the rules vocabulary but are never handed out.
+ *
+ * Reference: redalert2/src/game/trait/CrateGeneratorTrait.ts (declared there, next
+ * to its only consumer). They live here so `PowerupsRules` can filter at read time
+ * without importing a trait — a trait importing rules is fine, the reverse is not.
+ */
+export const UNSUPPORTED_POWERUP_TYPES = [
+    PowerupType.IonStorm,
+    PowerupType.Gas,
+    PowerupType.Pod,
+    PowerupType.Squad,
+];

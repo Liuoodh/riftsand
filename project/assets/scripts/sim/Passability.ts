@@ -14,7 +14,9 @@ import { PathFinder } from './Graph';
 import { MapBounds, RadialTileFinder, Tile, TileCollection, TileDirection } from './Tiles';
 import { TileOccupation, Occupant } from './TileOccupation';
 import { isBuildingObject } from './Constants';
-import { SpeedType, LandType, getSpeedModifier, getLandType } from './rules/TerrainRules';
+import { SpeedType } from './type/SpeedType';
+import { LandType, getLandType } from './type/LandType';
+import { getSpeedModifier } from './rules';
 
 export { SpeedType };
 export { LandType };

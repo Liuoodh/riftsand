@@ -12,7 +12,7 @@
  * Cooldown: `IdleActionFrequency` seconds ± a random half-window, so a crowd of
  * idle infantry does not act in lockstep.
  */
-import { GENERAL } from '../rules/GeneralRules';
+import { TICKS_PER_SECOND } from '../Constants';
 
 export interface IdleActionWorld {
     /** reference `world.rules.audioVisual.idleActionFrequency` */
@@ -68,7 +68,7 @@ export class IdleActionTrait {
         const baseFrequency = world.idleActionFrequency;
         const randomOffset = world.random() * baseFrequency * 0.5;
         const frequency = Math.max(0, baseFrequency - randomOffset);
-        this.cooldownTicks = Math.floor(frequency * GENERAL.baseTicksPerSecond);
+        this.cooldownTicks = Math.floor(frequency * TICKS_PER_SECOND);
     }
 
     debugGetState() {

@@ -30,8 +30,15 @@ const terrainToLandTypeMap = new Map<TileKind, LandType>([
     [TileKind.Water, LandType.Water],
 ]);
 
+/**
+ * `solidify` is our addition, not the reference's: our generator marks a cell as
+ * `solid` (an impassable ridge) independently of its art, and a solid *rock* ridge
+ * is what the reference calls Cliff. Only `Rock` is promoted — a solid dune or a
+ * solid road cell keeps its own land type, because those are already impassable for
+ * other reasons and re-labelling them would change the speed table.
+ */
 export function getLandType(terrainType: TileKind, solidify = false): LandType {
-    if (solidify) return LandType.Cliff;
+    if (solidify && terrainType === TileKind.Rock) return LandType.Cliff;
     const mapped = terrainToLandTypeMap.get(terrainType);
     if (mapped === undefined) throw new Error(`Unknown terrain type ${terrainType}`);
     return mapped;

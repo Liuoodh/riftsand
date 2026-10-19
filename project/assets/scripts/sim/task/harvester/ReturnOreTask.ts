@@ -19,7 +19,7 @@ import { MoveResult } from '../../MoveTrait';
 import { RadialTileFinder } from '../../Tiles';
 import { HarvestWorld } from './HarvestWorld';
 import { HarvesterStatus } from '../../traits/HarvesterTrait';
-import { GENERAL } from '../../rules/GeneralRules';
+import { RULES } from '../../rules';
 
 export class ReturnOreTask extends Task {
     private world: HarvestWorld;
@@ -87,7 +87,7 @@ export class ReturnOreTask extends Task {
             if (
                 dockNumber === undefined ||
                 needsReservation ||
-                (distance > GENERAL.harvesterTooFarDistance && !this.explicitOrder)
+                (distance > RULES.general.harvesterTooFarDistance && !this.explicitOrder)
             ) {
                 const queueingTile = this.findReachableQueueingTile(unit);
                 if (!queueingTile) return true;

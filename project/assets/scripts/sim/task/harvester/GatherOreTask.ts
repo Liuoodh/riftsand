@@ -14,7 +14,7 @@ import { MoveTask } from '../../MoveTask';
 import { MoveResult } from '../../MoveTrait';
 import { MoveTarget, HarvestWorld } from './HarvestWorld';
 import { HarvesterStatus } from '../../traits/HarvesterTrait';
-import { LandType } from '../../rules/TerrainRules';
+import { LandType } from '../../type/LandType';
 import { RadialTileFinder } from '../../Tiles';
 
 /**

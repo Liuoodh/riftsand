@@ -110,7 +110,7 @@
 
 > `SuppressionTrait` `IdleActionTrait` `AgentTrait` `CrashableTrait` `HelipadTrait` `UnitReloadTrait` `HoverBobTrait` `RockingTrait`(非原版) `TilterTrait` `TransportTrait` `GunnerTrait` `SubmergibleTrait` `SuperWeaponTrait` `OverpoweredTrait` `UnitRepairTrait` `WallTrait` `SpawnLinkTrait` `MissileSpawnTrait` `UnlandableTrait` `C4ChargeTrait` `FreeUnitTrait` `DockTrait` `RallyTrait` `PoweredTrait` `HarvesterTrait` —— **已移，共 25 个**。
 
-### 2.3 `game/rules/`（37 文件 / 2,635 行）—— 全部待移
+### 2.3 `game/rules/`（37 文件 / 2,635 行）—— ✅ **B2 已全部移植**
 
 | 分层 | 文件 | 行数 | 承载 |
 |---|---|---:|---|
@@ -120,7 +120,11 @@
 | 通用 | `GeneralRules`(183) + `general/*`(12 文件 / 265) | 448 | 全局常量、老兵、维修、雷达、超武 |
 | 其它 | `AiRules` `CountryRules` `CrateRules` `ElevationModelRules` `PowerupsRules` `SuperWeaponRules` `MpDialogSettings` `AudioVisualRules` `mpAllowedColors` | 351 | — |
 
-> 本工程已有 `sim/rules/GeneralRules.ts` / `TerrainRules.ts` / `BuildStatus.ts` 三个**裁剪版**，需按原版字段全集重写。
+> 原有三个裁剪版已按原版字段全集重写并无缝替换：`GeneralRules.ts`（自研 `GENERAL` 常量 → 原版
+> `GeneralRules` 类，常量拆解去向见 `REFERENCE-PARITY.md` §24.3）、`TerrainRules.ts`
+> （自研混合体 → 原版 `TerrainRules` + `LandRules` 两个类 + 内容表）。`BuildStatus.ts` 是本项目
+> 的枚举，不属于本目录，保留。
+> 数值内容集中在 `sim/rules/rulesContent.ts`（相当于本项目的 `rules.ini`）。
 
 ### 2.4 `game/map/`（21 文件 / 2,863 行）
 
@@ -167,29 +171,29 @@
 | 原版总计 | 1,207 | 125,799 |
 | 豁免（不做 / 原创） | 605 | 74,160 |
 | **应移植** | **602** | **51,639** |
-| 其中已移植 | 59 | 7,512 |
-| **待移植** | **543** | **≈44,100** |
+| 其中已移植 | 96 | 10,147 |
+| **待移植** | **506** | **≈41,500** |
 
-> 已移植的 7,512 行里有约 1,800 行是"骨架 + 适配器"，真正逐行对齐的约 5,700 行。
-> 也就是说：**剩余工作量约为此前全部工作的 6 倍。**
+> 已移植的 10,147 行 = B1 数学地基（40 / 1,411）+ B2 规则全表（37 / 2,635）+ 此前 19 / 6,101。
+> 也就是说：**剩余工作量约为此前全部工作的 4 倍**。
 
 ---
 
 ## 4. 分批计划（严格自底向上，每批可独立验收）
 
-| 批次 | 内容 | 文件 | 行数 | 依赖 |
-|---|---|---:|---:|---|
-| **B1 地基** | `util/math`+`geometry`、`game/math/*`、`game/type/*`、`Prng`、`Coords` | 40 | 1,411 | 无 |
-| **B2 规则全表** | `game/rules/**` 全部 37 文件（含 WarheadRules 的 Verses 表） | 37 | 2,635 | B1 |
-| **B3 战斗数学** | `Warhead`、`Weapon`、`WeaponTargeting`、`Target`、`trait/DamageTrait` 族 | 40 | 2,600 | B2 |
-| **B4 地图地形** | `game/map/**` 21 文件（Terrain 重写、Bridges、MapShroud、PathFinder、OreSpread、TileOcclusion） | 21 | 2,863 | B2 |
-| **B5 对象核心** | `gameobject/` 根 17 文件（含 `Projectile` 948）+ `locomotor` 9 + `unit` 14 + `selection` 5 | 45 | 6,200 | B3 B4 |
-| **B6 trait 补齐** | 剩余 44 个 `gameobject/trait/*` | 44 | 3,800 | B5 |
-| **B7 Task 全族** | 40 个 `task/**`（含 `MoveTask` 1,037、`AttackTask` 682） | 40 | 5,700 | B6 |
-| **B8 指令与动作** | `order/**` 19 + `action/**` 34 | 53 | 2,772 | B7 |
-| **B9 玩家与超武** | `player/**` 7 + `superweapon/**` 11 + `ConstructionWorker` + `GameFactory` + `Alliances` + `StartingUnitsGenerator` + `Country` | 28 | 3,700 | B8 |
-| **B10 编排层** | `Game.ts` 重构 + `World` + `GameMap` + `GameTurnManager` + `api/**` 18 + `event/**` 68 | 90 | 3,300 | B9 |
-| **B11 AI（可选）** | `ai/thirdpartbot/**` 59 | 59 | 11,481 | B10 |
+| 批次 | 内容 | 文件 | 行数 | 依赖 | 状态 |
+|---|---|---:|---:|---|---|
+| **B1 地基** | `util/math`+`geometry`、`game/math/*`、`game/type/*`、`Prng`、`Coords` | 40 | 1,411 | 无 | ✅ `8dd4d08` |
+| **B2 规则全表** | `game/rules/**` 全部 37 文件（含 WarheadRules 的 Verses 表） | 37 | 2,635 | B1 | ✅ |
+| **B3 战斗数学** | `Warhead`、`Weapon`、`WeaponTargeting`、`Target`、`trait/DamageTrait` 族 | 40 | 2,600 | B2 | ⏳ 下一批 |
+| **B4 地图地形** | `game/map/**` 21 文件（Terrain 重写、Bridges、MapShroud、PathFinder、OreSpread、TileOcclusion） | 21 | 2,863 | B2 | ⏳ |
+| **B5 对象核心** | `gameobject/` 根 17 文件（含 `Projectile` 948）+ `locomotor` 9 + `unit` 14 + `selection` 5 | 45 | 6,200 | B3 B4 | ⏳ |
+| **B6 trait 补齐** | 剩余 44 个 `gameobject/trait/*` | 44 | 3,800 | B5 | ⏳ |
+| **B7 Task 全族** | 40 个 `task/**`（含 `MoveTask` 1,037、`AttackTask` 682） | 40 | 5,700 | B6 | ⏳ |
+| **B8 指令与动作** | `order/**` 19 + `action/**` 34 | 53 | 2,772 | B7 | ⏳ |
+| **B9 玩家与超武** | `player/**` 7 + `superweapon/**` 11 + `ConstructionWorker` + `GameFactory` + `Alliances` + `StartingUnitsGenerator` + `Country` | 28 | 3,700 | B8 | ⏳ |
+| **B10 编排层** | `Game.ts` 重构 + `World` + `GameMap` + `GameTurnManager` + `api/**` 18 + `event/**` 68 | 90 | 3,300 | B9 | ⏳ |
+| **B11 AI（可选）** | `ai/thirdpartbot/**` 59 | 59 | 11,481 | B10 | ❌ 不做（保留现有 AI） |
 
 **B1–B10 合计：437 文件 / ≈34,400 行。**
 

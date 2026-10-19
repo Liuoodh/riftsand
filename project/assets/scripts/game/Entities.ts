@@ -38,7 +38,6 @@ import { OverpoweredTrait } from '../sim/traits/OverpoweredTrait';
 import { UnitRepairTrait } from '../sim/traits/UnitRepairTrait';
 import { WallTrait } from '../sim/traits/WallTrait';
 import { DeathType } from '../sim/gameobject/DeathType';
-import { GENERAL } from '../sim/rules/GeneralRules';
 
 export type PlayerId = number;
 

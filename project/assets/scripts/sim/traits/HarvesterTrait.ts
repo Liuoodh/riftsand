@@ -9,7 +9,7 @@
  * (25 for ore, 50 for gems in retail); the refinery converts on unload.
  */
 import { Task } from '../Task';
-import { GENERAL } from '../rules/GeneralRules';
+import { TICKS_PER_SECOND } from '../Constants';
 
 export enum HarvesterStatus {
     Idle = 0,
@@ -58,10 +58,10 @@ export class HarvesterTrait {
      */
     onTick(unit: any, world: any): void {
         if (this.status === HarvesterStatus.LookingForRefinery) {
-            if (this.ticksSinceLastRefineryCheck++ > 5 * GENERAL.baseTicksPerSecond) {
+            if (this.ticksSinceLastRefineryCheck++ > 5 * TICKS_PER_SECOND) {
                 this.ticksSinceLastRefineryCheck = 0;
                 if (unit.orders.hasTasks()) {
-                    this.ticksSinceLastRefineryCheck = -25 * GENERAL.baseTicksPerSecond;
+                    this.ticksSinceLastRefineryCheck = -25 * TICKS_PER_SECOND;
                 } else if (this.hasRefinery(unit, world) || this.lastGatherExplicit) {
                     unit.orders.addTask(this.makeReturnTask!(world));
                 } else {
@@ -69,7 +69,7 @@ export class HarvesterTrait {
                 }
             }
         } else if (this.status === HarvesterStatus.LookingForOreSite) {
-            if (this.ticksSinceLastOreCheck++ > 20 * GENERAL.baseTicksPerSecond) {
+            if (this.ticksSinceLastOreCheck++ > 20 * TICKS_PER_SECOND) {
                 this.ticksSinceLastOreCheck = 0;
                 if (!unit.orders.hasTasks()) {
                     unit.orders.addTask(this.makeGatherTask!(world));

@@ -33,8 +33,9 @@ import { AIController } from './AI';
 import { PowerTrait, PowerLevel } from '../sim/player/PowerTrait';
 import { Production, ProductionRules, FactoryType, PrereqCategory } from '../sim/player/Production';
 import { ProductionQueue, QueueStatus, QueueType } from '../sim/player/ProductionQueue';
-import { GENERAL } from '../sim/rules/GeneralRules';
-import { LandType, getLandType } from '../sim/rules/TerrainRules';
+import { RULES } from '../sim/rules';
+import { TICKS_PER_SECOND, HARVESTER_STORAGE } from '../sim/Constants';
+import { LandType, getLandType } from '../sim/type/LandType';
 import { PoweredTrait } from '../sim/traits/PoweredTrait';
 import { TurretTrait } from '../sim/traits/TurretTrait';
 import { DockTrait } from '../sim/traits/DockTrait';
@@ -160,6 +161,15 @@ const REVEAL_TICK = 0.22;
 const CATS: ProdCat[] = ['structure', 'infantry', 'vehicle', 'aircraft'];
 const REPAIR_COST_PER_HP = 0.4;
 const REPAIR_SECONDS = 24;
+
+/**
+ * Faction -> the engineer that walks out of a captured/destroyed structure.
+ *
+ * Content, not a rule: the reference's `CrewRules` has no engineer field (retail
+ * derives it from the country's `Engineer=`), so this stays next to the faction
+ * vocabulary rather than in `rulesContent.ts`.
+ */
+const CREW_ENGINEER: Record<string, string> = { Soviet: 'wire', Allied: 'sapper' };
 
 export class Game {
     terrain: TerrainMap;
@@ -345,7 +355,7 @@ export class Game {
         categories.set(PrereqCategory.Radar, all.filter((d) => !!d.detects).map((d) => d.id));
         categories.set(PrereqCategory.Tech, Object.keys(TECH_BUILDING).map((f) => BUILDINGS[TECH_BUILDING[f]].id));
         categories.set(PrereqCategory.Proc, all.filter((d) => !!d.dropoff).map((d) => d.id));
-        return { general: { maximumQueuedObjects: GENERAL.maximumQueuedObjects, prereqCategories: categories } };
+        return { general: { maximumQueuedObjects: RULES.general.maximumQueuedObjects, prereqCategories: categories } };
     }
 
     /**
@@ -472,7 +482,7 @@ export class Game {
         b.hp = def.hp;
         b.maxHp = def.hp;
         b.status = instant ? BuildStatus.Ready : BuildStatus.BuildUp;
-        b.buildDur = instant ? 0 : GENERAL.buildupTime * 60;
+        b.buildDur = instant ? 0 : RULES.general.buildupTime * 60;
         b.buildT = b.buildDur;
         b.tile = this.tiles.getByMapCoords(tx, ty)!;
         b.tileLookup = (rx: number, ry: number) => this.tiles.getByMapCoords(rx, ry);
@@ -540,14 +550,14 @@ export class Game {
     private get powerWorld() {
         return {
             onPowerLow: (pl: PlayerState) => {
-                pl.production.applyPowerLevel(PowerLevel.Low, pl.powerTrait.getPower(), pl.powerTrait.getDrain(), GENERAL);
+                pl.production.applyPowerLevel(PowerLevel.Low, pl.powerTrait.getPower(), pl.powerTrait.getDrain(), RULES.general);
             },
             onPowerRestore: (pl: PlayerState) => {
-                pl.production.applyPowerLevel(PowerLevel.Normal, 0, 0, GENERAL);
+                pl.production.applyPowerLevel(PowerLevel.Normal, 0, 0, RULES.general);
             },
             onPowerChange: (pl: PlayerState) => {
                 if (pl.powerTrait.isLowPower()) {
-                    pl.production.applyPowerLevel(PowerLevel.Low, pl.powerTrait.getPower(), pl.powerTrait.getDrain(), GENERAL);
+                    pl.production.applyPowerLevel(PowerLevel.Low, pl.powerTrait.getPower(), pl.powerTrait.getDrain(), RULES.general);
                 }
             },
         };
@@ -575,15 +585,15 @@ export class Game {
         return {
             currentTick: this.simWorld.currentTick,
             crewTypeFor: (faction: string) =>
-                faction === 'DS' ? GENERAL.crew.sovietCrew : faction === 'BU' ? GENERAL.crew.alliedCrew : undefined,
+                faction === 'DS' ? RULES.general.crew.sovietCrew : faction === 'BU' ? RULES.general.crew.alliedCrew : undefined,
             survivorDivisorFor: (faction: string) =>
                 faction === 'DS'
-                    ? GENERAL.crew.sovietSurvivorDivisor
+                    ? RULES.general.crew.sovietSurvivorDivisor
                     : faction === 'BU'
-                      ? GENERAL.crew.alliedSurvivorDivisor
+                      ? RULES.general.crew.alliedSurvivorDivisor
                       : 0,
             engineerTypeFor: (faction: string) =>
-                faction === 'DS' ? GENERAL.crew.sovietEngineer : faction === 'BU' ? GENERAL.crew.alliedEngineer : undefined,
+                faction === 'DS' ? CREW_ENGINEER.Soviet : faction === 'BU' ? CREW_ENGINEER.Allied : undefined,
             /*
              * `sellTrait.computeRefundValue(target)`.
              *
@@ -595,7 +605,7 @@ export class Game {
             refundValue: (target: Building) =>
                 target.player?.isAi
                     ? target.def.cost
-                    : Math.floor(target.def.cost * GENERAL.refundPercent),
+                    : Math.floor(target.def.cost * RULES.general.refundPercent),
             foundationTiles: (target: Building) => {
                 const out: Tile[] = [];
                 for (let y = target.ty; y < target.ty + target.size; y++) {
@@ -718,8 +728,8 @@ export class Game {
         const self = this;
         return {
             currentTick: this.simWorld.currentTick,
-            repairRules: GENERAL.repair,
-            baseTicksPerSecond: GENERAL.baseTicksPerSecond,
+            repairRules: RULES.general.repair,
+            baseTicksPerSecond: TICKS_PER_SECOND,
             dockedUnits: (building: Building) => building.dockTrait?.getDockedUnits() ?? [],
             hasDockedUnits: (building: Building) => !!building.dockTrait?.hasDockedUnits(),
             undockUnit: (building: Building, unit: any) => building.dockTrait?.undockUnit(unit),
@@ -744,7 +754,7 @@ export class Game {
                 return tile ? { tile, onBridge: false } : undefined;
             },
             sendToRallyPoint: (unit: Unit, rallyNode: any) => {
-                self.startMove(unit, rallyNode.tile, { closeEnoughTiles: GENERAL.closeEnough });
+                self.startMove(unit, rallyNode.tile, { closeEnoughTiles: RULES.general.closeEnough });
             },
             resetRallyPoint: (building: Building) => {
                 // reference computeDefaultRallyPoint: one cell below the footprint
@@ -886,8 +896,8 @@ export class Game {
             // the tasks build MoveTasks, which talk to the shared sim world
             ...this.simWorld,
             general: {
-                closeEnough: GENERAL.closeEnough,
-                harvesterTooFarDistance: GENERAL.harvesterTooFarDistance,
+                closeEnough: RULES.general.closeEnough,
+                harvesterTooFarDistance: RULES.general.harvesterTooFarDistance,
             },
             gemValue: GEM_BAIL_VALUE,
             isOreTile: (tile: Tile) => this.terrain.hasOre(tile.rx, tile.ry),
@@ -924,7 +934,7 @@ export class Game {
         const closest = refineries[0];
         const available = refineries.find((b) => (b.dockTrait?.getAvailableDockCount() ?? 0) > 0);
         if (!available || !closest) return closest;
-        if (this.cellDist(unit.tile, available.tile, available.size) - this.cellDist(unit.tile, closest.tile, closest.size) > GENERAL.harvesterTooFarDistance) {
+        if (this.cellDist(unit.tile, available.tile, available.size) - this.cellDist(unit.tile, closest.tile, closest.size) > RULES.general.harvesterTooFarDistance) {
             return closest;
         }
         return available;
@@ -961,7 +971,7 @@ export class Game {
             purifierCount += this.difficulty === 'hard' ? 4 : this.difficulty === 'normal' ? 2 : 0;
         }
         if (purifierCount > 0) {
-            const bonus = purifierCount * Math.floor(oreValue * GENERAL.purifierBonus);
+            const bonus = purifierCount * Math.floor(oreValue * RULES.general.purifierBonus);
             p.credits = Math.min(MAX_CREDITS, p.credits + bonus);
             p.earned += bonus;
         }
@@ -978,11 +988,11 @@ export class Game {
             mapBounds: this.mapBounds,
             passability: this.passability,
             tileOccupation: this.occupancy,
-            general: GENERAL,
+            general: RULES.general,
             createUnitForPlayer: (rules: UnitDef, owner: PlayerState) => this.createUnitForPlayer(rules, owner),
             spawnObject: (unit: Unit, tile: Tile) => this.spawnObject(unit, tile),
             startExitMove: (unit: Unit, building: Building, rallyPoint: Tile) =>
-                this.startMove(unit, rallyPoint, { closeEnoughTiles: GENERAL.closeEnough }),
+                this.startMove(unit, rallyPoint, { closeEnoughTiles: RULES.general.closeEnough }),
             isTileOccupiedBy: (tile: Tile, building: Building) => this.buildingAt(tile.rx, tile.ry) === building,
             getProduction: (pid: PlayerId) => this.players[pid]?.production,
             getBuildings: (pid: PlayerId) => this.players[pid]?.buildings ?? [],
@@ -1036,7 +1046,7 @@ export class Game {
              * bails ≈ 500 cr of ore). Converting keeps the intended capacity
              * while letting GatherOreTask count bails exactly like the original.
              */
-            const storageBails = Math.max(1, Math.round((u.def.cargo ?? GENERAL.harvesterStorage * ORE_BAIL_VALUE) / ORE_BAIL_VALUE));
+            const storageBails = Math.max(1, Math.round((u.def.cargo ?? HARVESTER_STORAGE * ORE_BAIL_VALUE) / ORE_BAIL_VALUE));
             u.harvesterTrait = new HarvesterTrait(storageBails);
             u.harvesterTrait.makeGatherTask = (_world: any, target?: Tile, explicit?: boolean) =>
                 new GatherOreTask(this.harvestWorld, target, !!explicit);
@@ -1308,7 +1318,7 @@ export class Game {
 
     /** world adapter for UnitReloadTrait */
     private get reloadWorld() {
-        return { reloadRateMinutes: GENERAL.reloadRate, currentTick: this.simWorld.currentTick };
+        return { reloadRateMinutes: RULES.general.repair.reloadRate, currentTick: this.simWorld.currentTick };
     }
 
     /** world adapter for HelipadTrait */
@@ -1587,7 +1597,7 @@ export class Game {
     factorySpeed(p: PlayerState, cat: ProdCat) {
         const n = this.factoryCount(p, cat);
         if (n <= 1) return n === 1 ? 1 : 0;
-        return Math.pow(1 / GENERAL.multipleFactory, n - 1);
+        return Math.pow(1 / RULES.general.multipleFactory, n - 1);
     }
 
     primaryFactory(p: PlayerState, cat: ProdCat): Building | null {
@@ -1827,9 +1837,9 @@ export class Game {
         }
         /* SellTrait.computeRefundValue: purchaseValue * RefundPercent */
         const ratio = clamp(b.hp / b.maxHp, 0.15, 1);
-        b.refund = Math.floor(b.def.cost * GENERAL.refundPercent * ratio);
+        b.refund = Math.floor(b.def.cost * RULES.general.refundPercent * ratio);
         b.setBuildStatus(BuildStatus.BuildDown);
-        b.buildDur = GENERAL.buildupTime * 60;
+        b.buildDur = RULES.general.buildupTime * 60;
         b.buildT = b.buildDur;
         this.selectedBuilding = null;
         this.events.onMessage?.(`拆除 ${b.def.name}…`, 'info');
@@ -2279,7 +2289,7 @@ export class Game {
      */
     private plantC4(u: Unit, b: Building): void {
         if (!b.c4ChargeTrait || b.c4ChargeTrait.hasCharge()) return;
-        const ticks = Math.floor(60 * GENERAL.c4Delay * GENERAL.baseTicksPerSecond);
+        const ticks = Math.floor(60 * RULES.combatDamage.c4Delay * TICKS_PER_SECOND);
         b.c4ChargeTrait.setCharge(ticks, { player: u.owner, obj: u });
         this.pushFx(b.x, b.y, 'spark', 0.5, b.size * 0.8);
         this.events.onSfx?.('place', b.x, b.y);
@@ -2839,7 +2849,7 @@ export class Game {
      */
     private prodAcc = 0;
     private tickProduction(dt: number) {
-        this.prodAcc += dt * GENERAL.baseTicksPerSecond;
+        this.prodAcc += dt * TICKS_PER_SECOND;
         let steps = 0;
         while (this.prodAcc >= 1 && steps < 12) {
             this.prodAcc -= 1;
@@ -2857,11 +2867,11 @@ export class Game {
 
         const factoryType = p.production.getFactoryTypeForQueueType(queue.type);
         const factoryCount = p.production.getFactoryCount(factoryType);
-        const multipleFactoryPenalty = 1 / Math.pow(GENERAL.multipleFactory, factoryCount - 1);
-        const wallSpeedModifier = item.rules.wall ? 1 / GENERAL.wallBuildSpeedCoefficient : 1;
+        const multipleFactoryPenalty = 1 / Math.pow(RULES.general.multipleFactory, factoryCount - 1);
+        const wallSpeedModifier = item.rules.wall ? 1 / RULES.general.wallBuildSpeedCoefficient : 1;
         const speedMul = p.production.buildSpeedModifier * multipleFactoryPenalty * wallSpeedModifier;
 
-        const baseTicks = Math.max(1, (item.rules.time ?? 0) * GENERAL.baseTicksPerSecond);
+        const baseTicks = Math.max(1, (item.rules.time ?? 0) * TICKS_PER_SECOND);
         const buildTime = Math.max(1, Math.round(baseTicks / Math.max(0.05, speedMul)));
         const remainingCost = item.creditsEach - item.creditsSpent;
         const affordable = Math.min(
