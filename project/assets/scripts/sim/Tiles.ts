@@ -33,8 +33,10 @@ export class Tile {
     ry: number;
     /** integer height level (reference: tile.z) */
     z: number;
-    /** terrain kind (see world/Terrain TileKind) */
+    /** land class (reference: tile.landType) — decides the speed modifier */
     landType: number;
+    /** raw terrain kind, used when a wall must be re-read as its ground */
+    terrainType: number;
     /** stable id used as the graph node key */
     id: string;
     onBridgeLandType?: number;
@@ -44,6 +46,7 @@ export class Tile {
         this.ry = ry;
         this.z = z;
         this.landType = landType;
+        this.terrainType = landType;
         this.id = `${rx}_${ry}`;
     }
 }
@@ -78,11 +81,55 @@ export class TileCollection {
     }
 
     /** re-read heights / land kinds after the terrain was (re)generated */
-    syncFrom(z: (rx: number, ry: number) => number, landType: (rx: number, ry: number) => number) {
+    syncFrom(
+        z: (rx: number, ry: number) => number,
+        landType: (rx: number, ry: number) => number,
+        terrainType?: (rx: number, ry: number) => number,
+    ) {
         for (const tile of this.tiles) {
             tile.z = z(tile.rx, tile.ry);
             tile.landType = landType(tile.rx, tile.ry);
+            tile.terrainType = terrainType ? terrainType(tile.rx, tile.ry) : tile.landType;
         }
+    }
+
+    /** reference `tiles.getMapSize()` — `{ width, height }` in cells */
+    getMapSize(): { width: number; height: number } {
+        return { width: this.size, height: this.size };
+    }
+
+    /**
+     * reference `tiles.getInRectangle(tile, foundation)`.
+     *
+     * Every cell the footprint covers, row-major from the top-left corner, with
+     * out-of-bounds cells dropped — exactly what `CrewedTrait` iterates to find
+     * a place for a survivor to stand.
+     */
+    getInRectangle(tile: { rx: number; ry: number }, foundation: { width: number; height: number }): Tile[] {
+        const out: Tile[] = [];
+        for (let y = tile.ry; y < tile.ry + foundation.height; y++) {
+            for (let x = tile.rx; x < tile.rx + foundation.width; x++) {
+                const t = this.getByMapCoords(x, y);
+                if (t) out.push(t);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * reference `tiles.getAllNeighbourTiles(tile)` — the eight cells around a
+     * tile, skipping the ones off the map.
+     */
+    getAllNeighbourTiles(tile: Tile): Tile[] {
+        const out: Tile[] = [];
+        for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+                if (dx === 0 && dy === 0) continue;
+                const t = this.getByMapCoords(tile.rx + dx, tile.ry + dy);
+                if (t) out.push(t);
+            }
+        }
+        return out;
     }
 }
 
@@ -177,6 +224,71 @@ export class RadialTileFinder {
             this.distance++;
         }
         return undefined;
+    }
+}
+
+/**
+ * RadialBackFirstTileFinder — port of the reference ring scan that starts at the
+ * *back* (min-x / min-y) edge of the ring instead of the front.
+ *
+ * Same ring geometry as `RadialTileFinder`, different walk order: left column
+ * upward-outward, then the top edge, then the right column, then the bottom
+ * edge. `FreeUnitTrait` uses it so a free unit emerges behind the structure
+ * (away from the camera) rather than in front of it.
+ */
+export class RadialBackFirstTileFinder {
+    private generator: Generator<Tile | undefined>;
+
+    constructor(
+        private tiles: TileCollection,
+        private mapBounds: MapBounds,
+        private startTile: Tile,
+        private foundation: { width: number; height: number },
+        private distance: number,
+        private maxDistance: number,
+        private predicate: (tile: Tile) => boolean,
+        private checkBounds = true,
+    ) {
+        this.generator = this.generate();
+    }
+
+    getNextTile(): Tile | undefined {
+        return this.generator.next().value;
+    }
+
+    private *generate(): Generator<Tile | undefined> {
+        const getTile = (x: number, y: number): Tile | undefined => {
+            const tile = this.tiles.getByMapCoords(x, y);
+            if (tile && (!this.checkBounds || this.mapBounds.isWithinBounds(tile)) && this.predicate(tile)) {
+                return tile;
+            }
+        };
+        do {
+            const left = this.startTile.rx - this.distance;
+            const top = this.startTile.ry - this.distance;
+            const right = this.startTile.rx + this.foundation.width - 1 + this.distance;
+            const bottom = this.startTile.ry + this.foundation.height - 1 + this.distance;
+            if (this.distance > 0) {
+                for (let y = top + 1; y < bottom; y++) {
+                    const tile = getTile(left, y);
+                    if (tile) yield tile;
+                }
+                for (let x = left; x < right; x++) {
+                    const tile = getTile(x, top);
+                    if (tile) yield tile;
+                }
+                for (let y = bottom - 1; y >= top; y--) {
+                    const tile = getTile(right, y);
+                    if (tile) yield tile;
+                }
+                for (let x = right; x >= left; x--) {
+                    const tile = getTile(x, bottom);
+                    if (tile) yield tile;
+                }
+            } else if (this.predicate(this.startTile)) {
+                yield this.startTile;
+            }
+        } while (++this.distance <= this.maxDistance);
     }
 }
 

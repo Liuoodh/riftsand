@@ -73,8 +73,11 @@ const res = await page.evaluate(async () => {
             // steerRadius, not the visual radius: the hull is allowed to overhang a wall
             // by a few pixels (that is what lets a truck park beside the refinery)
             if (g.worldBlockedAt(u.x, u.y, u.steerRadius)) everInside++;
-            if (u.order.k === 'harvest') phases.add(u.order.phase);
-            if (u.order.k === 'harvest' && u.order.phase === 'mining') everMining = true;
+            // the harvest loop is a task chain now (GatherOreTask / ReturnOreTask),
+            // so the state lives on HarvesterTrait — status 3 === Harvesting
+            const st = u.harvesterTrait ? u.harvesterTrait.status : -1;
+            phases.add(st);
+            if (st === 3) everMining = true;
             wasBlocked.push(u.blockedNow ? 1 : 0);
         }
     }
@@ -97,7 +100,7 @@ console.log('   ' + JSON.stringify(res));
 check('开局有采集车', res.trucks >= 2, `${res.trucks} 台`);
 check('没有任何一步出现瞬移/复位', res.maxJump < 4, `最大单步位移 ${res.maxJump}px (${res.jumpWho || '-'})`);
 check('采集车从未进入不可站立格', res.everInside === 0, `命中 ${res.everInside} 次`);
-check('采集车走到矿脉并开始采矿', res.everMining, res.phases.join(' → '));
+check("采集车走到矿脉并开始采矿", res.everMining, res.phases.join(" → "));
 check('60 秒内完成卸货（经济启动）', res.delivered, `earned=${res.earned} credits=${res.credits}`);
 check('控制台无异常', errors.length === 0, errors.slice(0, 2).join(' | '));
 

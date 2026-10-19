@@ -166,7 +166,9 @@ const probe = () => page.evaluate(() => {
         crystals: g.terrain.nodes.filter((n) => n.amount > 0).map((n) => toScreen(n.x, n.y)),
         radialOpen: app.ui.overlay.radialOpen,
         groups: g.groupIds.map((ids) => ids.length),
-        queues: ['structure', 'infantry', 'vehicle', 'aircraft'].map((c) => g.human.queues[c].items.length),
+        // currentSize is the reference's queue size (a stacked row counts N),
+        // items.length is the number of *rows* — retail stacks identical items.
+        queues: ['structure', 'infantry', 'vehicle', 'aircraft'].map((c) => g.human.queues[c].currentSize),
         ready: !!g.readyStructure(g.human),
         tab: app.ui.tab,
         waypoint: g.waypointMode,
@@ -362,11 +364,15 @@ if (harv && fresh.crystals.length) {
         const cc = window.cc;
         const app = cc.director.getScene().getChildByName('Canvas').getChildByName('App').getComponent('RiftApp');
         const sel = app.game.selection.map((x) => ({ t: x.def.id, k: x.order.k }));
-        const anyH = app.game.units.filter((u) => u.owner === 0 && u.isHarvester).map((u) => u.order.k);
+        const anyH = app.game.units.filter((u) => u.owner === 0 && u.isHarvester).map((u) => ({
+            k: u.order.k,
+            tasks: (u.orders?.getTasks?.() || []).map((t) => t.constructor?.name),
+        }));
         return { sel, anyH };
     });
-    const okCrystal = order.anyH.some((k) => k === 'harvest');
-    check('采集车点击矿脉附近自动采集', okCrystal, `selection=${JSON.stringify(order.sel)} 采集车状态=${JSON.stringify(order.anyH)}`);
+    // the harvest order is a task chain now (GatherOreTask), not an Order kind
+    const okCrystal = order.anyH.some((h) => h.tasks.includes('GatherOreTask'));
+    check('采集车点击矿脉附近自动采集', okCrystal, `selection=${JSON.stringify(order.sel)} 采集车=${JSON.stringify(order.anyH)}`);
 } else {
     check('采集车点击矿脉附近自动采集', false, '缺少采集车或矿脉');
 }
@@ -405,11 +411,13 @@ const prod = await page.evaluate(() => {
     h.credits = 30000;
     g.queueBuild(def.id);
     const q = h.queues.structure;
-    if (!q.items.length) return { skipped: g.lockReason(h, def) || '入队失败' };
-    // finish it instantly, then let the production tick flip it to ready
-    q.items[0].spent = q.items[0].cost - 0.01;
-    for (let i = 0; i < 6; i++) g.update(0.05);
-    const ready = q.ready;
+    if (!q.currentSize) return { skipped: g.lockReason(h, def) || '入队失败' };
+    // run real production ticks (15 Hz) until the structure is paid off and ready
+    let ready = false;
+    for (let i = 0; i < 3000 && !ready; i++) {
+        g.update(0.1);
+        ready = q.ready;
+    }
     g.beginPlace(def.id);
     const core = g.buildings.find((b) => b.owner === 0 && b.def.isCore);
     let spot = null;

@@ -1018,3 +1018,273 @@ crowdtest  7/7   movetest 18/18   harvesttest 6/6   phystest 10/10
 maptest 21/21   menutest 11/11   assettest 20/20   inputtest 20/20
 featuretest 14/14   speedtest 12/12   battletest 6 分钟 收入 13906 / 击杀 29 / 0 报错
 ```
+
+---
+
+## 21. v0.23：七大系统按原版重建（建筑 / 经济 / 电力 / 地形 / 步兵 / 飞机 / 载具）
+
+这一轮不再"调参让它像红警"，而是把参考实现的**系统本体**搬到 `project/assets/scripts/sim/`，
+Game 层只做适配器。原则：原版文件里每个函数在 sim 层都有一个同名同序的对应物，
+数值全部落到 `sim/rules/GeneralRules.ts`（对应 rules.ini `[General]`），代码里不再有散落的魔数。
+
+### 21.1 目录
+
+```
+sim/rules/     GeneralRules（[General] 全部数值）、TerrainRules（LandType/SpeedType/LandRules）、BuildStatus
+sim/player/    PowerTrait（电力）、Production（工厂/前置/低电惩罚）、ProductionQueue（队列）
+sim/traits/    Powered Turret Dock Rally Factory Harvester Suppression IdleAction Agent Crashable
+               AirportBound Helipad UnitReload HoverBob Tilter Rocking Transport Gunner Submergible
+sim/task/harvester/  GatherOreTask  ReturnOreTask  HarvestWorld
+sim/gameobject/      StanceType  InfDeathType
+```
+
+### 21.2 电力（`player/trait/PowerTrait.ts`）
+
+- 产出 = `ceil(power * health / 100) + occupantPowerBonus`（掉血即掉电，`NotifyHealthChange` 已接进 `damage()`）。
+- `drain` 存正数；`PowerLevel = power >= drain && !blackoutFrames ? Normal : Low`。
+- 消耗只在 add / remove 时变化，**不是**每帧重算。
+- 低电建造惩罚：`penalty = (0.3 * modifier * (1 - min(1, power/drain))) / 0.15`，clamp 到 `[0.5, 1]`。
+- 断电门控：防御武器与生产都要 `BuildStatus.Ready && poweredTrait.isPoweredOn()`。
+
+### 21.3 经济（`trait/ProductionTrait.ts` + `player/production/*`）
+
+- `buildTime = floorTo((cost / effectiveBuildSpeed) * buildTimeMultiplier, 54)`，下限 54 tick。
+- `effectiveBuildSpeed = baseBuildSpeed * buildSpeedModifier * (1/pow(0.8, 工厂数-1)) * 墙体系数`。
+- 每 tick 扣 `min(credits, cost/buildTime + creditsSpentLeftover, remaining)`，**15 Hz 累加器**驱动。
+- 队列类型与上限照抄：Structures(1,1) / Armory(1,1) / Infantry·Vehicles·Ships(maxQ+1) / Aircrafts(0,maxQ+1)；
+  相同项**堆叠成一行 quantity**，`creditsSpent` 只属于队首；`maxSize` setter 截断队尾（停机坪数量限制）。
+- 出售退款 `floor(cost * 0.5 * clamp(hp/maxHp, 0.15, 1))`，走 `BuildDown` 动画后到账。
+- 卸货 `credits += ore*25 + gems*50`，每台净化器 +25%，AI 按难度补虚拟净化器（hard 4 / normal 2）。
+
+### 21.4 地形（`map/Terrain.ts` + `type/LandType` + `rules/LandRules`）
+
+- `LandType` 11 种、`SpeedType` 8 种，`getSpeedModifier` 三条特殊规则逐条照抄
+  （Track=0 → Foot 也 0；缺省 1；非 Track/Wheel 且 >0 一律归 1）。
+- `Wall + Track` 时回读底层地形（本项目无桥梁层，`bridgeLevel` 恒 false）。
+- `Tiles.Tile` 增 `terrainType`（TMP 原始类型），与派生的 `landType` 分开存。
+- 矿脉按 **bail** 计：每次 `collectBail` 扣 25，耗尽后 3×3 回沙地并重建通行图。
+
+### 21.5 采矿（`task/harvester/GatherOreTask` + `ReturnOreTask`）
+
+Game 里原来那套 `seek/toMine/mining/toBase/unload` 手写状态机**整段删除**，
+换成原版任务链：`GatherOreTask → ReturnOreTask → GatherOreTask`，
+`HarvesterStatus` 9 态、`PRIORITY_MATRIX` 邻居优先、近扫半径 1 再 2..6 / 远扫 12、
+`forceMoveTried`、`closeEnough=2`、`harvesterTooFarDistance=5`、预留/占用双表全部一致。
+
+实测状态轨迹：`2 走矿 → 3 采矿 → 5 返回 → 8 卸货`，60 秒 2 台车产出 900 晶体。
+
+一个**原版不存在的状态**必须点出来：原版的 `landType === Tiberium` 等价于"格上有矿"，
+因为矿是 overlay 对象；本项目 landType 是静态地形，矿采空后仍留着 Tiberium 标记。
+若照抄这一行，`status = Harvesting` 会在空格上被反复弹回 `MovingToOreSite`
+（`onTick` 无限自递归 → 爆栈，mesa 图实测）。改为用 `isOreTile()` 判定，并加一道单 tick 递归护栏。
+
+### 21.6 步兵（`gameobject/Infantry.ts` + 5 个 trait）
+
+- `SUB_CELLS = [2,4,3]`：一格 3 人（MoveTask 侧早已就位，本轮接上工厂出厂选格）。
+- `StanceType` 与既有的"攻击姿态"分离：`stance` = aggressive/guard/hold（交战半径），
+  `pose` = None/Guard/Prone/Deployed/Paradrop/Cheer（身体状态）。原版就是两套。
+- `SuppressionTrait`：被打中且**站着不动**（或已压制）→ 压制 30 tick，`poseNow` 自动读成 Prone，
+  站着不动的人才会趴下，跑动冲锋不受影响（这正是机枪阵地能被冲下来的原因）。
+- `IdleActionTrait`：`fraidycat` 单位空闲时 50% 概率自己散开；`actionDueThisTick` 供待机动作。
+- `AgentTrait`：间谍渗透（断电 / 偷钱 / 偷科技 / 老兵）。
+- `InfDeathType` 决定死亡动画族。
+
+### 21.7 飞机（`gameobject/Aircraft.ts` + WingedLocomotor 的可见部分）
+
+- 弹匣：`ammo` 每发减 1；打空后必须回停机坪。
+- `AirportBoundTrait`：优先 `preferredAirport`，没有或满了才重新挑，挑不到 → `crash()`。
+- 落地 → `DockTrait.dockUnitAt` → `UnitReloadTrait` 按 `ReloadRate` **一发一发**装填 → 满弹起飞。
+- `CrashableTrait`：击落不等于删除。停止接单、每 tick 滚转 + 掉高度，触地才 `destroyObject` 并溅射。
+- 实测一个完整架次：`8 发打空(6.5s) → 返航(7.3s) → 落地装填 1 发/秒(8s) → 起飞`，循环稳定。
+
+### 21.8 载具（`gameobject/Vehicle.ts` + 6 个 trait）
+
+- `RockingTrait`：爆炸命中让车体在悬挂上晃 `ROCKING_TICKS=34`（纯表现）。
+- `HoverBobTrait`：气垫单位按 `0.1 * H sin(2πt/(60*bob))` 上下浮动，只加增量，不覆盖地形高度。
+- `TilterTrait`：`rampType 0..16 → pitch/yaw` 映射逐行照抄；本项目格上没有 rampType，故暂不生效（映射留着）。
+- `TransportTrait` / `GunnerTrait` / `SubmergibleTrait`：容量按 `Size` 累计、IFV 炮塔随乘客切换、
+  潜艇"静止开火 → 重置 5 秒下潜计时，移动不重置"。本阵容没有运输/IFV/潜艇，代码已就位未接线。
+
+### 21.9 三处必须偏离原版的地方
+
+| 位置 | 原版 | 本项目 | 原因 |
+|---|---|---|---|
+| `HarvesterTrait.hasRefinery` | `unit.owner.buildings` | `world.hasRefinery(unit)` | 本项目的 `owner` 是数字 id，不是 player 对象 |
+| `FactoryTrait` / `PoweredTrait` | `building.owner.production` | `building.player` / `world.getProduction()` | 同上；不改会**静默失效**（工厂不产兵、防御塔永远断电） |
+| `ReturnOreTask` 停靠前转身 | `TurnTask(270°)` | 省略 | 我们的 MoveTask 到位时车头已朝停机位，再转 270° 读起来像卡住 |
+
+配套：`Building.player` 别名、`building.dockTileFor(i)`（`DockingOffset0 = size, size/2`，
+**不是** `size-1` —— 停在最后一列会把车停进建筑里，采集车永远进不了坞）。
+
+### 21.10 验证
+
+```
+tsc -p tsconfig.check.json   0 error
+smoke 0 error（60 fps）      movetest 18/18    crowdtest 7/7     phystest 10/10
+occltest 5/5                 dirtest 9/9       speedtest 12/12   menutest 11/11
+assettest 20/20              inputtest 20/20   featuretest 14/14 harvesttest 6/6
+maptest 21/21                battletest 6 分钟 0 报错
+```
+
+---
+
+## 22. v0.24：建筑 trait 族与飞机 trait 族补全
+
+第 21 章把「一栋楼 / 一架飞机」的**主干**搬完了，但原版 `gameobject/trait/` 下还有一整层
+"锦上添花但决定手感"的 trait 没接：C4、幸存者、免费单位、超武归属、维修、围墙、子机、导弹、离场。
+这一轮把它们逐个搬进 `sim/traits/`，并把能在本阵容里跑起来的全部接线。
+
+### 22.1 本轮新增文件
+
+```
+sim/Timer.ts                      Timer（tick 倒计时，C4 引信本体）
+sim/bresenham.ts                  bresenham + isNotNullOrUndefined（离场航线用）
+sim/wallTypes.ts                  wallTypes（16 种墙体连接表，索引即美术帧号）
+sim/gameobject/DeathType.ts       DeathType（Normal / Demolish / Crush / …）
+sim/player/SuperWeaponsTrait.ts   玩家超武袋（name → 状态对象，可选镜像到 PlayerState.sw）
+sim/traits/C4ChargeTrait.ts       C4 炸药（挂在**目标建筑**上）
+sim/traits/CrewedTrait.ts         建筑阵亡 / 被卖时放出幸存者
+sim/traits/FreeUnitTrait.ts       建筑建成送一个免费单位
+sim/traits/SuperWeaponTrait.ts    超武建筑 ↔ 玩家超武袋
+sim/traits/OverpoweredTrait.ts    超载（友军充能单位把防御塔切到副武器）
+sim/traits/UnitRepairTrait.ts     维修厂 / 机场维修
+sim/traits/WallTrait.ts           围墙自动拼接 + 连锁伤害
+sim/traits/SpawnLinkTrait.ts      子机牵引（航母 / 驱逐舰）
+sim/traits/MissileSpawnTrait.ts   子机导弹自毁起爆
+sim/traits/UnlandableTrait.ts     不可降落单位飞出地图
+sim/Tiles.ts 追加                 RadialBackFirstTileFinder、getMapSize / getInRectangle / getAllNeighbourTiles
+```
+
+### 22.2 C4：工兵的两条指令终于分开（`task/PlantC4Task.ts` + `trait/C4ChargeTrait.ts`）
+
+原版里「占领」和「爆破」是**两条订单**：`CaptureBuildingOrder` 派工兵进门，
+`AttackOrder.isValid` 命中 `sourceObject.c4 && targetObj.isBuilding() && targetObj.c4ChargeTrait` 分支时
+置 `isC4 = true`（`OrderFeedbackType.SpecialAttack`），跑 `PlantC4Task`。
+
+本项目的 `engineerOrderFor(u, target, mode)` 就是这条判定：
+
+| 玩家动作 | mode | 结果 |
+|---|---|---|
+| 占领按钮（`orderCapture`） | `capture` | `{ k: 'capture' }`，原样占领 |
+| 攻击指令（`orderAttack`） | `attack` | `{ k: 'demolish' }`，放炸药 |
+
+- 引信 `chargeTime = floor(60 * c4Delay * BASE_TICKS_PER_SECOND)`，`c4Delay = 0.05` → **45 tick = 3 秒**。
+- `setCharge` 在炸药已经点着时**直接返回**：四个工兵扑同一栋楼不会叠四个引信，也不会延长第一个。
+- 到点写 `DeathType.Demolish` 再销毁 —— 塌楼动画，不是爆炸。
+- 布置者不留活口（原版 `EnterBuildingTask` 进楼即消失）。
+- `Timer.tick` 数的是 **tick**，所以它必须由 15 Hz 循环驱动，见 22.7。
+
+### 22.3 幸存者：人数 = 退款 / SurvivorDivisor（`trait/CrewedTrait.ts`）
+
+```ts
+survivorCount = refundValue / survivorDivisor;
+survivorCount = survivorCount > 0 && survivorCount < 1 ? 1 : Math.floor(survivorCount);
+survivorCount = target.isVehicle() ? Math.min(1, survivorCount) : Math.min(5, survivorCount);
+```
+
+三个容易抄错的细节：
+
+1. **`computeRefundValue` 不看血量** —— 原版就是 `purchaseValue * RefundPercent`，
+   而 `kill()` 早就把 `hp` 清零了，读血量只会得到 0.15 的下限（本版最初就栽在这，2600 的楼只跑出 1 个人）。
+2. **AI 房全额退款** —— `if (!target.owner.isAi) refundValue *= refundPercent`，这是原版保留的怪癖。
+3. **最后一个出楼的是工程师** —— 仅当 `target.rules.constructionYard` 时触发
+   （"卖掉基地车还能重建"的那个保险）。
+
+除数按**本项目的造价曲线**标定（`alliedSurvivorDivisor = sovietSurvivorDivisor = 260`）：
+420 的营帐 → 1 人，2600 的天基阵列 → 5 人（封顶）。照抄原版除数会让每栋楼都顶到 5 人上限。
+
+触发点两个，都是原版的 Notify：
+`NotifyDestroy.onDestroy`（`damage()` → `kill()`，且自杀武器 / 移动中的载具 / 正在坠落的飞机不算）
+与 `NotifySell.onSell`（`finishSell()`）。落地时挂 `ScatterTask`，把**自己那栋废墟**加入 `ignoredBlockers`，
+否则幸存者会绕着刚塌的楼原地打转。
+
+### 22.4 免费单位（`trait/FreeUnitTrait.ts`）
+
+只在 `BuildStatus.BuildUp → Ready` 这一条边沿触发，所以**升起动画没走完是不会送的**。
+落点用 `RadialBackFirstTileFinder`（从左/上"背面"开始扫环），条件是
+`passable > 0 && |Δz| < 2 && 无障碍物 && 格上不是 overlay（矿）`；全被占满时退回"第一个仅可通行格"；
+真找不到就**退款**而不是静默丢弃（原版这条分支存在是有原因的：开局丢一辆基地车是不可恢复的）。
+
+接线：战车库 → 铁砧装甲车，改装厂 → 蜥蜴突击车（`BuildingDef.freeUnit`）。
+
+### 22.5 超武归属（`trait/SuperWeaponTrait.ts` + `player/SuperWeaponsTrait.ts`）
+
+以前是 `syncSuperWeapons()` 每帧扫全表重建 `p.sw`。现在**归属权在 trait**：
+
+- `onSpawn` → `createSuperWeapon(name, player)` 塞进玩家袋；
+- `onUnspawn` → 先查"**还有没有别的楼提供同一个超武**"（`getOwnedBuildings(player).some(b => b !== self && …)`），
+  没有才移除 —— 这就是"两座力场锚卖掉一座，护盾充能不丢"；
+- `onChange` → 旧主移除、新主加入（工兵缴获超武楼时跟着走）；
+- 礼物超武（`isGift`）永不由此路径移除。
+
+`SuperWeaponsTrait` 带一个可选的**镜像数组**（就是 `PlayerState.sw`），`add` / `remove` 同时更新两边，
+HUD 拿到的和 trait 管的是**同一个对象实例**（`buildingTests` 里断言了 `===`）。
+`syncSuperWeapons` 退化成一次防御性对账。
+
+### 22.6 维修：机场用装填时钟（`trait/UnitRepairTrait.ts`）
+
+```ts
+repairRate = gameObject.rules.unitReload ? repairRules.reloadRate : repairRules.uRepairRate;
+cooldownTicks += BASE_TICKS_PER_SECOND * repairRate * 60;
+```
+
+`RepairPercent = 0.2` 是**修满的总价占造价比例**，所以每点 HP 的成本是
+`repairPercent * purchaseValue / maxHitPoints`；一个 tick 修 `RepairStep = 12` 点，
+钱不够就这一轮不修（`if (!maxCost) return false`）。
+
+三个"不修"的前置条件逐行照抄：没有 dock、dock 里有**空中单位**、建筑断电。
+最后一条正是把本 trait 接到机场上的原因 —— 原版空军指挥部**同时**有 `UnitReloadTrait` 和 `UnitRepairTrait`，
+`rules.unitReload` 为真时走装填时钟，落地加油的同时把血补回来。
+`hasHelipad()` 为真时不再派发 `UnitRepairStart/Finish` 事件（机场有自己的提示音）。
+
+### 22.7 一个必须修的时钟错误：tick 型 trait 不能按帧驱动
+
+`updateBuildings(dt)` 是**每帧**调的（60 Hz），而 `C4ChargeTrait` / `UnitReloadTrait` / `UnitRepairTrait` /
+`OverpoweredTrait` 数的都是 **tick**（原版 15 Hz）。按帧驱动会让引信在 60 fps 机器上只有 0.75 秒。
+
+修法：新增 `Game.tickBuildingTraits()`，放进 `tickMovement` 的 `while (this.simAcc >= TICK)` 定步循环里
+（`simWorld.currentTick++` 之后），`updateBuildings` 里只留 `factoryTrait` / `dockTrait` 这些本来就按 dt 走的。
+副作用是顺带修正了装填速率：`ReloadRate = 1/60` 分钟 = 15 tick = **1 秒 1 发**，这才和 21 章标定的数值一致。
+
+### 22.8 已移植但本阵容没有对应单位（代码就位、未接线）
+
+| trait | 原版宿主 | 缺什么 |
+|---|---|---|
+| `OverpoweredTrait` | 磁暴线圈 + 磁暴步兵 | 没有"充能型"步兵，也没有副武器塔 |
+| `WallTrait` + `wallTypes` | 围墙 | 阵容里没有墙段建筑（`BuildingDef.wall` 已留，`LandType.Wall` 通行规则早就在） |
+| `SpawnLinkTrait` | 航母 / 驱逐舰 | 没有 `spawner` 武器，也没有子机 |
+| `MissileSpawnTrait` | V3 / 无畏导弹 | 没有独立的导弹单位（本项目的火箭是 `Projectile`，不是 GameObject） |
+
+这四条不做假接线：`sim` 层代码与参考实现保持一致，`Game` 侧留好 world 适配器，
+一旦阵容里出现对应的楼/兵，挂上去就能跑。
+
+### 22.9 验证
+
+新增 `tools/buildingtest.mjs`（13 条断言，全部真跑构建产物）：
+
+```
+PASS  战车库建成后送出一辆铁砧装甲车            anvil 0 → 1（建造中仍为 0）
+PASS  免费单位在升起动画结束前不生成            duringBuildUp=0 status=1
+PASS  工兵对敌建筑下达攻击＝布置炸药            order idle → demolish
+PASS  引信按 tick 计时（45 tick = 3 s），布置者阵亡
+PASS  引信到点后建筑被爆破（DeathType.Demolish） deathType=2 listed=false
+PASS  建筑被摧毁后幸存者跑出（refund/Divisor）  步兵 5 → 10
+PASS  拆除建筑同样会放出幸存者                  步兵 4 → 5
+PASS  机场维修走 UnitRepairTrait 且按装填时钟
+PASS  停靠的飞机会被逐渐修好                    hp 120 → 156，扣费 77，status=1
+PASS  维修在真实 update 循环里也会推进           hp 120 → 216 / 240
+PASS  超武建筑生成 → 玩家武器袋获得该超武（同一实例）
+PASS  超武建筑被摧毁 → 武器袋与镜像同步移除
+PASS  UnlandableTrait / SpawnLinkTrait 按 def 挂载
+```
+
+全量回归（19 个脚本）：
+
+```
+tsc -p tsconfig.check.json   0 error
+smoke 0 error（60 fps）      movetest 18/18    crowdtest 7/7     phystest 10/10
+occltest 5/5                 dirtest 9/9       speedtest 12/12   menutest 11/11
+assettest 20/20              inputtest 20/20   featuretest 14/14 harvesttest 6/6
+maptest 21/21                buildingtest 13/13
+battletest 6 分钟 ERRORS 0（earned 12650 / kills 16 / lost 6 / 建筑 10 vs 9）
+```

@@ -118,9 +118,16 @@ for (const id of MAPS) {
     check(`${id} 两个出生点之间有车辆通路`, res.link);
     const badOre = res.ore.filter((o) => !o.reach0 || !o.reach1);
     check(`${id} 全部矿点可达`, badOre.length === 0, `${res.ore.length} 个矿点，不可达 ${badOre.length}`);
-    // a 300-cargo truck delivers ~3 times a minute on a short map and ~2 times on a
-    // long one; four deliveries total is the bar for "the loop closes"
-    check(`${id} 采集链能产出`, res.earned >= 1200, `${res.harv} 台采集车，60 秒产出 ${res.earned}`);
+    /*
+     * A truck now runs the retail loop: drive to the field, collect one bail per
+     * tick, drive back, unload at the refinery dock. On a water map the field is
+     * ~20 cells away, so one round trip is ~30 s and a 300-credit load lands
+     * roughly twice a minute. The bar is "every truck completed at least one
+     * delivery in 60 s", which is what proves the loop closes; the absolute
+     * number is map-dependent and not a speed assertion.
+     */
+    check(`${id} 采集链能产出`, res.earned >= 300 * Math.max(1, res.harv),
+        `${res.harv} 台采集车，60 秒产出 ${res.earned}`);
     check(`${id} 运行无报错`, errors.length === 0, errors.slice(0, 2).join(' | '));
     await page.close();
 }

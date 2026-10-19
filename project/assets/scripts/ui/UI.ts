@@ -17,7 +17,7 @@ import {
     MAP_TILES, MAP_SIZE, HALF, TILE, fmtTime, clamp, QUEUE_MAX, ProdCat, SuperWeaponId, SUPER_WEAPONS,
 } from '../core/Core';
 import { Game } from '../game/Game';
-import { Building } from '../game/Entities';
+import { Building, BuildStatus } from '../game/Entities';
 import { drawBuilding, drawUnit, pen } from '../render/Art';
 import { MAPS, PLAYER_COLORS, mapById } from '../core/Core';
 import { Overlay } from './Overlay';
@@ -1252,7 +1252,7 @@ export class UI {
     /** show the exact refund on the sell button, like the retail sidebar */
     private refreshSellLabel() {
         const b = this.game?.selectedBuilding;
-        const txt = b && b.status === 'ready' && b.progress >= 1
+        const txt = b && b.status === BuildStatus.Ready && b.progress >= 1
             ? `卖出 ${Math.floor(b.def.cost * 0.5 * Math.max(0.15, Math.min(1, b.hp / b.maxHp)))}`
             : '卖出';
         if (this.btnSell && this.btnSell.label?.string !== txt) this.btnSell.setText(txt);

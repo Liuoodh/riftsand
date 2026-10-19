@@ -55,6 +55,19 @@ export interface UnitDef {
     hover?: boolean;
     /** flight height, used by the renderer and by ground weapons */
     altitude?: number;
+    /**
+     * Shots carried before the aircraft has to land and reload
+     * (reference `Ammo=`). 0 / undefined means "no ammo limit".
+     */
+    ammo?: number;
+    /** aircraft only: reload happens one round at a time on a pad (`ManualReload`) */
+    manualReload?: boolean;
+    /** civilian-style unit that panics and runs when shot at (`Fraidycat`) */
+    fraidycat?: boolean;
+    /** immune to suppression (`Fearless`) */
+    fearless?: boolean;
+    /** spy: can infiltrate and steal (`Agent`) */
+    agent?: boolean;
     cost: number;
     time: number;
     hp: number;
@@ -72,6 +85,18 @@ export interface UnitDef {
     cloak?: boolean;
     /** captures enemy structures instead of shooting */
     engineer?: boolean;
+    /**
+     * Reference `C4=yes`: this unit can plant a satchel charge on a structure
+     * (`C4ChargeTrait` / `PlantC4Task`) instead of capturing it.
+     */
+    c4?: boolean;
+    /**
+     * Launched by a `spawner` weapon rather than built: the id of the carrier.
+     * Gets a `SpawnLinkTrait` leashed to its parent.
+     */
+    spawnedBy?: string;
+    /** must fly off the map instead of idling (paradrop transports) */
+    unlandable?: boolean;
     /** deploys into a command core */
     mcv?: boolean;
 }
@@ -93,6 +118,15 @@ export interface BuildingDef {
     isCore?: boolean;
     detects?: boolean;      // reveals cloaked enemies
     superWeapon?: SuperWeaponId;
+    /**
+     * Reference `FreeUnit=`: a unit handed over the moment the buildup finishes
+     * (`FreeUnitTrait`). Spawned on the ring behind the footprint.
+     */
+    freeUnit?: string;
+    /** this structure is a wall segment: it autotiles and shares damage */
+    wall?: boolean;
+    /** cannot be captured by an engineer, must be demolished */
+    needsEngineer?: boolean;
     desc: string;
     weapon?: WeaponDef;
 }
@@ -468,7 +502,7 @@ export const UNITS: Record<string, UnitDef> = {
     sapper: U({
         id: 'sapper', name: '战地工兵', faction: 'BU', kind: 'infantry',
         cost: 480, time: 7.5, hp: 95, armor: 'flak', speed: 40, sight: 6, radius: 7,
-        from: 'barracks', tech: 0, engineer: true,
+        from: 'barracks', tech: 0, engineer: true, c4: true,
         desc: '潜入敌方建筑将其接管，用后即撤。对己方建筑使用可紧急抢修。',
     }),
     veil: U({
@@ -502,14 +536,14 @@ export const UNITS: Record<string, UnitDef> = {
     warden: U({
         id: 'warden', name: '天穹无人机', faction: 'BU', kind: 'air',
         cost: 700, time: 12, hp: 240, armor: 'air', speed: 92, sight: 10, radius: 12,
-        from: 'airpad', tech: 2, altitude: 28,
+        from: 'airpad', tech: 2, altitude: 28, ammo: 8, manualReload: true,
         weapon: { dmg: 20, type: 'small', range: 155, cd: 1.0, proj: 'bullet', antiAir: true },
         desc: '空中侦察与对地骚扰，也能拦截敌方飞行器。',
     }),
     hammer: U({
         id: 'hammer', name: '重锤轰炸机', faction: 'BU', kind: 'air',
         cost: 1450, time: 21, hp: 340, armor: 'air', speed: 112, sight: 9, radius: 14,
-        from: 'airpad', tech: 3, altitude: 34,
+        from: 'airpad', tech: 3, altitude: 34, ammo: 2, manualReload: true,
         weapon: { dmg: 96, type: 'explosive', range: 70, cd: 4.5, splash: 60, proj: 'bomb' },
         desc: '重载投弹，一次抹平一片步兵与建筑群。',
     }),
@@ -544,7 +578,7 @@ export const UNITS: Record<string, UnitDef> = {
     wire: U({
         id: 'wire', name: '拆解师', faction: 'DS', kind: 'infantry',
         cost: 420, time: 6.5, hp: 85, armor: 'flak', speed: 44, sight: 6, radius: 7,
-        from: 'tent', tech: 0, engineer: true,
+        from: 'tent', tech: 0, engineer: true, c4: true,
         desc: '擅长撬锁与接线，能把敌方建筑整套接管。',
     }),
     shade: U({
@@ -578,14 +612,14 @@ export const UNITS: Record<string, UnitDef> = {
     gnat: U({
         id: 'gnat', name: '蚊式侦察机', faction: 'DS', kind: 'air',
         cost: 620, time: 10, hp: 190, armor: 'air', speed: 104, sight: 11, radius: 11,
-        from: 'strip', tech: 2, altitude: 26,
+        from: 'strip', tech: 2, altitude: 26, ammo: 8, manualReload: true,
         weapon: { dmg: 16, type: 'small', range: 140, cd: 0.85, proj: 'bullet', antiAir: true },
         desc: '视野极佳的空中游击单位，也是最好的侦察手段。',
     }),
     shrike: U({
         id: 'shrike', name: '掠影攻击机', faction: 'DS', kind: 'air',
         cost: 1320, time: 19, hp: 290, armor: 'air', speed: 128, sight: 9, radius: 14,
-        from: 'strip', tech: 3, altitude: 32,
+        from: 'strip', tech: 3, altitude: 32, ammo: 2, manualReload: true,
         weapon: { dmg: 74, type: 'explosive', range: 66, cd: 3.8, splash: 48, proj: 'bomb' },
         desc: '低空突防的高速攻击机，打完就跑。',
     }),
@@ -631,6 +665,7 @@ export const BUILDINGS: Record<string, BuildingDef> = {
     foundry: {
         id: 'foundry', name: '战车库', faction: 'BU', cost: 1350, time: 20, hp: 1300, size: 3,
         sight: 6, power: -25, tech: 0, produces: ['anvil', 'rampart', 'mortar'], factory: 'vehicle',
+        freeUnit: 'anvil',
         desc: '生产装甲车辆、采集车与基地车。',
     },
     airpad: {
@@ -684,6 +719,7 @@ export const BUILDINGS: Record<string, BuildingDef> = {
     workshop: {
         id: 'workshop', name: '改装厂', faction: 'DS', cost: 1150, time: 18, hp: 1120, size: 3,
         sight: 6, power: -20, tech: 0, produces: ['dart', 'lizard', 'squall'], factory: 'vehicle',
+        freeUnit: 'lizard',
         desc: '拼装各类沙海载具、采集车与基地车。',
     },
     strip: {

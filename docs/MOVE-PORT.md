@@ -110,3 +110,25 @@ node tools/phystest.mjs    # 地形、碾压、直射、曲射、防空       10
 ```
 
 改动本目录后请先 `npx tsc -p tsconfig.check.json`（工程自带）再构建。
+
+## 7. 同一套方法搬到建筑 / 飞机 trait（v0.24）
+
+「读原版 → 逐函数落到 `sim/` → Game 层只加 world 适配器」这条路线不止用于移动，
+v0.24 用它补齐了建筑与飞机侧的 trait 族（C4 / 幸存者 / 免费单位 / 超武归属 / 维修 / 围墙 /
+子机 / 导弹 / 离场），对应表见 `REFERENCE-PARITY.md` 第 22 章。
+
+这里只记一条**通用铁律**，它同时适用于移动和本轮所有 trait：
+
+> 原版 trait 数的是 **tick（15 Hz）**，不是秒。任何 `Timer` / `cooldownTicks` / `blackoutFrames`
+> 都必须由 `tickMovement` 里的定步循环驱动，绝不能挂在每帧调用的函数上。
+
+本轮就是踩了这个坑：`C4ChargeTrait` 一开始挂在 `updateBuildings(dt)`（每帧 60 Hz）上，
+45 tick 的引信在 60 fps 机器上只有 0.75 秒。现在统一收进 `Game.tickBuildingTraits()`。
+
+另一个反复出现的坑（v0.23 的采集 / 工厂，v0.24 的维修扣费）:
+
+> 本工程 `Entity.owner` 是**数字 id**。原版写 `unit.owner.credits` 的地方，
+> 要么走 `Building.player` / `Unit.player` 别名，要么走适配器的 `playerOf(x)`。
+
+v0.24 的维修就是因为它静默失效的：`getCredits(unit.owner)` 拿到 `0`（id），
+于是 `maxCost === 0` → `tickRepair` 直接 return false，飞机停在机坪上永远不修。

@@ -14,7 +14,7 @@ import { TerrainMap, TileKind } from '../world/Terrain';
 import { worldToProj, depthOf, ISO_HW, ISO_HH, HEIGHT_PX, PROJ_HALF_X, PROJ_HALF_Y } from '../world/Iso';
 import { Anim, Seq, facingIndex, facingIndexSticky, facingDeg } from './Frames';
 import { Game, PlayerState } from '../game/Game';
-import { Unit, Building, Entity, Projectile, Fx, Zone, Crate, Decal } from '../game/Entities';
+import { Unit, Building, Entity, Projectile, Fx, Zone, Crate, Decal, BuildStatus } from '../game/Entities';
 import {
     drawUnit, drawBuilding, drawCrystal, drawRock, drawBush, drawCrate,
     drawChevron, drawPickup, paintTurret, drawRuin, pen,
@@ -512,7 +512,7 @@ export class EntityView {
     private lastHp = -1;
     private lastProgress = -1;
     private lastDamaged = false;
-    private lastStatus = '';
+    private lastStatus: BuildStatus | -1 = -1;
     private lastFade = 1;
     private lastOwner = -2;
     private lastLevel = -1;
@@ -662,13 +662,21 @@ export class EntityView {
             const air = u.isAir;
             const lift = this.terrain.heightAt(u.x, u.y);
             const p = worldToProj(u.x, u.y, lift);
-            this.node.setPosition(p.x, p.y + (air ? u.altitude + Math.sin(u.bob * 2) * 1.6 : 0), 0);
+            /*
+             * Suspension rocking (reference Vehicle.ROCKING_TICKS) is a pure
+             * visual: the hull dips a couple of pixels for ~0.5 s after an
+             * explosive hit.
+             */
+            const rock = u.rockingTrait?.isRocking() ? u.rockingTrait.getRoll() * 1.6 : 0;
+            this.node.setPosition(p.x, p.y + (air ? u.altitude + Math.sin(u.bob * 2) * 1.6 : rock), 0);
             (this.node as any).__depth = this.computeDepth();
             if (air) {
                 // aircraft are continuous 3D models in the reference, so a real
                 // rotation (plus bank) is correct for them
                 const bank = Math.max(-18, Math.min(18, u.turnDelta * 7));
-                this.node.angle = isoAngle(u.face) + bank;
+                // a shot-down aircraft spins: CrashableTrait accumulates roll/pitch
+                const spin = u.isCrashing ? Math.max(-60, Math.min(60, u.roll * 0.4)) : 0;
+                this.node.angle = isoAngle(u.face) + bank + spin;
                 this.spriteNode.setScale(1, 1, 1);
                 this.spriteNode.setPosition(0, 0, 0);
                 // air art is painted from one fixed view; only the node rotates
@@ -774,7 +782,7 @@ export class EntityView {
                 drawBuilding(pen(this.body), b.def, factionOf(b.owner), b.progress, hurt);
             }
             // selling plays the raise backwards: the structure sinks and fades
-            const fade = b.status === 'builddown' ? Math.max(0.15, b.progress) : 1;
+            const fade = b.status === BuildStatus.BuildDown ? Math.max(0.15, b.progress) : 1;
             if (Math.abs(fade - this.lastFade) > 0.01) {
                 this.lastFade = fade;
                 this.op.opacity = Math.round(255 * fade);

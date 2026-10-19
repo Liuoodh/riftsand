@@ -8,6 +8,8 @@
  * WaitTicksTask and returns `false`, so the unit stands still while the child
  * runs.
  */
+import { GENERAL } from './rules/GeneralRules';
+
 export enum TaskStatus {
     Running = 0,
     Cancelling = 1,
@@ -19,6 +21,10 @@ export class Task {
     status: TaskStatus = TaskStatus.Running;
     children: Task[] = [];
     cancellable = true;
+    /** reference: a task may forbid opportunistic fire while it runs */
+    preventOpportunityFire = false;
+    /** reference: path rendering follows the deepest child */
+    useChildTargetLines = false;
     private started = false;
 
     onStart(_obj: any): void {}
@@ -77,7 +83,32 @@ export class WaitTicksTask extends Task {
     }
 }
 
-/** Per-unit task queue (the reference's UnitOrderTrait, trimmed to movement). */
+/**
+ * Port of redalert2/src/game/gameobject/task/system/CallbackTask.ts.
+ *
+ * A one-tick task whose whole body is a closure. The harvester tasks rely on it
+ * to inspect `moveTrait.lastMoveResult` the tick *after* a MoveTask finished —
+ * without it a blocked truck would rebuild an identical path every frame.
+ */
+export class CallbackTask extends Task {
+    constructor(private cb: (obj: any) => void) {
+        super();
+    }
+
+    onTick(obj: any): boolean {
+        this.cb(obj);
+        return true;
+    }
+}
+
+/** Port of WaitMinutesTask: minutes → ticks at the reference's 15 ticks/s. */
+export class WaitMinutesTask extends WaitTicksTask {
+    constructor(minutes: number) {
+        super(Math.floor(GENERAL.baseTicksPerSecond * minutes * 60));
+    }
+}
+
+/** Per-unit task queue (the reference's UnitOrderTrait, trimmed to tasks). */
 export class UnitOrders {
     private tasks: Task[] = [];
 
@@ -85,12 +116,37 @@ export class UnitOrders {
         this.tasks.push(task);
     }
 
+    addTasks(...tasks: Task[]): void {
+        for (const task of tasks) this.addTask(task);
+    }
+
+    addTaskToFront(task: Task): void {
+        this.tasks.unshift(task);
+    }
+
+    /** insert as the *next* task, behind whatever is running now */
+    addTaskNext(task: Task): void {
+        this.tasks.splice(1, 0, task);
+    }
+
     getCurrentTask(): Task | undefined {
         return this.tasks[0];
     }
 
+    getTasks(): Task[] {
+        return [...this.tasks];
+    }
+
     hasTasks(): boolean {
         return this.tasks.length > 0;
+    }
+
+    isIdle(): boolean {
+        return this.tasks.length === 0;
+    }
+
+    cancelAllTasks(): void {
+        for (const task of this.tasks) task.cancel();
     }
 
     tick(obj: any): void {

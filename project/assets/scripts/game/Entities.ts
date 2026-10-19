@@ -14,6 +14,31 @@ import { UnitOrders } from '../sim/Task';
 import { Position } from '../sim/Position';
 import { rulesFor, UnitRules } from '../sim/World';
 import { Tile } from '../sim/Tiles';
+import { HarvesterTrait } from '../sim/traits/HarvesterTrait';
+import { TurretTrait } from '../sim/traits/TurretTrait';
+import { PoweredTrait } from '../sim/traits/PoweredTrait';
+import { DockTrait } from '../sim/traits/DockTrait';
+import { StanceType } from '../sim/gameobject/StanceType';
+import { InfDeathType } from '../sim/gameobject/InfDeathType';
+import { SuppressionTrait } from '../sim/traits/SuppressionTrait';
+import { IdleActionTrait } from '../sim/traits/IdleActionTrait';
+import { AgentTrait } from '../sim/traits/AgentTrait';
+import { CrashableTrait } from '../sim/traits/CrashableTrait';
+import { AirportBoundTrait } from '../sim/traits/AirportBoundTrait';
+import { HoverBobTrait } from '../sim/traits/HoverBobTrait';
+import { RockingTrait } from '../sim/traits/RockingTrait';
+import { SpawnLinkTrait } from '../sim/traits/SpawnLinkTrait';
+import { MissileSpawnTrait } from '../sim/traits/MissileSpawnTrait';
+import { UnlandableTrait } from '../sim/traits/UnlandableTrait';
+import { C4ChargeTrait } from '../sim/traits/C4ChargeTrait';
+import { CrewedTrait } from '../sim/traits/CrewedTrait';
+import { FreeUnitTrait } from '../sim/traits/FreeUnitTrait';
+import { SuperWeaponTrait } from '../sim/traits/SuperWeaponTrait';
+import { OverpoweredTrait } from '../sim/traits/OverpoweredTrait';
+import { UnitRepairTrait } from '../sim/traits/UnitRepairTrait';
+import { WallTrait } from '../sim/traits/WallTrait';
+import { DeathType } from '../sim/gameobject/DeathType';
+import { GENERAL } from '../sim/rules/GeneralRules';
 
 export type PlayerId = number;
 
@@ -26,6 +51,7 @@ export type Order =
     | { k: 'attack'; target: Entity }
     | { k: 'harvest'; node: CrystalNode | null; phase: HarvestPhase; timer: number }
     | { k: 'capture'; target: Entity }
+    | { k: 'demolish'; target: Entity }
     | { k: 'deploy' };
 
 let nextId = 1;
@@ -46,9 +72,31 @@ export class Entity {
     /** true when the enemy can currently see this entity */
     visible = true;
     hitFlash = 0;
+    /**
+     * Reference `object.deathType` — which death animation family to play.
+     * `Demolish` is what C4 sets, so the structure collapses instead of
+     * exploding.
+     */
+    deathType: DeathType = DeathType.Normal;
 
     /** collision footprint; subclasses refine this */
     get radius(): number { return this.isBuilding ? 16 : 8; }
+
+    /**
+     * Reference HealthTrait: health as a 0..100 percentage.
+     *
+     * PowerTrait scales a plant's output by this value, so it has to be an
+     * integer percentage — `hp / maxHp * 100` computes the same number the
+     * reference stores in `_computedHealth`.
+     */
+    get healthTrait() {
+        const self = this;
+        return {
+            get health() { return self.maxHp > 0 ? (self.hp / self.maxHp) * 100 : 0; },
+            getHitPoints() { return self.hp; },
+            getMaxHitPoints() { return self.maxHp; },
+        };
+    }
 
     /** map position in leptons (= world px + HALF), reference ObjectPosition API */
     getMapPosition() {
@@ -86,6 +134,14 @@ export function wrapAngle(a: number) {
 
 export class Unit extends Entity {
     def: UnitDef;
+    /**
+     * The owning PlayerState — the same alias `Building.player` carries.
+     *
+     * The reference keeps a player *object* on every object; this project stores
+     * a numeric id on `Entity` so saves stay small. Ported traits that say
+     * `unit.owner.credits` read this instead.
+     */
+    player?: any;
     order: Order = { k: 'idle' };
     /** queued waypoint orders, executed one after another */
     orderQueue: Order[] = [];
@@ -112,6 +168,27 @@ export class Unit extends Entity {
     crusher = false;
     /** current target, mirrors AttackTrait.currentTarget (survives between scans) */
     attackTarget: Entity | null = null;
+
+    /* ---- reference traits ---- */
+    /**
+     * HarvesterTrait, present only on `kind === 'harvester'`. The task chain
+     * (GatherOreTask / ReturnOreTask) lives in sim/task/harvester.
+     */
+    harvesterTrait?: HarvesterTrait;
+    /** rotating turret — everything with a turret flag (reference TurretTrait) */
+    turretTrait?: TurretTrait;
+    /** aircraft parked at an airfield: ammo + reload state */
+    airportBoundTrait?: AirportBoundTrait;
+    /** bombs / rockets left before a rearm cycle */
+    ammoTrait?: { ammo: number; maxAmmo: number; isFull(): boolean };
+    /** set while docked/reserved at a building (reference DockableTrait) */
+    dockableTrait?: { dock?: any; reservedDock?: any };
+    /** hover vehicle bob (reference HoverBobTrait) */
+    hoverBobTrait?: HoverBobTrait;
+    /** suspension rocking after an explosive hit (reference Vehicle.rocking) */
+    rockingTrait?: RockingTrait;
+    /** absolute hover elevation in px, includes the bob */
+    hoverElevation?: number;
 
     /** renderer heading (radians, atan2 convention) — derived from `direction` */
     face = 0;
@@ -147,6 +224,53 @@ export class Unit extends Entity {
 
     /* ---- combat behaviour ---- */
     stance: Stance = 'guard';
+    /**
+     * Pose (reference `Infantry.stance`).
+     *
+     * `stance` above is the *aggression* setting (aggressive/guard/hold);
+     * `pose` is what the body is doing (standing, prone, deployed, cheering).
+     * The reference keeps both — `AttackTrait.guardMode` and `StanceType`.
+     */
+    pose: StanceType = StanceType.None;
+    /** 30-tick suppression timer; a suppressed infantryman is automatically prone */
+    suppressionTrait?: SuppressionTrait;
+    /** fraidycat scatter + idle animation trigger */
+    idleActionTrait?: IdleActionTrait;
+    /** spy infiltration payload */
+    agentTrait?: AgentTrait;
+    /** plays a crash fall when shot down (aircraft / jumpjet) */
+    crashableTrait?: CrashableTrait;
+    /** leash for a unit launched by a `spawner` weapon (reference SpawnLinkTrait) */
+    spawnLinkTrait?: SpawnLinkTrait;
+    /** warhead the spawned missile carries; detonates when it dies (MissileSpawnTrait) */
+    missileSpawnTrait?: MissileSpawnTrait;
+    /** must fly off the map instead of stopping (UnlandableTrait) */
+    unlandableTrait?: UnlandableTrait;
+    /** this unit can plant a demolition charge (reference `object.c4`) */
+    c4 = false;
+    /** death animation family, set by whatever killed the unit */
+    infDeathType: InfDeathType = InfDeathType.Gunfire;
+    /** mid-burst flag, the view swaps to the firing sequence */
+    isFiring = false;
+    /** running away after a near miss (fraidycat) */
+    isPanicked = false;
+
+    /* ---- aircraft attitude (reference Aircraft.pitch/yaw/roll) ---- */
+    /** nose-up angle in degrees, driven by the climb rate */
+    pitch = 0;
+    /** bank angle in degrees, driven by the turn rate */
+    roll = 0;
+    /** set by CrashableTrait.crash(); the unit stops taking orders and falls */
+    isCrashing = false;
+    /** absolute altitude in px while crashing (normally `def.altitude`) */
+    crashAltitude?: number;
+    /**
+     * Parked on a pad. Reference WingedLocomotor switches `zone` to Ground and
+     * lowers the hull; ammo can only be reloaded while landed.
+     */
+    landed = false;
+    /** pad this aircraft is currently parked on */
+    dockedAt?: any;
     /** time since this unit last fired, used for cloak re-activation */
     cloakT = 99;
     cloaked = false;
@@ -187,6 +311,7 @@ export class Unit extends Entity {
         this.prevY = y;
         this.hasTurret = def.kind !== 'infantry' && def.kind !== 'air';
         this.crusher = !!unitCrushes(def);
+        this.c4 = !!def.c4;
         this.rules = rulesFor(def, unitTurn(def));
     }
 
@@ -195,7 +320,9 @@ export class Unit extends Entity {
     get mass() { return unitMass(this.def); }
     get turnRate() { return unitTurn(this.def); }
     get accel() { return unitAccel(this.def); }
-    get altitude() { return this.def.altitude || 0; }
+    get altitude() { return this.crashAltitude ?? (this.landed ? 0 : this.def.altitude ?? 0); }
+    /** true while the aircraft is off the ground (reference `zone === Air`) */
+    get isAirborne() { return this.def.kind === 'air' ? !this.landed : false; }
     get isHover() { return !!this.def.hover; }
     get canCrush() { return this.crusher; }
     get isAir() { return this.def.kind === 'air'; }
@@ -203,6 +330,8 @@ export class Unit extends Entity {
     get isMcv() { return this.def.kind === 'mcv'; }
     get isEngineer() { return !!this.def.engineer; }
     get cost() { return this.def.cost; }
+    /** reference `object.name` — the rules id, used by WallTrait adjacency */
+    get name() { return this.def.id; }
 
     /* --- type predicates the sim layer expects (reference GameObject API) --- */
     isUnit() { return true; }
@@ -219,6 +348,31 @@ export class Unit extends Entity {
     /** cooldown multiplier */
     get rofMul() { return this.level === 2 ? 0.76 : this.level === 1 ? 0.88 : 1; }
     get sightBonus() { return this.level === 2 ? 2 : this.level === 1 ? 1 : 0; }
+
+    /**
+     * The pose the body is actually in.
+     *
+     * Reference `Infantry.stance` getter: a suppressed soldier reads as Prone
+     * without ever writing the field, so he stands up the moment the 30-tick
+     * timer expires instead of needing a separate "stand up" transition.
+     */
+    get poseNow(): StanceType {
+        return this.pose === StanceType.None && this.suppressionTrait?.isSuppressed()
+            ? StanceType.Prone
+            : this.pose;
+    }
+
+    /** Reference `Infantry.stance` setter — the pose itself gates movement. */
+    setPose(value: StanceType): void {
+        this.pose = value;
+        const immobile = value === StanceType.Deployed || value === StanceType.Cheer;
+        this.moveTrait?.setDisabled(immobile);
+    }
+
+    /** true while the soldier is hugging the ground and cannot walk */
+    get isProne(): boolean {
+        return this.poseNow === StanceType.Prone;
+    }
 
     get slowed() { return this.slowUntil > -1; }
     get invulnerable() { return this.invulnUntil > -1; }
@@ -302,22 +456,97 @@ export class Unit extends Entity {
     }
 }
 
-/** BuildStatus, mirroring redalert2/src/game/gameobject/Building.ts:32-36 */
-export type BuildStatus = 'buildup' | 'ready' | 'builddown';
+/**
+ * BuildStatus, mirroring redalert2/src/game/gameobject/Building.ts:32-36.
+ *
+ * Numeric on purpose: the renderer compares status in a hot loop and the
+ * reference's ordering (BuildUp < Ready < BuildDown) is meaningful — a unit may
+ * not fire while the structure is still rising or already coming down.
+ */
+export { BuildStatus } from '../sim/rules/BuildStatus';
+import { BuildStatus as BuildStatusEnum } from '../sim/rules/BuildStatus';
 
 export class Building extends Entity {
     isBuilding = true;
     def: BuildingDef;
+    /**
+     * The owning PlayerState.
+     *
+     * The reference stores `owner` as the player object; this project keeps a
+     * numeric id on `Entity` for cheap serialisation. Ported code that says
+     * `building.owner.powerTrait` reads this alias instead, so it stays 1:1.
+     */
+    player?: any;
     /** top-left cell, used by the sim's tile occupation */
     tile!: Tile;
     /** reference-compatible rule bag (structures are never crushable) */
-    readonly rules = { crushable: false, invisibleInGame: false, gate: false };
-    get art() { return { foundation: { width: this.size, height: this.size } }; }
-    /**
-     * Every techno in the reference owns a MoveTrait and an order queue, even a
-     * structure. MoveTask reads both while deciding what to do about a blocker,
-     * so a structure answers "idle, nothing queued".
-     */
+    rules!: {
+        /** rules id, used by WallTrait to match neighbouring segments */
+        name: string;
+        crushable: boolean;
+        invisibleInGame: boolean;
+        gate: boolean;
+        power: number;
+        needsEngineer: boolean;
+        naval: boolean;
+        leaveRubble: boolean;
+        refinery: boolean;
+        weaponsFactory: boolean;
+        constructionYard: boolean;
+        unitReload: boolean;
+        wall: boolean;
+        numberImpassableRows: number;
+        occupantPowerBonus: number;
+    };
+    /** foundation in cells + art height, the two values Terrain/Factor read */
+    get art() {
+        return {
+            foundation: { width: this.size, height: this.size },
+            height: this.size * 0.5,
+            /*
+             * Reference `DockingOffset0` for a refinery is `3,1,0` on a 3x3
+             * foundation — i.e. one cell PAST the right edge, not the last
+             * column. Parking on `size - 1` would put the pad inside the
+             * building and no harvester could ever reach it.
+             */
+            dockingOffsets: [{ x: this.size, z: Math.floor(this.size / 2) }],
+        };
+    }
+
+    /** injected by Game.place so dock cells can be resolved without Game */
+    tileLookup?: (rx: number, ry: number) => Tile | undefined;
+
+    /** reference `building.dockTileFor(i)` */
+    dockTileFor(index: number): Tile | undefined {
+        const offset = this.art.dockingOffsets[index] ?? this.art.dockingOffsets[0];
+        if (!offset || !this.tileLookup) return undefined;
+        return this.tileLookup(this.tx + offset.x, this.ty + offset.z);
+    }
+    /* ---- reference traits ---- */
+    poweredTrait?: PoweredTrait;
+    turretTrait?: TurretTrait;
+    factoryTrait?: { type: number; status: number; deliveringUnit?: any; produceGroundUnitAt?: any };
+    dockTrait?: DockTrait;
+    /** aircraft factory: clears `preferredAirport` when a pad is sold or captured */
+    helipadTrait?: any;
+    /** aircraft factory: one ammunition round per ReloadRate while parked */
+    unitReloadTrait?: any;
+    /** satchel charge planted by a C4 unit (reference C4ChargeTrait) */
+    c4ChargeTrait?: C4ChargeTrait;
+    /** survivors that run out when this structure dies (CrewedTrait) */
+    crewedTrait?: CrewedTrait;
+    /** free unit handed over when the buildup finishes (FreeUnitTrait) */
+    freeUnitTrait?: FreeUnitTrait;
+    /** provider half of a super weapon (SuperWeaponTrait) */
+    superWeaponTrait?: SuperWeaponTrait;
+    /** overcharge from friendly chargers (OverpoweredTrait) */
+    overpoweredTrait?: OverpoweredTrait;
+    /** service depot / airfield repair clock (UnitRepairTrait) */
+    unitRepairTrait?: UnitRepairTrait;
+    /** wall autotiling + linked damage (WallTrait) */
+    wallTrait?: WallTrait;
+    rallyTrait?: { rallyPoint?: any; getRallyPoint?: any; changeRallyPoint?: any };
+    /** buildings answer "I have no orders" to MoveTask */
     moveTrait = {
         moveState: 0,
         collisionState: 1,
@@ -325,7 +554,7 @@ export class Building extends Entity {
         currentWaypoint: undefined as any,
         reservedPathNodes: [] as any[],
     };
-    orders = { hasTasks: () => false, addTask: () => {} };
+    orders = { hasTasks: () => false, isIdle: () => true, addTask: () => {}, getTasks: () => [] };
     isBuildingUnit() { return true; }
     isUnit() { return false; }
     isInfantry() { return false; }
@@ -341,9 +570,10 @@ export class Building extends Entity {
     progress = 1;
     /**
      * Retail raises a structure over `BuildupTime` and then plays the same art
-     * backwards when it is sold. Both phases are driven by this clock.
+     * backwards when it is sold. Both phases are driven by this clock *and* by
+     * `buildStatus`, which is what gates weapons and production.
      */
-    status: BuildStatus = 'ready';
+    status: BuildStatusEnum = BuildStatusEnum.Ready;
     /** seconds left in the current buildup / builddown */
     buildT = 0;
     buildDur = 1.2;
@@ -377,9 +607,39 @@ export class Building extends Entity {
         this.armor = def.size >= 4 ? 'concrete' : def.size >= 3 ? 'steel' : 'wood';
         this.x = tx * TILE + (def.size * TILE) / 2 - HALF;
         this.y = ty * TILE + (def.size * TILE) / 2 - HALF;
+        this.rules = {
+            name: def.id,
+            crushable: false,
+            invisibleInGame: false,
+            gate: false,
+            power: def.power,
+            needsEngineer: !!def.needsEngineer,
+            naval: false,
+            leaveRubble: false,
+            refinery: !!def.dropoff,
+            weaponsFactory: def.factory === 'vehicle',
+            constructionYard: !!def.isCore,
+            unitReload: def.factory === 'aircraft',
+            wall: !!def.wall,
+            numberImpassableRows: 0,
+            occupantPowerBonus: 0,
+        };
     }
 
-    get done() { return this.progress >= 1 && this.status === 'ready'; }
+    /** reference `object.name` */
+    get name() { return this.def.id; }
+
+    /** reference Building.update: a rising structure queues WaitForBuildUpTask */
+    get buildStatus(): BuildStatusEnum {
+        return this.status;
+    }
+
+    setBuildStatus(status: BuildStatusEnum): void {
+        this.status = status;
+        if (status === BuildStatusEnum.Ready) this.progress = 1;
+    }
+
+    get done() { return this.progress >= 1 && this.status === BuildStatusEnum.Ready; }
     get centerTile() {
         return { tx: this.tx + this.size / 2, ty: this.ty + this.size / 2 };
     }

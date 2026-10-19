@@ -97,18 +97,18 @@ const raise = await page.evaluate(async () => {
 const seenMid = raise.samples?.some((s) => s.p > 0.05 && s.p < 0.95);
 check('建筑有建造过程（进度 0→1）', !!seenMid, JSON.stringify(raise.samples?.slice(0, 5)));
 // The retail engine finishes the structure in the sidebar; placing it only plays
-// the rise animation (~BuildupTime). Anything close to def.time here means the
-// old "build it twice" behaviour is back.
-check('摆放后只播放升起动画（≤1.6s，不是重新建造）',
-    raise.buildSeconds !== undefined && raise.buildSeconds <= 1.6,
+// the rise animation (GeneralRules.buildupTime = 0.07 minutes = 4.2 s).
+check('摆放后只播放升起动画（≤4.5s，不是重新建造）',
+    raise.buildSeconds !== undefined && raise.buildSeconds <= 4.5,
     `${raise.buildSeconds}s`);
 check('摆放时建筑已满血（不是工地）', raise.hpAtPlace === 1, `hp=${raise.hpAtPlace}`);
-check('建造完成后状态为 ready', raise.status === 'ready' && raise.done, raise.status);
+// BuildStatus.Ready === 1 (sim/rules/BuildStatus.ts)
+check('建造完成后状态为 ready', raise.status === 1 && raise.done, raise.status);
 
 // ---- 4. sell: builddown, refund on completion, rubble left ----
 const sell = await page.evaluate(async () => {
     const g = window.__riftsandGame;
-    const b = g.buildings.find((x) => x.owner === 0 && x.def.id === 'furnace' && x.status === 'ready');
+    const b = g.buildings.find((x) => x.owner === 0 && x.def.id === 'furnace' && x.status === 1);
     if (!b) return { err: 'no building' };
     g.selectedBuilding = b;
     const c0 = g.human.credits;
@@ -117,7 +117,8 @@ const sell = await page.evaluate(async () => {
     const started = { status: b.status, credits: g.human.credits, refund: b.refund };
     g.update(0.25);
     const mid = { status: b.status, progress: +b.progress.toFixed(2) };
-    for (let i = 0; i < 8; i++) g.update(0.25);
+    // the demolition plays for GeneralRules.buildupTime (0.07 min = 4.2 s)
+    for (let i = 0; i < 28; i++) g.update(0.25);
     return {
         started, mid,
         dead: b.dead,
@@ -126,7 +127,8 @@ const sell = await page.evaluate(async () => {
         ruins: g.ruins.length - r0,
     };
 });
-check('卖出进入拆除状态而不是瞬间消失', sell.started?.status === 'builddown' && sell.dead === true,
+// BuildStatus.BuildDown === 2
+check('卖出进入拆除状态而不是瞬间消失', sell.started?.status === 2 && sell.dead === true,
     `start=${sell.started?.status} mid=${sell.mid?.status} p=${sell.mid?.progress}`);
 check('卖出时没有立刻到账', sell.started?.credits === sell.started?.credits && sell.creditsGain > 0,
     `+${sell.creditsGain} (refund ${sell.refund})`);
@@ -137,28 +139,24 @@ check('拆除后留下废墟', sell.ruins === 1, `ruins +${sell.ruins}`);
 const shroud = await page.evaluate(() => {
     const g = window.__riftsandGame;
     const { TILE, HALF } = window.__riftsandConst;
-    // put an enemy infantry on an explored tile far from any friendly unit
-    let spot = null;
     const MT = window.__riftsandConst.MAP_TILES;
+    /*
+     * This build has no separate "dim" tier: a tile is either unexplored or
+     * fully visible. So the assertion is "an enemy standing on an explored tile
+     * is drawn", using any explored, walkable tile.
+     */
+    let spot = null;
     for (let ty = 2; ty < MT - 2 && !spot; ty++) {
         for (let tx = 2; tx < MT - 2; tx++) {
             const i = ty * MT + tx;
-            if (g.human.explored[i] && !g.human.visible[i] && !g.isBlocked(tx, ty)) { spot = { tx, ty }; break; }
+            if (g.human.explored[i] && !g.isBlocked(tx, ty)) { spot = { tx, ty }; break; }
         }
     }
-    if (!spot) {
-        let e = 0, v = 0, ev = 0;
-        for (let i = 0; i < g.human.explored.length; i++) {
-            if (g.human.explored[i]) e++;
-            if (g.human.visible[i]) v++;
-            if (g.human.explored[i] && !g.human.visible[i]) ev++;
-        }
-        return { err: `no tile e=${e} v=${v} ev=${ev}` };
-    }
+    if (!spot) return { err: 'no explored tile' };
     const u = g.spawnUnit(1, window.__riftsandDefs.UNITS.pebble, spot.tx * TILE + TILE / 2 - HALF, spot.ty * TILE + TILE / 2 - HALF);
     return {
-        explored: !!g.human.explored[spot.ty * window.__riftsandConst.MAP_TILES + spot.tx],
-        visibleNow: !!g.human.visible[spot.ty * window.__riftsandConst.MAP_TILES + spot.tx],
+        explored: !!g.human.explored[spot.ty * MT + spot.tx],
+        visibleNow: !!g.human.visible[spot.ty * MT + spot.tx],
         shown: g.isVisibleTo(g.human, u),
     };
 });

@@ -17,19 +17,54 @@ import {
     unitCategory, BUILD_REQUIRES, VET_XP_RATIO, VET_MAX_LEVEL, CRATE_INTERVAL,
     BUILD_RADIUS_TILES, makeRng, PROJ_PHYSICS, gameSpeedMul, GAME_SPEED_MAX, BUILDUP_TIME, MAPS, mapById, colorById, setActiveTeamColor,
 } from '../core/Core';
-import { TerrainMap, CrystalNode } from '../world/Terrain';
-import { TileCollection, MapBounds, Tile } from '../sim/Tiles';
+import { TerrainMap, CrystalNode, ORE_BAIL_VALUE, GEM_BAIL_VALUE } from '../world/Terrain';
+import { TileCollection, MapBounds, Tile, RadialBackFirstTileFinder } from '../sim/Tiles';
 import { TileOccupation } from '../sim/TileOccupation';
 import { Passability, MovementZone, SpeedType } from '../sim/Passability';
 import { MoveTask } from '../sim/MoveTask';
 import { MoveTrait, MoveState, MoveResult, TICK } from '../sim/MoveTrait';
-import { facingToRad } from '../sim/Math2';
+import { facingToRad, radToFacing } from '../sim/Math2';
 import { SimWorld } from '../sim/World';
 import { Position } from '../sim/Position';
 import { UnitOrders } from '../sim/Task';
 import { AUTHORED } from '../world/Maps';
-import { Unit, Building, Projectile, Fx, Entity, SpatialGrid, PlayerId, Zone, Crate, Decal } from './Entities';
+import { Unit, Building, Projectile, Fx, Entity, SpatialGrid, PlayerId, Zone, Crate, Decal, BuildStatus, Order } from './Entities';
 import { AIController } from './AI';
+import { PowerTrait, PowerLevel } from '../sim/player/PowerTrait';
+import { Production, ProductionRules, FactoryType, PrereqCategory } from '../sim/player/Production';
+import { ProductionQueue, QueueStatus, QueueType } from '../sim/player/ProductionQueue';
+import { GENERAL } from '../sim/rules/GeneralRules';
+import { LandType, getLandType } from '../sim/rules/TerrainRules';
+import { PoweredTrait } from '../sim/traits/PoweredTrait';
+import { TurretTrait } from '../sim/traits/TurretTrait';
+import { DockTrait } from '../sim/traits/DockTrait';
+import { RallyTrait } from '../sim/traits/RallyTrait';
+import { HarvesterTrait } from '../sim/traits/HarvesterTrait';
+import { FactoryTrait, FactoryStatus } from '../sim/traits/FactoryTrait';
+import { SuppressionTrait } from '../sim/traits/SuppressionTrait';
+import { IdleActionTrait } from '../sim/traits/IdleActionTrait';
+import { AgentTrait } from '../sim/traits/AgentTrait';
+import { CrashableTrait, CrashWorld } from '../sim/traits/CrashableTrait';
+import { AirportBoundTrait, AirportWorld } from '../sim/traits/AirportBoundTrait';
+import { HelipadTrait } from '../sim/traits/HelipadTrait';
+import { UnitReloadTrait } from '../sim/traits/UnitReloadTrait';
+import { HoverBobTrait } from '../sim/traits/HoverBobTrait';
+import { RockingTrait } from '../sim/traits/RockingTrait';
+import { C4ChargeTrait, C4World } from '../sim/traits/C4ChargeTrait';
+import { CrewedTrait, CrewWorld } from '../sim/traits/CrewedTrait';
+import { FreeUnitTrait, FreeUnitWorld } from '../sim/traits/FreeUnitTrait';
+import { SuperWeaponTrait, SuperWeaponWorld } from '../sim/traits/SuperWeaponTrait';
+import { SuperWeaponsTrait } from '../sim/player/SuperWeaponsTrait';
+import { UnitRepairTrait, RepairWorld } from '../sim/traits/UnitRepairTrait';
+import { WallTrait, WallWorld } from '../sim/traits/WallTrait';
+import { OverpoweredTrait, OverpoweredWorld } from '../sim/traits/OverpoweredTrait';
+import { SpawnLinkTrait, SpawnLinkWorld } from '../sim/traits/SpawnLinkTrait';
+import { MissileSpawnTrait } from '../sim/traits/MissileSpawnTrait';
+import { UnlandableTrait, UnlandableWorld } from '../sim/traits/UnlandableTrait';
+import { DeathType } from '../sim/gameobject/DeathType';
+import { GatherOreTask } from '../sim/task/harvester/GatherOreTask';
+import { ReturnOreTask } from '../sim/task/harvester/ReturnOreTask';
+import { HarvestWorld } from '../sim/task/harvester/HarvestWorld';
 
 export type Difficulty = 'easy' | 'normal' | 'hard';
 export type GamePhase = 'playing' | 'won' | 'lost';
@@ -97,8 +132,28 @@ export interface PlayerState {
     ai: AIController | null;
     defeated: boolean;
     isHuman: boolean;
-    queues: Record<ProdCat, ProdQueue>;
+    /** reference: AI houses take the AI branch in refund/purifier rules */
+    isAi: boolean;
+    /** neutral houses (crates, civilians); always false here but read by traits */
+    isNeutral: boolean;
+    /**
+     * Both are rebuilt on every spawn / unspawn, like the reference's live Sets.
+     * Traits ask `unit.owner.buildings` for refineries, factories and helipads;
+     * keeping the array here means those queries are one loop, not a filter of
+     * every entity in the game.
+     */
+    buildings: Building[];
+    powerTrait: PowerTrait;
+    production: Production;
+    queues: Record<ProdCat, ProductionQueue>;
     sw: SuperWeaponState[];
+    /**
+     * Reference `player.superWeaponsTrait` — the authority on which weapons the
+     * player owns. `sw` is the same objects, kept as an array so the HUD can
+     * index it without a Map.
+     */
+    superWeaponsTrait: SuperWeaponsTrait;
+    isCombatant(): boolean;
 }
 
 const REVEAL_TICK = 0.22;
@@ -275,21 +330,81 @@ export class Game {
         return { cat, items: [], ready: false };
     }
 
+    /**
+     * Reference `Rules.general.prereqCategories`, derived from our defs:
+     * POWER = any producer, FACTORY = anything that unlocks a queue, BARRACKS =
+     * the infantry factory, RADAR = a detector, TECH = the tech building, PROC =
+     * a refinery.
+     */
+    private productionRules(): ProductionRules {
+        const all = Object.keys(BUILDINGS).map((id) => BUILDINGS[id]);
+        const categories = new Map<PrereqCategory, string[]>();
+        categories.set(PrereqCategory.Power, all.filter((d) => d.power > 0 && !d.isCore && d.cost > 0).map((d) => d.id));
+        categories.set(PrereqCategory.Factory, all.filter((d) => !!d.factory && !d.isCore).map((d) => d.id));
+        categories.set(PrereqCategory.Barracks, all.filter((d) => d.factory === 'infantry').map((d) => d.id));
+        categories.set(PrereqCategory.Radar, all.filter((d) => !!d.detects).map((d) => d.id));
+        categories.set(PrereqCategory.Tech, Object.keys(TECH_BUILDING).map((f) => BUILDINGS[TECH_BUILDING[f]].id));
+        categories.set(PrereqCategory.Proc, all.filter((d) => !!d.dropoff).map((d) => d.id));
+        return { general: { maximumQueuedObjects: GENERAL.maximumQueuedObjects, prereqCategories: categories } };
+    }
+
+    /**
+     * Give every def the three fields the reference's ObjectRules expose, once.
+     * BuildingDef/UnitDef stay the single source of truth; this is the adapter
+     * layer Production reads.
+     */
+    private static defsNormalised = false;
+    private normaliseDefs() {
+        if (Game.defsNormalised) return;
+        Game.defsNormalised = true;
+        for (const id in BUILDINGS) {
+            const d: any = BUILDINGS[id];
+            d.owner = d.owner ?? d.faction;
+            d.techLevel = d.techLevel ?? d.tech;
+            d.prerequisite = d.prerequisite ?? (BUILD_REQUIRES[id] ? [BUILD_REQUIRES[id]] : []);
+            d.buildCat = d.buildCat ?? (d.weapon ? 0 : 1);
+        }
+        for (const id in UNITS) {
+            const d: any = UNITS[id];
+            d.owner = d.owner ?? d.faction;
+            d.techLevel = d.techLevel ?? d.tech;
+            // the factory check covers the producing building; units have no
+            // separate prerequisite list in our data
+            d.prerequisite = d.prerequisite ?? [];
+        }
+    }
+
     private newPlayer(id: PlayerId, faction: Faction, human: boolean): PlayerState {
-        return {
+        this.normaliseDefs();
+        const p: any = {
             id, faction, credits: this.options.credits,
             visible: new Uint8Array(MAP_TILES * MAP_TILES),
             explored: new Uint8Array(MAP_TILES * MAP_TILES),
             earned: 0, built: 0, lost: 0, kills: 0,
-            ai: null, defeated: false, isHuman: human,
-            queues: {
-                structure: this.newQueue('structure'),
-                infantry: this.newQueue('infantry'),
-                vehicle: this.newQueue('vehicle'),
-                aircraft: this.newQueue('aircraft'),
-            },
+            ai: null, defeated: false, isHuman: human, isAi: !human, isNeutral: false,
+            buildings: [],
             sw: [],
+            isCombatant: () => true,
         };
+        p.powerTrait = new PowerTrait(p);
+        p.superWeaponsTrait = new SuperWeaponsTrait(p.sw);
+        const rules = this.productionRules();
+        const allObjects: any[] = [];
+        for (const k of Object.keys(BUILDINGS)) allObjects.push(BUILDINGS[k]);
+        for (const k of Object.keys(UNITS)) allObjects.push(UNITS[k]);
+        p.production = Production.factory(
+            p,
+            rules,
+            { superWeapons: this.options.superWeapons },
+            allObjects,
+        );
+        p.queues = {
+            structure: p.production.getQueue(QueueType.Structures),
+            infantry: p.production.getQueue(QueueType.Infantry),
+            vehicle: p.production.getQueue(QueueType.Vehicles),
+            aircraft: p.production.getQueue(QueueType.Aircrafts),
+        };
+        return p as PlayerState;
     }
 
     get human() { return this.players[0]; }
@@ -349,25 +464,900 @@ export class Game {
          *
          * The sidebar work is what "builds" it; placing it only plays the raise
          * animation (reference: BuildStatus.BuildUp, GeneralRules.buildupTime).
-         * The old code started a second, full-length construction here, so a
-         * ready building still took `def.time` seconds to become usable and
-         * could be attacked into rubble while it was "under construction".
-         * Now hp is full immediately and only `progress` animates 0 -> 1 over
-         * BUILDUP_TIME, which the renderer uses as the rise/fade height.
+         * Weapons and production are gated on BuildStatus.Ready, so a structure
+         * that is still rising cannot shoot or deliver — that is the behaviour
+         * the reference's `attackTrait.setDisabled(...)` produces.
          */
         const b = new Building(def, owner, tx, ty, instant ? 1 : 0);
         b.hp = def.hp;
         b.maxHp = def.hp;
-        b.status = instant ? 'ready' : 'buildup';
-        b.buildDur = instant ? 0 : BUILDUP_TIME;
+        b.status = instant ? BuildStatus.Ready : BuildStatus.BuildUp;
+        b.buildDur = instant ? 0 : GENERAL.buildupTime * 60;
         b.buildT = b.buildDur;
         b.tile = this.tiles.getByMapCoords(tx, ty)!;
+        b.tileLookup = (rx: number, ry: number) => this.tiles.getByMapCoords(rx, ry);
+        const p = this.players[owner];
+        b.player = p;
+
+        /* ---- reference trait wiring ---- */
+        if (def.power < 0) b.poweredTrait = new PoweredTrait(b);
+        if (def.weapon) b.turretTrait = new TurretTrait();
+        if (def.factory) {
+            const type = def.factory === 'infantry'
+                ? FactoryType.InfantryType
+                : def.factory === 'vehicle'
+                    ? FactoryType.UnitType
+                    : def.factory === 'aircraft'
+                        ? FactoryType.AircraftType
+                        : FactoryType.BuildingType;
+            b.factoryTrait = new FactoryTrait(type) as any;
+            b.rallyTrait = new RallyTrait() as any;
+        }
+        if (def.dropoff || def.factory === 'aircraft') {
+            b.dockTrait = new DockTrait(b, def.factory === 'aircraft' ? 2 : 1);
+            b.dockTrait.onSpawn();
+            if (def.factory === 'aircraft') {
+                // reference Building.factory: UnitReload + Helipad traits
+                b.helipadTrait = new HelipadTrait() as any;
+                b.unitReloadTrait = new UnitReloadTrait() as any;
+                /*
+                 * Reference AirforceCommand: the pad also repairs whatever is
+                 * parked on it, on the *reload* clock rather than the depot
+                 * clock (`repairRules.unitReload ? reloadRate : uRepairRate`).
+                 */
+                b.unitRepairTrait = new UnitRepairTrait();
+                b.unitRepairTrait.onSpawn(b, this.repairWorld);
+            }
+        }
+        // reference Building.factory: every structure can be charged with C4
+        // (`rules.canC4 && !rules.wall`) and every structure is crewed
+        if (!def.wall) b.c4ChargeTrait = new C4ChargeTrait();
+        if (!def.wall) b.crewedTrait = new CrewedTrait();
+        if (def.freeUnit) b.freeUnitTrait = new FreeUnitTrait();
+        if (def.superWeapon) b.superWeaponTrait = new SuperWeaponTrait(def.superWeapon);
+        if (def.wall) b.wallTrait = new WallTrait();
+
         // the passability graph learns about the footprint before anybody paths
         this.occupancy.occupyTileRange(b.tile, b);
         this.buildings.push(b);
+        p.buildings.push(b);
+        if (def.power !== 0) p.powerTrait.updateFrom(b, 'add', this.powerWorld);
+        if (b.factoryTrait) {
+            const ft = b.factoryTrait as any;
+            if (!p.production.getPrimaryFactory(ft.type)) p.production.setPrimaryFactory(b);
+            p.production.incrementFactoryCount(ft.type);
+            ft.onSpawn(b, this.factoryWorld);
+        }
         this.events.onSpawn?.(b);
         if (!instant) this.events.onSfx?.('place', b.x, b.y);
+        // NotifySpawn fan-out that needs the player's building list to be current
+        b.superWeaponTrait?.onSpawn(b, this.superWeaponWorld);
+        b.wallTrait?.onSpawn(b, this.wallWorld);
         return b;
+    }
+
+    /** world adapter for the reference PoweredTrait / ProductionTrait hooks */
+    private get powerWorld() {
+        return {
+            onPowerLow: (pl: PlayerState) => {
+                pl.production.applyPowerLevel(PowerLevel.Low, pl.powerTrait.getPower(), pl.powerTrait.getDrain(), GENERAL);
+            },
+            onPowerRestore: (pl: PlayerState) => {
+                pl.production.applyPowerLevel(PowerLevel.Normal, 0, 0, GENERAL);
+            },
+            onPowerChange: (pl: PlayerState) => {
+                if (pl.powerTrait.isLowPower()) {
+                    pl.production.applyPowerLevel(PowerLevel.Low, pl.powerTrait.getPower(), pl.powerTrait.getDrain(), GENERAL);
+                }
+            },
+        };
+    }
+
+    /* ------------------------------------------------------------ */
+    /* v0.24 trait adapters (building side)                          */
+    /* ------------------------------------------------------------ */
+
+    /**
+     * The reference `damageInfo` bag handed to `NotifyDestroy`.
+     *
+     * Only three fields are ever read by the traits: who did it (`player`), with
+     * what (`obj`), and whether the weapon was a suicide one. Our weapons have no
+     * `suicide` flag, so the last one is constant — but keeping the shape means
+     * `CrewedTrait.onDestroy` stays a verbatim copy.
+     */
+    private damageInfoFor(killer: PlayerId, source: Unit | null): any {
+        return { player: killer, obj: source ?? undefined, weapon: { rules: { suicide: false } } };
+    }
+
+    /** world adapter for CrewedTrait */
+    private get crewWorld(): CrewWorld {
+        const self = this;
+        return {
+            currentTick: this.simWorld.currentTick,
+            crewTypeFor: (faction: string) =>
+                faction === 'DS' ? GENERAL.crew.sovietCrew : faction === 'BU' ? GENERAL.crew.alliedCrew : undefined,
+            survivorDivisorFor: (faction: string) =>
+                faction === 'DS'
+                    ? GENERAL.crew.sovietSurvivorDivisor
+                    : faction === 'BU'
+                      ? GENERAL.crew.alliedSurvivorDivisor
+                      : 0,
+            engineerTypeFor: (faction: string) =>
+                faction === 'DS' ? GENERAL.crew.sovietEngineer : faction === 'BU' ? GENERAL.crew.alliedEngineer : undefined,
+            /*
+             * `sellTrait.computeRefundValue(target)`.
+             *
+             * Reference behaviour, both quirks included: the value is the plain
+             * purchase price (NOT scaled by remaining health — reading `hp` here
+             * would be useless anyway, since `kill()` has already zeroed it), and
+             * an AI house refunds at 100% instead of `RefundPercent`.
+             */
+            refundValue: (target: Building) =>
+                target.player?.isAi
+                    ? target.def.cost
+                    : Math.floor(target.def.cost * GENERAL.refundPercent),
+            foundationTiles: (target: Building) => {
+                const out: Tile[] = [];
+                for (let y = target.ty; y < target.ty + target.size; y++) {
+                    for (let x = target.tx; x < target.tx + target.size; x++) {
+                        const t = self.tiles.getByMapCoords(x, y);
+                        if (t && self.mapBounds.isWithinBounds(t)) out.push(t);
+                    }
+                }
+                return out;
+            },
+            canPlaceInfantryOn: (tile: Tile) =>
+                self.passability.getPassableSpeed(tile, SpeedType.Foot, true, false, [], true) > 0,
+            createUnit: (type: string, owner: any) => {
+                const def = UNITS[type];
+                return def ? self.createUnitForPlayer(def, self.playerOf(owner) ?? owner) : undefined;
+            },
+            spawnObject: (unit: Unit, tile: Tile) => self.spawnObject(unit, tile),
+            generateRandomInt: (min: number, max: number) => min + Math.floor(self.rng() * (max - min + 1)),
+            scatter: (unit: Unit, ignored: any[]) => self.scatterUnit(unit, ignored),
+            canProduceVeteran: (player: any, _rules: any) => !!self.playerOf(player)?.isAi === false && false,
+            setVeteran: (unit: Unit) => {
+                unit.level = Math.max(unit.level, 1);
+            },
+            subCellForInfantry: () => 2,
+        };
+    }
+
+    /** world adapter for FreeUnitTrait */
+    private get freeUnitWorld(): FreeUnitWorld {
+        const self = this;
+        return {
+            freeUnitTypeFor: (building: Building) => building.def.freeUnit,
+            isVehicleType: (type: string) => {
+                const d = UNITS[type];
+                return !!d && d.kind !== 'infantry';
+            },
+            isInfantryType: (type: string) => UNITS[type]?.kind === 'infantry',
+            createUnit: (type: string, owner: any) => {
+                const def = UNITS[type];
+                return def ? self.createUnitForPlayer(def, self.playerOf(owner) ?? owner) : undefined;
+            },
+            /*
+             * Reference FreeUnitTrait walks `RadialBackFirstTileFinder` outward
+             * from the footprint and takes the first cell that is passable for
+             * the unit, within one height level, and free of obstacles *and*
+             * overlays (so a free tank does not park on an ore field). When every
+             * ring is covered it still accepts the first merely-passable cell.
+             */
+            findSpawnTile: (building: Building, unit: Unit) => {
+                let fallback: Tile | undefined;
+                const finder = new RadialBackFirstTileFinder(
+                    self.tiles,
+                    self.mapBounds,
+                    building.tile,
+                    { width: building.size, height: building.size },
+                    1,
+                    1,
+                    (tile) => {
+                        const isValid =
+                            self.passability.getPassableSpeed(
+                                tile,
+                                unit.rules.speedType,
+                                unit.isInfantry(),
+                                false,
+                            ) > 0 &&
+                            Math.abs(tile.z - building.tile.z) < 2 &&
+                            self.passability.findObstacles({ tile, onBridge: undefined }, unit).length === 0;
+                        if (!fallback && isValid) fallback = tile;
+                        return isValid && !self.terrain.hasOre(tile.rx, tile.ry);
+                    },
+                );
+                return finder.getNextTile() ?? fallback;
+            },
+            spawnObject: (unit: Unit, tile: Tile) => self.spawnObject(unit, tile),
+            refund: (player: any, unit: Unit) => {
+                const pl = self.playerOf(player);
+                if (pl) pl.credits = Math.min(MAX_CREDITS, pl.credits + unit.def.cost);
+            },
+            isNeutral: (player: any) => !!self.playerOf(player)?.isNeutral,
+            log: (message: string) => console.warn(message),
+        };
+    }
+
+    /** world adapter for SuperWeaponTrait */
+    private get superWeaponWorld(): SuperWeaponWorld {
+        const self = this;
+        return {
+            createSuperWeapon: (name: string, player: PlayerState) => {
+                if (!self.options.superWeapons) return null;
+                const sid = name as SuperWeaponId;
+                if (!SUPER_WEAPONS[sid]) return null;
+                /*
+                 * The object that goes into `player.sw` *is* the one the trait
+                 * stores — `add()` mirrors it, so `swOf` and the HUD see the same
+                 * instance the trait manages.
+                 */
+                const st: any = {
+                    id: sid,
+                    name,
+                    t: 0,
+                    total: SUPER_WEAPONS[sid].charge,
+                    ready: false,
+                    sourceId: 0,
+                };
+                return st;
+            },
+            getOwnedBuildings: (player: PlayerState) => player?.buildings ?? [],
+            pauseIfLowPower: (player: PlayerState, superWeapon: any) => {
+                // the reference pauses a fresh weapon when the grid is already brown;
+                // here `tickSuperWeapons` gates the whole charge on `radarOnline`,
+                // which is the same predicate, so nothing extra is needed
+                void player;
+                void superWeapon;
+            },
+        };
+    }
+
+    /** world adapter for UnitRepairTrait (airfield pad repair) */
+    private get repairWorld(): RepairWorld {
+        const self = this;
+        return {
+            currentTick: this.simWorld.currentTick,
+            repairRules: GENERAL.repair,
+            baseTicksPerSecond: GENERAL.baseTicksPerSecond,
+            dockedUnits: (building: Building) => building.dockTrait?.getDockedUnits() ?? [],
+            hasDockedUnits: (building: Building) => !!building.dockTrait?.hasDockedUnits(),
+            undockUnit: (building: Building, unit: any) => building.dockTrait?.undockUnit(unit),
+            isAirUnit: (unit: any) => !!unit?.isAirborne,
+            areFriendly: (a: any, b: any) => a.owner === b.owner,
+            isPoweredOn: (building: Building) => !building.poweredTrait || building.poweredTrait.isPoweredOn(),
+            healBy: (unit: Unit, amount: number, _source: any) => {
+                unit.hp = Math.min(unit.maxHp, unit.hp + amount);
+            },
+            getCredits: (player: any) => this.playerOf(player)?.credits ?? 0,
+            spendCredits: (player: any, amount: number) => {
+                const pl = this.playerOf(player);
+                if (pl) pl.credits = Math.max(0, pl.credits - amount);
+            },
+            purchaseValue: (unit: Unit) => unit.def.cost,
+            findRallyNode: (building: Building) => {
+                const rp = (building.rallyTrait as any)?.rallyPoint ?? building.rally;
+                if (!rp) return undefined;
+                const rx = rp.rx ?? Math.floor((rp.x + HALF) / TILE);
+                const ry = rp.ry ?? Math.floor((rp.y + HALF) / TILE);
+                const tile = self.tiles.getByMapCoords(rx, ry);
+                return tile ? { tile, onBridge: false } : undefined;
+            },
+            sendToRallyPoint: (unit: Unit, rallyNode: any) => {
+                self.startMove(unit, rallyNode.tile, { closeEnoughTiles: GENERAL.closeEnough });
+            },
+            resetRallyPoint: (building: Building) => {
+                // reference computeDefaultRallyPoint: one cell below the footprint
+                const tile = self.tiles.getByMapCoords(building.tx, building.ty + building.size);
+                if (tile && building.rallyTrait) {
+                    (building.rallyTrait as any).changeRallyPoint?.(tile, building, self as any);
+                }
+            },
+            hasFactory: (building: Building) => !!building.factoryTrait,
+            onRepairStart: () => {},
+            onRepairFinish: () => {},
+            usesReloadRate: (building: Building) => !!building.unitReloadTrait,
+            isNeutral: (player: any) => !!this.playerOf(player)?.isNeutral,
+            needsEngineer: (building: Building) => !!building.rules.needsEngineer,
+            hasHelipad: (building: Building) => !!building.helipadTrait,
+        };
+    }
+
+    /** world adapter for WallTrait */
+    private get wallWorld(): WallWorld {
+        const self = this;
+        return {
+            objectsOnTile: (tile: Tile) => {
+                const b = self.buildingAt(tile.rx, tile.ry);
+                return b ? [b] : [];
+            },
+            getTile: (rx: number, ry: number) => self.tiles.getByMapCoords(rx, ry),
+            neighbourTiles: (tile: Tile) => self.tiles.getAllNeighbourTiles(tile),
+            landTypeOf: (tile: Tile) => tile.landType,
+            wallLandType: LandType.Wall,
+            destroyObject: (wall: Building, source: any) => {
+                self.kill(wall, source?.player ?? wall.owner, source?.obj ?? null);
+            },
+            inflictsDamage: (wall: Building, amount: number, source: any) => {
+                self.damage(wall, amount, 'explosive', source?.player ?? wall.owner, source?.obj ?? null, true);
+            },
+        };
+    }
+
+    /** world adapter for C4ChargeTrait */
+    private get c4World(): C4World {
+        const self = this;
+        return {
+            currentTick: this.simWorld.currentTick,
+            destroyObject: (target: Entity, attackerInfo: any, isDemolish: boolean) => {
+                if (target.dead) return;
+                if (isDemolish && target instanceof Building) {
+                    target.deathType = DeathType.Demolish;
+                }
+                self.kill(target, attackerInfo?.player ?? target.owner, attackerInfo?.obj ?? null);
+            },
+        };
+    }
+
+    /** world adapter for SpawnLinkTrait */
+    private get spawnLinkWorld(): SpawnLinkWorld {
+        const self = this;
+        const centerOf = (o: any) => (o?.x !== undefined ? o : o?.tile ? { x: o.tile.rx * TILE + TILE / 2 - HALF, y: o.tile.ry * TILE + TILE / 2 - HALF } : undefined);
+        return {
+            currentTick: this.simWorld.currentTick,
+            currentTargetOf: (obj: any) => obj?.attackTarget ?? undefined,
+            isInWeaponRange: (source: any, target: any) => {
+                const w = source?.def?.weapon;
+                if (!w) return false;
+                const a = centerOf(source);
+                const b = centerOf(target);
+                if (!a || !b) return false;
+                return Math.hypot(b.x - a.x, b.y - a.y) <= w.range;
+            },
+            hasAmmo: (obj: any) => !obj.ammoTrait || obj.ammo === undefined || obj.ammo > 0,
+            canTarget: (weapon: any, target: any) =>
+                !!weapon && (!(target?.isAir) || !!weapon.antiAir),
+            attackTask: (child: any, target: any) => {
+                child.attackTarget = target;
+                if (target?.x !== undefined) self.pathToEntity(child, target);
+                return undefined;
+            },
+            cancelAllTasks: (child: any) => child.orders?.clear?.(child),
+            addTask: (child: any, task: any) => {
+                if (task) child.orders?.addTask?.(task);
+            },
+            getCurrentTask: (obj: any) => obj?.orders?.getCurrentTask?.(),
+            requestTargetUpdate: () => {},
+            cancelTask: (task: any) => task?.cancel?.(),
+            attackStateIdle: (task: any) => !task,
+            isAttackTask: (task: any) => !!task?.isAttackTask,
+            moveTask: (child: any, tile: any) => {
+                self.startMove(child, tile, { closeEnoughTiles: 0 });
+                return child.orders?.getCurrentTask?.();
+            },
+            updateMoveTarget: (task: any, tile: any) => task?.updateTarget?.(tile, false),
+            isMoveTask: (task: any) => !!task?.path,
+        };
+    }
+
+    /** world adapter for UnlandableTrait */
+    private get unlandableWorld(): UnlandableWorld {
+        return {
+            shouldLeave: (obj: any) => !!this.players[obj?.owner]?.isNeutral || !!obj?.def?.unlandable,
+            isIdle: (obj: any) => !obj?.orders?.hasTasks?.(),
+            mapSize: () => this.tiles.getMapSize(),
+            getTile: (rx: number, ry: number) => this.tiles.getByMapCoords(rx, ry),
+            generateRandom: () => this.rng(),
+            exitMoveTask: (obj: any, exitTile: any) => {
+                this.startMove(obj, exitTile, { closeEnoughTiles: 0 });
+                return undefined;
+            },
+            unspawn: (obj: any) => {
+                if (!obj?.dead) this.kill(obj, obj.owner, null);
+            },
+            addTask: (obj: any, task: any) => {
+                if (task) obj.orders?.addTask?.(task);
+            },
+            cancelAllTasks: (obj: any) => obj?.orders?.clear?.(obj),
+        };
+    }
+
+    /** world adapter for OverpoweredTrait */
+    private get overpoweredWorld(): OverpoweredWorld {
+        return {
+            currentTargetOf: (obj: any) => obj?.attackTarget ?? obj?.focus ?? undefined,
+            getCurrentTask: (obj: any) => obj?.orders?.getCurrentTask?.(),
+            setTaskWeapon: () => {},
+            cancelTask: (task: any) => task?.cancel?.(),
+            isPoweredOn: (obj: any) => !obj?.poweredTrait || obj.poweredTrait.isPoweredOn(true),
+        };
+    }
+
+    /** queued for after the current tick, like the reference's world.afterTick */
+    private afterTickQueue: Array<() => void> = [];
+    afterTick(fn: () => void): void {
+        this.afterTickQueue.push(fn);
+    }
+
+    /** world adapter for GatherOreTask / ReturnOreTask */
+    private get harvestWorld(): HarvestWorld {
+        const self = this;
+        return {
+            // the tasks build MoveTasks, which talk to the shared sim world
+            ...this.simWorld,
+            general: {
+                closeEnough: GENERAL.closeEnough,
+                harvesterTooFarDistance: GENERAL.harvesterTooFarDistance,
+            },
+            gemValue: GEM_BAIL_VALUE,
+            isOreTile: (tile: Tile) => this.terrain.hasOre(tile.rx, tile.ry),
+            oreValueAt: (tile: Tile) => this.terrain.oreValueAt(tile.rx, tile.ry),
+            collectBail: (tile: Tile) => {
+                const before = this.terrain.hasOre(tile.rx, tile.ry);
+                const value = this.terrain.collectBail(tile.rx, tile.ry);
+                // the last bail clears the overlay: the cell becomes clear
+                // ground for pathing, exactly like removing a tiberium object
+                if (before && !this.terrain.hasOre(tile.rx, tile.ry)) this.syncTiles();
+                return value;
+            },
+            hasRefinery: (unit: Unit) => unit.owner != null && this.players[unit.owner].buildings.some((b) => !!b.def.dropoff && !b.dead),
+            findRefinery: (unit: Unit) => this.findRefineryFor(unit),
+            refineryDockTile: (refinery: Building) => this.refineryDockTile(refinery),
+            deliverOre: (unit: Unit, refinery: Building) => this.deliverOre(unit, refinery),
+            createGatherTask: (unit: Unit, target?: Tile, explicit?: boolean) => new GatherOreTask(self.harvestWorld, target, !!explicit),
+            createReturnTask: (unit: Unit, forceTarget?: Building) => new ReturnOreTask(self.harvestWorld, forceTarget),
+            tileDistance: (a: Tile, b: Tile) => Math.max(Math.abs(a.rx - b.rx), Math.abs(a.ry - b.ry)),
+            afterTick: (fn: () => void) => this.afterTick(fn),
+        };
+    }
+
+    /**
+     * Reference ReturnOreTask.findClosestReachableRefinery: prefer the nearest
+     * refinery with a free pad, but never walk past a closer one by more than
+     * HarvesterTooFarDistance.
+     */
+    private findRefineryFor(unit: Unit): Building | undefined {
+        const p = this.players[unit.owner];
+        const refineries = p.buildings
+            .filter((b) => !b.dead && !!b.def.dropoff && !!b.dockTrait)
+            .sort((a, b) => this.cellDist(unit.tile, a.tile, a.size) - this.cellDist(unit.tile, b.tile, b.size));
+        const closest = refineries[0];
+        const available = refineries.find((b) => (b.dockTrait?.getAvailableDockCount() ?? 0) > 0);
+        if (!available || !closest) return closest;
+        if (this.cellDist(unit.tile, available.tile, available.size) - this.cellDist(unit.tile, closest.tile, closest.size) > GENERAL.harvesterTooFarDistance) {
+            return closest;
+        }
+        return available;
+    }
+
+    private cellDist(from: Tile, to: Tile, size: number): number {
+        const cx = to.rx + Math.floor(size / 2);
+        const cy = to.ry + Math.floor(size / 2);
+        return Math.abs(from.rx - cx) + Math.abs(from.ry - cy);
+    }
+
+    /** the refinery pad: right edge + 1, vertical middle (reference DockingOffset0) */
+    refineryDockTile(refinery: Building): Tile | undefined {
+        return this.tiles.getByMapCoords(refinery.tx + refinery.size, refinery.ty + Math.floor(refinery.size / 2));
+    }
+
+    /**
+     * Reference ReturnOreTask unload:
+     *   credits += ore * 25 + gems * 50
+     *   purifier bonus: +25% per powered ore purifier
+     *   AI houses get virtual purifiers (brutal 4, normal 2) — the retail
+     *   economy cheat, reproduced here because the AI is expected to field
+     *   combined arms, not to out-mine the player.
+     */
+    private deliverOre(unit: Unit, refinery: Building): void {
+        const p = this.players[refinery.owner];
+        const h = unit.harvesterTrait;
+        if (!h) return;
+        const oreValue = h.ore * ORE_BAIL_VALUE + h.gems * GEM_BAIL_VALUE;
+        p.credits = Math.min(MAX_CREDITS, p.credits + oreValue);
+        p.earned += oreValue;
+        let purifierCount = p.buildings.filter((b) => !b.dead && (b.def as any).orePurifier).length;
+        if (p.isAi) {
+            purifierCount += this.difficulty === 'hard' ? 4 : this.difficulty === 'normal' ? 2 : 0;
+        }
+        if (purifierCount > 0) {
+            const bonus = purifierCount * Math.floor(oreValue * GENERAL.purifierBonus);
+            p.credits = Math.min(MAX_CREDITS, p.credits + bonus);
+            p.earned += bonus;
+        }
+        if (p.isHuman) {
+            this.events.onMessage?.(`${refinery.def.name} 卸货 +${oreValue}`, 'good');
+            this.events.onSfx?.('unload', refinery.x, refinery.y);
+        }
+    }
+
+    /** world adapter for FactoryTrait */
+    private get factoryWorld() {
+        return {
+            tiles: this.tiles,
+            mapBounds: this.mapBounds,
+            passability: this.passability,
+            tileOccupation: this.occupancy,
+            general: GENERAL,
+            createUnitForPlayer: (rules: UnitDef, owner: PlayerState) => this.createUnitForPlayer(rules, owner),
+            spawnObject: (unit: Unit, tile: Tile) => this.spawnObject(unit, tile),
+            startExitMove: (unit: Unit, building: Building, rallyPoint: Tile) =>
+                this.startMove(unit, rallyPoint, { closeEnoughTiles: GENERAL.closeEnough }),
+            isTileOccupiedBy: (tile: Tile, building: Building) => this.buildingAt(tile.rx, tile.ry) === building,
+            getProduction: (pid: PlayerId) => this.players[pid]?.production,
+            getBuildings: (pid: PlayerId) => this.players[pid]?.buildings ?? [],
+            getPlayer: (pid: PlayerId) => this.players[pid],
+        };
+    }
+
+    /**
+     * Reference `world.createUnitForPlayer` — build the object and its traits,
+     * but do not put it on the map yet. FactoryTrait spawns it at the exit cell.
+     */
+    createUnitForPlayer(def: UnitDef, owner: PlayerState | PlayerId): Unit {
+        const pid = typeof owner === 'number' ? owner : owner.id;
+        const u = new Unit(def, pid, 0, 0);
+        u.player = this.players[pid];
+        this.initUnit(u);
+        return u;
+    }
+
+    /**
+     * Resolve "a player or a player id" to the PlayerState.
+     *
+     * Ported traits pass whatever the reference passed (a player object), but
+     * several call paths in this project still hold a numeric id — the same trap
+     * that silently broke harvesting and factory production in v0.23. Every
+     * adapter that receives a `player` goes through here.
+     */
+    private playerOf(o: any): PlayerState | undefined {
+        if (o === undefined || o === null) return undefined;
+        return typeof o === 'number' ? this.players[o] : o;
+    }
+
+    /** wire the reference traits a unit owns, once, before it is spawned */
+    private initUnit(u: Unit) {
+        /*
+         * Reference state machine wiring.
+         *
+         * A fresh unit owns a MoveTrait (velocity / reservation / state), an
+         * order queue and a Position adapter; the tile occupation table learns
+         * about it before the first tick, exactly like spawn in the reference.
+         */
+        u.moveTrait = new MoveTrait(u, this.occupancy);
+        u.moveTrait.onTileChange = (oldTile, newTile) => this.onUnitTileChange(u, oldTile, newTile);
+        u.orders = new UnitOrders();
+        u.position = new Position(u, this.tiles);
+
+        if (u.def.kind === 'harvester') {
+            /*
+             * The project's `def.cargo` is a credit figure (300 cr); the
+             * reference stores `Storage` in *bails* (a retail harvester has 20
+             * bails ≈ 500 cr of ore). Converting keeps the intended capacity
+             * while letting GatherOreTask count bails exactly like the original.
+             */
+            const storageBails = Math.max(1, Math.round((u.def.cargo ?? GENERAL.harvesterStorage * ORE_BAIL_VALUE) / ORE_BAIL_VALUE));
+            u.harvesterTrait = new HarvesterTrait(storageBails);
+            u.harvesterTrait.makeGatherTask = (_world: any, target?: Tile, explicit?: boolean) =>
+                new GatherOreTask(this.harvestWorld, target, !!explicit);
+            u.harvesterTrait.makeReturnTask = () => new ReturnOreTask(this.harvestWorld);
+        }
+        if (u.hasTurret) {
+            u.turretTrait = new TurretTrait();
+            u.turretTrait.onSpawn(u);
+        }
+        if (u.isAir) {
+            const maxAmmo = Math.max(1, Math.round((u.def as any).ammo ?? 1));
+            let ammo = maxAmmo;
+            u.ammoTrait = {
+                get ammo() { return ammo; },
+                set ammo(v: number) { ammo = Math.max(0, Math.min(maxAmmo, v)); },
+                maxAmmo,
+                isFull() { return ammo === maxAmmo; },
+            };
+            u.airportBoundTrait = new AirportBoundTrait(['airpad', 'strip']);
+            // reference Aircraft.factory: every non-missile aircraft can crash
+            u.crashableTrait = new CrashableTrait(u);
+        }
+        // reference UnlandableTrait: transports and scripted fly-bys leave the map
+        if ((u.def as any).unlandable) u.unlandableTrait = new UnlandableTrait();
+        // reference SpawnLinkTrait: only a `spawner` child carries it; the parent
+        // is bound by whoever launched it (there is no carrier in the roster yet)
+        if ((u.def as any).spawnedBy) u.spawnLinkTrait = new SpawnLinkTrait();
+        if (u.isInfantry()) {
+            /*
+             * Reference Infantry.factory, in the same order:
+             *   fearless units get no SuppressionTrait at all
+             *   spies (rules.agent) get AgentTrait
+             *   everyone gets IdleActionTrait
+             */
+            if (!(u.def as any).fearless) u.suppressionTrait = new SuppressionTrait();
+            if ((u.def as any).agent) u.agentTrait = new AgentTrait();
+            u.idleActionTrait = new IdleActionTrait();
+        }
+        if (u.isVehicle()) {
+            // reference Vehicle.factory: hover vehicles bob, tracked/wheeled ones tilt
+            if (u.isHover) {
+                u.hoverBobTrait = new HoverBobTrait();
+                u.hoverBobTrait.onSpawn(u, this.hoverWorld());
+            }
+            u.rockingTrait = new RockingTrait();
+        }
+    }
+
+    /** world adapter for HoverBobTrait */
+    private hoverWorld(): any {
+        return {
+            hoverHeight: 6,
+            hoverBob: 0.6,
+            currentTick: this.simWorld.currentTick,
+            bridgeElevation: () => 0,
+        };
+    }
+
+    /**
+     * `[AudioVisual] IdleActionFrequency` — seconds between idle actions.
+     * Retail default 2 s; the trait subtracts up to half of it at random.
+     */
+    private static readonly IDLE_ACTION_FREQUENCY = 2;
+
+    /** world adapter for IdleActionTrait */
+    private get infantryWorld(): any {
+        return {
+            idleActionFrequency: Game.IDLE_ACTION_FREQUENCY,
+            random: () => this.rng(),
+            scatterUnit: (unit: Unit) => this.scatterUnit(unit),
+        };
+    }
+
+    /**
+     * Reference ScatterTask applied to one unit.
+     *
+     * Picks the neighbouring free cell furthest from the unit's current
+     * attackers and walks there; a fraidycat civilian does this on its own.
+     */
+    /**
+     * Run a few cells away from the nearest threat.
+     *
+     * `ignored` is the reference's `ScatterTask` option: a unit that has just
+     * been thrown out of a building by `CrewedTrait` must not treat that very
+     * building as the thing to run away from, so its own wreck is excluded from
+     * the threat scan.
+     */
+    private scatterUnit(u: Unit, ignored: any[] = []): void {
+        if (u.dead) return;
+        let best: Tile | null = null;
+        let bestScore = -Infinity;
+        const tx = Math.floor((u.x + HALF) / TILE);
+        const ty = Math.floor((u.y + HALF) / TILE);
+        for (let dy = -2; dy <= 2; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+                if (!dx && !dy) continue;
+                const tile = this.tiles.getByMapCoords(tx + dx, ty + dy);
+                if (!tile) continue;
+                if (this.passability.getPassableSpeed(tile, u.rules.speedType, u.isInfantry(), false) <= 0) continue;
+                let score = Math.hypot(dx, dy);
+                for (const threat of this.units) {
+                    if (threat.dead || threat.owner === u.owner) continue;
+                    if (ignored.includes(threat)) continue;
+                    score += Math.min(8, dist(tile.rx * TILE + TILE / 2 - HALF, tile.ry * TILE + TILE / 2 - HALF, threat.x, threat.y) / TILE) * 0.5;
+                }
+                if (score > bestScore) { bestScore = score; best = tile; }
+            }
+        }
+        if (best) this.startMove(u, best, { closeEnoughTiles: 0 });
+    }
+
+    /**
+     * World adapter for CrashableTrait.
+     *
+     * WingedLocomotor.tickCrash: pick a random roll/pitch delta once, then spin
+     * the hull by it and descend 30 leptons per tick. JumpjetLocomotor.tickCrash
+     * instead yaws 6° and drops `2 * jumpjetCrash` straight down.
+     */
+    private get crashWorld(): CrashWorld {
+        const self = this;
+        return {
+            crashMovement(unit: Unit, state: any) {
+                const jumpjet = (unit.def as any).jumpjet;
+                if (jumpjet) {
+                    const rate = 2 * ((unit.def as any).jumpjetCrash ?? 50);
+                    unit.direction = (unit.direction - 6 + 360) % 360;
+                    return { x: 0, y: -rate, z: 0 };
+                }
+                if (state.rollDelta === undefined) state.rollDelta = Math.floor(self.rng() * 31) - 15;
+                if (state.pitchDelta === undefined) state.pitchDelta = Math.floor(self.rng() * 16);
+                /*
+                 * The reference drops a fixed 30 leptons per tick, and a retail
+                 * aircraft sits at ~2000 leptons — so the fall always takes
+                 * about 66 ticks (1.1 s). Our altitude is in px (26-34), so the
+                 * rate is derived from the altitude instead of hard-coded:
+                 * same fall duration, same feel.
+                 */
+                if (state.fallRate === undefined) {
+                    const alt = unit.crashAltitude ?? unit.altitude ?? 0;
+                    state.fallRate = Math.max(0.4, alt / 66);
+                }
+                unit.roll = (unit.roll ?? 0) + state.rollDelta;
+                unit.pitch = (unit.pitch ?? 0) + state.pitchDelta;
+                // keep the last horizontal velocity and fall
+                return { x: unit.vx * 0.5, y: unit.vy * 0.5, z: -state.fallRate };
+            },
+            moveBy(unit: Unit, dx: number, dy: number, dz: number): boolean {
+                const alt = unit.crashAltitude ?? unit.altitude ?? 0;
+                const nextAlt = alt + dz;
+                unit.crashAltitude = nextAlt;
+                unit.x += dx;
+                unit.y += dy;
+                if (unit.x < -HALF + 8 || unit.x > HALF - 8 || unit.y < -HALF + 8 || unit.y > HALF - 8) return true;
+                return nextAlt <= 0;
+            },
+            destroyCrashed(unit: Unit, attackerInfo: any) {
+                // the wreck does splash damage on impact, exactly like retail
+                self.impactFx(unit.x, unit.y, unit.def.radius * 2.2);
+                self.kill(unit, attackerInfo?.player ?? unit.owner, attackerInfo ?? null);
+            },
+        };
+    }
+
+    /** damage every unit/building in a small radius (crash impact) */
+    private impactFx(x: number, y: number, radius: number): void {
+        this.pushFx(x, y, 'boom', 0.9, radius / TILE);
+        this.events.onShake?.(2.5);
+        const dmg = 40;
+        for (const u of this.units) {
+            if (u.dead || u.isAir) continue;
+            const d = dist(x, y, u.x, u.y);
+            if (d <= radius) this.damage(u, dmg * (1 - d / radius), 'explosive', 2);
+        }
+        for (const b of this.buildings) {
+            if (b.dead) continue;
+            const d = dist(x, y, b.x, b.y);
+            if (d <= radius + b.radius) this.damage(b, dmg * (1 - d / (radius + b.radius)) * 0.4, 'explosive', 2);
+        }
+    }
+
+    /** world adapter for AirportBoundTrait */
+    private get airportWorld(): AirportWorld {
+        const self = this;
+        return {
+            buildingsOf: (pid: PlayerId) => this.players[pid]?.buildings ?? [],
+            nameOf: (building: Building) => building.def.id,
+            sendToAirport: (unit: Unit, airport: Building) => {
+                if (unit.dockedAt === airport) return;
+                const tile = airport.dockTrait?.getDockTile(0) ?? airport.tile;
+                if (!tile) return;
+                if (this.tileAt(unit.x, unit.y) !== tile) this.startMove(unit, tile, { closeEnoughTiles: 0 });
+            },
+            crashAircraft: (unit: Unit) => this.startCrash(unit, unit.owner, null),
+        };
+    }
+
+    /**
+     * Aircraft per-tick work — the slice of WingedLocomotor.tickStationary that
+     * this project models.
+     *
+     *   - out of ammo  -> fly to the home pad and land
+     *   - on the pad   -> UnitReloadTrait refills one round at a time
+     *   - full again   -> take off and resume fighting
+     *
+     * Retail picks the pad at `preferredAirport` first and only re-scans when it
+     * is gone or full; that is what stops two aircraft from swapping pads in
+     * mid-air forever.
+     */
+    private updateAircraft(u: Unit, dt: number): void {
+        const ammo = u.ammoTrait;
+        const bound = u.airportBoundTrait;
+        if (!ammo || !bound) {
+            this.updateCombatant(u, dt);
+            return;
+        }
+
+        const outOfAmmo = ammo.ammo <= 0;
+        if (u.landed) {
+            const pad = u.dockedAt as Building | undefined;
+            if (!pad || pad.dead) {
+                u.landed = false;
+                u.dockedAt = undefined;
+                bound.clearPreferredAirport();
+                return;
+            }
+            u.moveTrait.setDisabled(true);
+            if (ammo.isFull()) {
+                // rearmed: release the pad and launch
+                pad.dockTrait?.undockUnit(u);
+                u.landed = false;
+                u.dockedAt = undefined;
+                u.moveTrait.setDisabled(false);
+                this.events.onSfx?.('unitready', u.x, u.y);
+            }
+            return;
+        }
+
+        if (!outOfAmmo) {
+            this.updateCombatant(u, dt);
+            return;
+        }
+
+        // out of ammo: head home. No pad anywhere -> the reference crashes it.
+        const airport = bound.ensureAirport(u, this.airportWorld);
+        if (!airport) return;
+        const dockTile = airport.dockTrait?.getDockTile(0) ?? airport.tile;
+        if (dockTile && this.tileAt(u.x, u.y) === dockTile) {
+            u.landed = true;
+            u.dockedAt = airport;
+            u.x = dockTile.rx * TILE + TILE / 2 - HALF;
+            u.y = dockTile.ry * TILE + TILE / 2 - HALF;
+            u.orders?.clear(u);
+            u.moveTrait.resetIdle();
+            /*
+             * Reference MoveToDockTask.onEnd: the reservation becomes an actual
+             * dock. Without this the pad still reports "reserved, not occupied",
+             * `hasDockedUnits()` stays false and UnitReloadTrait never ticks —
+             * the aircraft would sit on the pad with an empty magazine forever.
+             */
+            const padDock = airport.dockTrait;
+            if (padDock) {
+                const reserved = padDock.getReservedDockForUnit(u);
+                const dockNumber = reserved ?? padDock.getFirstEmptyDockNumber() ?? 0;
+                padDock.unreserveDockForUnit(u);
+                padDock.dockUnitAt(u, dockNumber);
+            }
+        }
+    }
+
+    /** world adapter for UnitReloadTrait */
+    private get reloadWorld() {
+        return { reloadRateMinutes: GENERAL.reloadRate, currentTick: this.simWorld.currentTick };
+    }
+
+    /** world adapter for HelipadTrait */
+    private get helipadWorld() {
+        return {
+            airportBoundAircraft: (pid: PlayerId) =>
+                this.units.filter((u) => !u.dead && u.owner === pid && u.isAir && !!u.airportBoundTrait),
+        };
+    }
+
+    /**
+     * Reference `world.spawnObject(unit, tile)` — the tile is authoritative.
+     * Sub-cell fitting and the occupancy write happen here so every spawn path
+     * (factory, script, test) behaves identically.
+     */
+    spawnObject(u: Unit, tile?: Tile): void {
+        if (!tile) tile = this.tileAt(u.x, u.y);
+        const infantry = u.def.kind === 'infantry';
+        let target = tile;
+        const roomHere = infantry
+            ? this.occupancy.getGroundObjectsOnTile(target).filter((o: any) => o.isInfantry()).length < 3
+            : this.occupancy.getGroundObjectsOnTile(target).filter((o: any) => o.isUnit()).length === 0;
+        if (!roomHere) {
+            const spot = this.findSpawnCell(u, target.rx, target.ry, 4);
+            if (spot) target = this.tiles.getByMapCoords(spot.tx, spot.ty) ?? target;
+        }
+        u.tile = target;
+        u.position.tile = target;
+        u.x = target.rx * TILE + TILE / 2 - HALF;
+        u.y = target.ry * TILE + TILE / 2 - HALF;
+        u.prevX = u.x;
+        u.prevY = u.y;
+        if (infantry) {
+            const used = this.occupancy
+                .getGroundObjectsOnTile(target)
+                .filter((o: any) => o !== u && o.isInfantry())
+                .map((o: any) => o.position.desiredSubCell);
+            const free = [2, 4, 3].find((k) => used.indexOf(k) === -1) ?? 2;
+            u.subCell = free;
+            u.desiredSubCell = free;
+            const off = u.position.computeSubCellOffset(free);
+            u.x = target.rx * TILE + off.x - HALF;
+            u.y = target.ry * TILE + off.y - HALF;
+        }
+        this.occupancy.occupySingleTile(target, u);
+        this.units.push(u);
+        this.players[u.owner].built++;
+        u.harvesterTrait?.onSpawn(u, this.harvestWorld);
+        this.events.onSpawn?.(u);
     }
 
     spawnUnit(owner: PlayerId, def: UnitDef, x: number, y: number): Unit {
@@ -380,52 +1370,8 @@ export class Game {
             );
             if (spot) { px = spot.x; py = spot.y; }
         }
-        const u = new Unit(def, owner, px, py);
-
-        /*
-         * Reference state machine wiring.
-         *
-         * A fresh unit owns a MoveTrait (velocity / reservation / state), an
-         * order queue and a Position adapter; the tile occupation table learns
-         * about it before the first tick, exactly like spawn in the reference.
-         */
-        u.tile = this.tileAt(px, py);
-        u.moveTrait = new MoveTrait(u, this.occupancy);
-        u.moveTrait.onTileChange = (oldTile, newTile) => this.onUnitTileChange(u, oldTile, newTile);
-        u.orders = new UnitOrders();
-        u.position = new Position(u, this.tiles);
-
-        let stx = u.tile.rx;
-        let sty = u.tile.ry;
-        const occupiedHere = this.occupancy.getGroundObjectsOnTile(u.tile);
-        const room = def.kind === 'infantry'
-            ? occupiedHere.filter((o: any) => o.isInfantry()).length < 3
-            : occupiedHere.filter((o: any) => o.isUnit()).length === 0;
-        if (!room) {
-            const spot = this.findSpawnCell(u, stx, sty, 4);
-            if (spot) {
-                px = spot.x; py = spot.y;
-                u.x = px; u.y = py; u.prevX = px; u.prevY = py;
-                u.tile = this.tileAt(px, py);
-            }
-        }
-        if (def.kind === 'infantry') {
-            // three men per cell on SUB_CELLS [2,4,3]
-            const used = this.occupancy
-                .getGroundObjectsOnTile(u.tile)
-                .filter((o: any) => o !== u && o.isInfantry())
-                .map((o: any) => o.position.desiredSubCell);
-            const free = [2, 4, 3].find((k) => used.indexOf(k) === -1) ?? 0;
-            u.subCell = free;
-            u.desiredSubCell = free;
-            const off = u.position.computeSubCellOffset(free);
-            u.x = u.tile.rx * TILE + off.x - HALF;
-            u.y = u.tile.ry * TILE + off.y - HALF;
-        }
-        this.occupancy.occupySingleTile(u.tile, u);
-        this.units.push(u);
-        this.players[owner].built++;
-        this.events.onSpawn?.(u);
+        const u = this.createUnitForPlayer(def, owner);
+        this.spawnObject(u, this.tileAt(px, py));
         return u;
     }
 
@@ -602,49 +1548,50 @@ export class Game {
         return this.countBuilding(p, tb) > 0;
     }
 
+    /**
+     * Power grid — straight from the player's PowerTrait.
+     *
+     * `made` is health-scaled output, `used` the sum of consumers. `ok` is the
+     * only question the rest of the game asks: low power slows production,
+     * blacks out radar and disables powered defences.
+     */
     power(p: PlayerState) {
-        let made = 0, used = 0;
-        for (const b of this.buildings) {
-            if (b.dead || b.owner !== p.id || !b.done) continue;
-            if (b.def.power >= 0) made += b.def.power;
-            else used -= b.def.power;
-        }
-        return { made, used, ok: made >= used };
+        const pt = p.powerTrait;
+        return { made: pt.getPower(), used: pt.getDrain(), ok: !pt.isLowPower() };
     }
 
     /** how fast production runs right now (power shortage slows it down) */
     prodFactor(p: PlayerState) {
-        const pw = this.power(p);
-        return pw.ok ? 1 : 0.55;
+        return p.production.buildSpeedModifier;
     }
 
     /** radar / minimap and super weapons need a healthy grid */
-    radarOnline(p: PlayerState) { return this.power(p).ok; }
+    radarOnline(p: PlayerState) { return !p.powerTrait.isLowPower(); }
+
+    private factoryTypeFor(cat: ProdCat): FactoryType {
+        if (cat === 'structure') return FactoryType.BuildingType;
+        if (cat === 'infantry') return FactoryType.InfantryType;
+        if (cat === 'aircraft') return FactoryType.AircraftType;
+        return FactoryType.UnitType;
+    }
 
     /** how many finished factories of a category the player owns */
     factoryCount(p: PlayerState, cat: ProdCat) {
-        let n = 0;
-        for (const b of this.buildings) {
-            if (b.dead || b.owner !== p.id || !b.done) continue;
-            if (b.def.factory === cat) n++;
-        }
-        return n;
+        return p.production.getFactoryCount(this.factoryTypeFor(cat));
     }
 
-    /** extra factories speed a queue up with diminishing returns, like the classics */
+    /**
+     * Extra factories speed a queue up with diminishing returns.
+     * Reference: `1 / pow(MultipleFactory, count - 1)`.
+     */
     factorySpeed(p: PlayerState, cat: ProdCat) {
         const n = this.factoryCount(p, cat);
         if (n <= 1) return n === 1 ? 1 : 0;
-        return Math.min(2.4, Math.pow(1.25, n - 1));
+        return Math.pow(1 / GENERAL.multipleFactory, n - 1);
     }
 
     primaryFactory(p: PlayerState, cat: ProdCat): Building | null {
-        let best: Building | null = null;
-        for (const b of this.buildings) {
-            if (b.dead || b.owner !== p.id || !b.done || b.def.factory !== cat) continue;
-            if (!best || b.id < best.id) best = b;
-        }
-        return best;
+        return p.production.getPrimaryFactory(this.factoryTypeFor(cat)) ?? null;
     }
 
     isVisibleTo(p: PlayerState, e: Entity) {
@@ -725,11 +1672,11 @@ export class Game {
     /* ------------------------------------------------------------ */
     /* sidebar production                                            */
     /* ------------------------------------------------------------ */
-    queueInfo(p: PlayerState, cat: ProdCat): ProdQueue { return p.queues[cat]; }
+    queueInfo(p: PlayerState, cat: ProdCat): ProductionQueue { return p.queues[cat]; }
 
     readyStructure(p: PlayerState): QueueItem | null {
         const q = p.queues.structure;
-        return q.ready && q.items.length ? q.items[0] : null;
+        return q.ready ? (q.getFirst() as any) ?? null : null;
     }
 
     availableStructures(p: PlayerState): BuildingDef[] {
@@ -775,19 +1722,18 @@ export class Game {
     /** max items allowed in a queue, structures hold a single item */
     queueCap(cat: ProdCat) { return cat === 'structure' ? 1 : QUEUE_MAX; }
 
-    private makeItem(defId: string, cost: number, time: number): QueueItem {
-        return { defId, cost, time, spent: 0, progress: 0 };
-    }
-
     queueBuild(defId: string, pid: PlayerId = 0) {
         const def = BUILDINGS[defId];
         const p = this.players[pid];
         if (!def) return false;
-        if (this.lockReason(p, def)) { if (p.isHuman) this.events.onMessage?.(this.lockReason(p, def), 'warn'); return false; }
+        if (this.lockReason(p, def)) {
+            if (p.isHuman) this.events.onMessage?.(this.lockReason(p, def), 'warn');
+            return false;
+        }
         const q = p.queues.structure;
         if (q.ready) { if (p.isHuman) this.events.onMessage?.('已有建筑等待放置', 'warn'); return false; }
-        if (q.items.length >= 1) return false;
-        q.items.push(this.makeItem(defId, def.cost, def.time));
+        if (q.currentSize >= q.maxSize) return false;
+        q.push(def, 1, def.cost);
         if (p.isHuman) this.events.onMessage?.(`${def.name} 开始建造`, 'info');
         return true;
     }
@@ -796,40 +1742,38 @@ export class Game {
         const def = UNITS[defId];
         const p = this.players[pid];
         if (!def || cat === 'structure') return 0;
-        if (this.lockReason(p, def)) { if (p.isHuman) this.events.onMessage?.(this.lockReason(p, def), 'warn'); return 0; }
-        const q = p.queues[cat];
-        let n = 0;
-        for (let i = 0; i < times; i++) {
-            if (q.items.length >= QUEUE_MAX) {
-                if (p.isHuman) this.events.onMessage?.('生产队列已满', 'warn');
-                break;
-            }
-            q.items.push(this.makeItem(defId, def.cost, def.time));
-            n++;
+        if (this.lockReason(p, def)) {
+            if (p.isHuman) this.events.onMessage?.(this.lockReason(p, def), 'warn');
+            return 0;
         }
-        if (n > 1 && p.isHuman) this.events.onMessage?.(`${def.name} × ${n} 已排队`, 'good');
+        const q = p.queues[cat];
+        const before = q.currentSize;
+        q.push(def, times, def.cost);
+        const n = q.currentSize - before;
+        if (n <= 0 && p.isHuman) this.events.onMessage?.('生产队列已满', 'warn');
+        else if (n > 1 && p.isHuman) this.events.onMessage?.(`${def.name} × ${n} 已排队`, 'good');
         return n;
     }
 
     cancelQueue(cat: ProdCat, index: number, pid: PlayerId = 0) {
         const p = this.players[pid];
         const q = p.queues[cat];
-        const item = q.items[index];
+        const item = q.getAll()[index];
         if (!item) return;
-        if (cat === 'structure' && q.ready && index === 0) q.ready = false;
-        p.credits = Math.min(MAX_CREDITS, p.credits + Math.floor(item.spent));
-        q.items.splice(index, 1);
+        // only the head row has been paid into; the rest are placeholders
+        const refund = index === 0 ? Math.floor(item.creditsSpent) : 0;
+        q.pop(item.rules, 1);
+        p.credits = Math.min(MAX_CREDITS, p.credits + refund);
     }
 
     /** pull the finished structure out of the queue so it can be placed */
     takeReadyStructure(pid: PlayerId = 0): BuildingDef | null {
         const p = this.players[pid];
         const q = p.queues.structure;
-        const item = q.items[0];
+        const item = q.getFirst();
         if (!q.ready || !item) return null;
-        q.items.shift();
-        q.ready = false;
-        return BUILDINGS[item.defId] || null;
+        q.shift(item.rules, 1);
+        return (item.defId ? BUILDINGS[item.defId] : null) || null;
     }
 
     /** begin placement of a ready structure (human) */
@@ -877,15 +1821,15 @@ export class Game {
     sellSelectedBuilding() {
         const b = this.selectedBuilding;
         if (!b || b.dead) return;
-        if (b.status !== 'ready' || b.progress < 1) {
+        if (b.status !== BuildStatus.Ready || b.progress < 1) {
             this.events.onMessage?.('建筑还没建好，不能卖出', 'warn');
             return;
         }
-        // refund scales with damage, so selling a burning husk is not free money
+        /* SellTrait.computeRefundValue: purchaseValue * RefundPercent */
         const ratio = clamp(b.hp / b.maxHp, 0.15, 1);
-        b.refund = Math.floor(b.def.cost * 0.5 * ratio);
-        b.status = 'builddown';
-        b.buildDur = 1.0;
+        b.refund = Math.floor(b.def.cost * GENERAL.refundPercent * ratio);
+        b.setBuildStatus(BuildStatus.BuildDown);
+        b.buildDur = GENERAL.buildupTime * 60;
         b.buildT = b.buildDur;
         this.selectedBuilding = null;
         this.events.onMessage?.(`拆除 ${b.def.name}…`, 'info');
@@ -900,6 +1844,8 @@ export class Game {
         this.events.onMessage?.(`${b.def.name} 已回收 ${b.refund} 晶体`, 'good');
         this.pushFx(b.x, b.y, 'dust', 0.8, b.size * 1.1);
         this.spawnDebris(b.x, b.y, 5 + b.size * 2, 1);
+        // reference NotifySell.onSell: selling is a demolition too, the crew leaves
+        b.crewedTrait?.onSell(b, this.crewWorld);
         this.removeBuilding(b, true);
     }
 
@@ -911,8 +1857,12 @@ export class Game {
      * can drive over it) but the ground is visibly scarred.
      */
     private removeBuilding(b: Building, leaveRuin: boolean) {
+        if (b.dead) return;
         b.dead = true;
         this.occupancy.unoccupyTileRange(b.tile, b);
+        this.unregisterBuilding(b);
+        // reference NotifyUnspawn: the wall tells its neighbours to re-tile
+        b.wallTrait?.onUnspawn(b, this.wallWorld);
         if (leaveRuin) {
             this.ruins.push({
                 x: b.x, y: b.y, size: b.size,
@@ -934,6 +1884,77 @@ export class Game {
             }
         }
         this.events.onDeath?.(b);
+    }
+
+    /**
+     * Reference NotifyUnspawn fan-out: power off the grid, hand the factory
+     * title to an heir, decrement the factory count, and drop any queued item
+     * whose prerequisites just disappeared (ProductionTrait.ensurePrerequisites).
+     */
+    private unregisterBuilding(b: Building): void {
+        const p = this.players[b.owner];
+        const idx = p.buildings.indexOf(b);
+        if (idx !== -1) p.buildings.splice(idx, 1);
+
+        if (b.def.power !== 0) p.powerTrait.updateFrom(b, 'remove', this.powerWorld);
+        b.dockTrait?.onUnspawn();
+        // reference HelipadTrait.onUnspawn: the owner's aircraft re-home
+        b.helipadTrait?.onUnspawn?.(b, this.helipadWorld);
+        // reference SuperWeaponTrait.onUnspawn: drop the weapon unless a sibling stands
+        b.superWeaponTrait?.onUnspawn(b, this.superWeaponWorld);
+
+        const type = (b.factoryTrait as any)?.type;
+        if (type !== undefined) {
+            if (p.production.getPrimaryFactory(type) === b) p.production.crownPrimaryFactoryHeir(type);
+            p.production.decrementFactoryCount(type);
+        }
+        this.ensurePrerequisites(p);
+    }
+
+    /**
+     * Engineer capture / owner change — reference NotifyOwnerChange fan-out for
+     * power, factories and the player's building list.
+     */
+    private changeBuildingOwner(b: Building, newOwner: PlayerId): void {
+        const oldOwner = this.players[b.owner];
+        const idx = oldOwner.buildings.indexOf(b);
+        if (idx !== -1) oldOwner.buildings.splice(idx, 1);
+        if (b.def.power !== 0) oldOwner.powerTrait.updateFrom(b, 'remove', this.powerWorld);
+        const type = (b.factoryTrait as any)?.type;
+        if (type !== undefined) {
+            if (oldOwner.production.getPrimaryFactory(type) === b) oldOwner.production.crownPrimaryFactoryHeir(type);
+            oldOwner.production.decrementFactoryCount(type);
+        }
+
+        b.owner = newOwner;
+        const p = this.players[newOwner];
+        b.player = p;
+        p.buildings.push(b);
+        if (b.def.power !== 0) p.powerTrait.updateFrom(b, 'add', this.powerWorld);
+        if (type !== undefined) {
+            if (!p.production.getPrimaryFactory(type)) p.production.setPrimaryFactory(b);
+            p.production.incrementFactoryCount(type);
+        }
+        this.ensurePrerequisites(oldOwner);
+        this.ensurePrerequisites(p);
+        // reference HelipadTrait.onChange: both sides re-home their aircraft
+        b.helipadTrait?.onOwnerChange?.(b, oldOwner, this.helipadWorld);
+        b.helipadTrait?.onOwnerChange?.(b, p, this.helipadWorld);
+        // reference SuperWeaponTrait.onChange: the weapon follows the building
+        b.superWeaponTrait?.onChange(b, oldOwner, p, this.superWeaponWorld);
+    }
+
+    private ensurePrerequisites(p: PlayerState): void {
+        for (const queue of p.production.getAllQueues()) {
+            const rows = queue.getAll();
+            for (const item of rows) {
+                if (!p.production.isAvailableForProduction(item.rules)) {
+                    const refund = item.creditsSpent;
+                    queue.pop(item.rules, item.quantity);
+                    p.credits = Math.min(MAX_CREDITS, p.credits + refund);
+                }
+            }
+        }
     }
 
     toggleRepair() {
@@ -1083,7 +2104,14 @@ export class Game {
         for (const u of this.selection) {
             if (u.dead) continue;
             u.speedCap = 0;
-            const o = { k: 'attack' as const, target };
+            /*
+             * Reference: capture and demolition are two *different* orders.
+             * `CaptureBuildingOrder` sends an engineer in; `AttackOrder` with
+             * `isC4 = true` (a `c4` unit aiming at a hostile structure) runs
+             * `PlantC4Task`. Our UI exposes capture on its own button, so the
+             * attack command is what carries C4.
+             */
+            const o = this.engineerOrderFor(u, target, 'attack');
             if (append) this.appendOrder(u, o);
             else { u.orderQueue.length = 0; this.applyOrder(u, o); }
         }
@@ -1094,14 +2122,37 @@ export class Game {
             if (u.dead || !u.isEngineer) continue;
             u.speedCap = 0;
             u.orderQueue.length = 0;
-            this.applyOrder(u, { k: 'capture', target });
+            this.applyOrder(u, this.engineerOrderFor(u, target, 'capture'));
         }
     }
 
     orderCaptureFor(u: Unit, target: Entity) {
         if (u.dead || !u.isEngineer) return;
         u.orderQueue.length = 0;
-        this.applyOrder(u, { k: 'capture', target });
+        this.applyOrder(u, this.engineerOrderFor(u, target, 'capture'));
+    }
+
+    /**
+     * Which engineer action this order means.
+     *
+     * `mode === 'capture'` is the explicit capture button: always capture.
+     * `mode === 'attack'` is the attack command, and that is where the
+     * reference's `AttackOrder` C4 branch lives — a `c4` unit aiming at a
+     * hostile structure with a `c4ChargeTrait` gets `isC4 = true` and plants a
+     * charge instead of shooting. A c4 unit that is *not* an engineer (a future
+     * Tanya-style commando) also takes this branch.
+     */
+    private engineerOrderFor(u: Unit, target: Entity, mode: 'attack' | 'capture'): Order {
+        const canPlant =
+            u.c4 &&
+            target instanceof Building &&
+            target.owner !== u.owner &&
+            !!target.c4ChargeTrait &&
+            !target.dead;
+        if (canPlant && mode === 'attack') return { k: 'demolish', target };
+        if (canPlant && !u.isEngineer && mode === 'capture') return { k: 'demolish', target };
+        if (mode === 'capture') return { k: 'capture', target };
+        return { k: 'attack', target };
     }
 
     /** deploy a specific MCV (AI expansion) */
@@ -1111,7 +2162,7 @@ export class Game {
     orderAttackFor(u: Unit, target: Entity) {
         if (u.dead) return;
         u.orderQueue.length = 0;
-        this.applyOrder(u, { k: 'attack', target });
+        this.applyOrder(u, this.engineerOrderFor(u, target, 'attack'));
     }
 
     orderAttackMoveFor(u: Unit, x: number, y: number) {
@@ -1218,6 +2269,30 @@ export class Game {
         return true;
     }
 
+    /**
+     * Reference `PlantC4Task.onEnter`.
+     *
+     * The charge is armed on the *target*, not carried by the engineer: the
+     * engineer is consumed (the reference unspawns it inside `EnterBuildingTask`),
+     * and `C4ChargeTrait` counts down on its own. Re-planting is refused by
+     * `setCharge` while a charge is already ticking.
+     */
+    private plantC4(u: Unit, b: Building): void {
+        if (!b.c4ChargeTrait || b.c4ChargeTrait.hasCharge()) return;
+        const ticks = Math.floor(60 * GENERAL.c4Delay * GENERAL.baseTicksPerSecond);
+        b.c4ChargeTrait.setCharge(ticks, { player: u.owner, obj: u });
+        this.pushFx(b.x, b.y, 'spark', 0.5, b.size * 0.8);
+        this.events.onSfx?.('place', b.x, b.y);
+        const p = this.players[u.owner];
+        if (p.isHuman) this.events.onMessage?.(`${u.def.name} 在 ${b.def.name} 上安放了炸药`, 'good');
+        else this.events.onMessage?.(`${b.def.name} 被敌方${u.def.name}布置了炸药！`, 'warn');
+        // reference: the planter does not survive planting
+        this.occupancy.unoccupySingleTile(u.tile, u);
+        u.dead = true;
+        u.hp = 0;
+        this.events.onDeath?.(u);
+    }
+
     /** engineers repair friendly structures on arrival, capture hostile ones */
     private resolveEngineer(u: Unit, b: Building) {
         const p = this.players[u.owner];
@@ -1227,7 +2302,7 @@ export class Game {
             this.pushFx(b.x, b.y, 'spawn', 0.6, b.size);
             if (p.isHuman) this.events.onMessage?.(`${b.def.name} 已修复`, 'good');
         } else {
-            b.owner = u.owner;
+            this.changeBuildingOwner(b, u.owner);
             b.captured++;
             b.hp = Math.max(b.maxHp * 0.32, b.hp);
             b.repairing = false;
@@ -1280,6 +2355,10 @@ export class Game {
     private syncTiles() {
         this.tiles.syncFrom(
             (rx, ry) => this.terrain.levelAt(rx, ry),
+            (rx, ry) => {
+                const i = this.terrain.idx(rx, ry);
+                return getLandType(this.terrain.kind[i], this.terrain.solid[i] === 1);
+            },
             (rx, ry) => this.terrain.kind[this.terrain.idx(rx, ry)],
         );
     }
@@ -1410,11 +2489,16 @@ export class Game {
         return ring[0];
     }
 
+    /**
+     * Explicit harvest order — reference OrderFactory.createGatherOrder.
+     * The initial target is a *tile*; GatherOreTask walks to it and starts
+     * collecting one bail per tick.
+     */
     private startHarvest(u: Unit, node: CrystalNode | null) {
-        const target = node || this.nearestNode(u.x, u.y);
-        u.order = { k: 'harvest', node: target, phase: 'seek', timer: 0 };
-        u.mineNode = target;
         u.stop();
+        const target = node ? this.tileAt(node.x, node.y) : undefined;
+        u.orders.addTask(new GatherOreTask(this.harvestWorld, target, true));
+        u.harvesterTrait && (u.harvesterTrait.lastGatherExplicit = true);
     }
 
     /** nearest reachable field, biased away from fields other trucks already work */
@@ -1488,23 +2572,19 @@ export class Game {
     /* ------------------------------------------------------------ */
     /* super weapons                                                 */
     /* ------------------------------------------------------------ */
+    /**
+     * Reconcile the player's super weapon bag with what is actually on the map.
+     *
+     * Adding is `SuperWeaponTrait.onSpawn`'s job — this pass only defends
+     * against a provider that vanished through a path that forgot to unspawn it
+     * (a scripted kill, a map reset). The trait keeps `p.sw` in sync via its
+     * mirror, so there is exactly one authority.
+     */
     private syncSuperWeapons(p: PlayerState) {
-        if (!this.options.superWeapons) { p.sw.length = 0; return; }
-        const have: Record<string, Building> = {};
-        for (const b of this.buildings) {
-            if (b.dead || b.owner !== p.id || !b.done || !b.def.superWeapon) continue;
-            have[b.def.superWeapon] = b;
-        }
-        // drop states whose provider is gone
-        for (let i = p.sw.length - 1; i >= 0; i--) {
-            if (!have[p.sw[i].id]) p.sw.splice(i, 1);
-        }
-        for (const id in have) {
-            const sid = id as SuperWeaponId;
-            if (p.sw.some(s => s.id === sid)) continue;
-            p.sw.push({
-                id: sid, t: 0, total: SUPER_WEAPONS[sid].charge, ready: false, sourceId: have[id].id,
-            });
+        if (!this.options.superWeapons) { p.superWeaponsTrait.clear(); return; }
+        for (const st of p.superWeaponsTrait.getAll()) {
+            const provider = p.buildings.find((b) => !b.dead && b.superWeaponTrait?.getName() === st.name);
+            if (!provider) p.superWeaponsTrait.remove(st.name);
         }
     }
 
@@ -1690,12 +2770,18 @@ export class Game {
 
         if (this.aiEnabled) this.players[1].ai?.update(dt);
 
+        // reference world.afterTick: spawn-time work that must not run inside
+        // the same notification that queued it
+        if (this.afterTickQueue.length) {
+            const queued = this.afterTickQueue;
+            this.afterTickQueue = [];
+            for (const fn of queued) fn();
+        }
+
         this.regenTimer += dt;
         if (this.regenTimer >= 2) {
             this.regenTimer = 0;
-            for (const n of this.terrain.nodes) {
-                if (n.amount < n.max) n.amount = Math.min(n.max, n.amount + 14);
-            }
+            this.terrain.regrow(14);
         }
 
         this.revealTimer += dt;
@@ -1737,84 +2823,93 @@ export class Game {
     /* ------------------------------------------------------------ */
     /* production tick                                               */
     /* ------------------------------------------------------------ */
+    /**
+     * Reference ProductionTrait[NotifyTick.onTick] / ProductionTrait.tickQueue.
+     *
+     * The formula is copied: every tick the queue may spend
+     *   `min(credits, cost/buildTime + leftover, remaining)`
+     * and the item is done when `creditsSpent === creditsEach`. Money is only
+     * taken as the item builds, so a dry economy stalls it mid-bar instead of
+     * refusing the order.
+     *
+     * Calibration: the reference derives `buildTime` from `cost / BuildSpeed`;
+     * our defs already carry a tuned `time` in seconds, so that is used as the
+     * base instead. Every *modifier* is unchanged — extra factories, low power
+     * and walls all scale the same way they do in retail.
+     */
+    private prodAcc = 0;
     private tickProduction(dt: number) {
-        for (const p of this.players) {
-            for (const cat of CATS) {
-                const q = p.queues[cat];
-                if (q.ready) continue;
-                const item = q.items[0];
-                if (!item) continue;
-                if (this.factoryCount(p, cat) === 0) continue;
-                const speed = this.prodFactor(p) * this.factorySpeed(p, cat);
-                const perSec = (item.cost / Math.max(0.1, item.time)) * speed;
-                const want = Math.min(item.cost - item.spent, perSec * dt);
-                if (want <= 0) continue;
-                const spend = Math.min(p.credits, want);
-                if (spend <= 0) {
-                    if (p.isHuman && cat !== 'structure' && Math.floor(this.time) !== Math.floor(this.time - dt)) {
-                        // silent: the HUD already shows the empty credit counter
-                    }
-                    continue;
-                }
-                p.credits -= spend;
-                item.spent += spend;
-                item.progress = clamp(item.spent / item.cost, 0, 1);
-                if (item.spent >= item.cost - 0.01) {
-                    item.progress = 1;
-                    item.spent = item.cost;
-                    this.finishQueueItem(p, q);
-                }
+        this.prodAcc += dt * GENERAL.baseTicksPerSecond;
+        let steps = 0;
+        while (this.prodAcc >= 1 && steps < 12) {
+            this.prodAcc -= 1;
+            steps++;
+            for (const p of this.players) {
+                for (const queue of p.production.getAllQueues()) this.tickQueue(p, queue);
             }
         }
     }
 
-    private finishQueueItem(p: PlayerState, q: ProdQueue) {
-        const item = q.items[0];
+    private tickQueue(p: PlayerState, queue: ProductionQueue): void {
+        if (queue.status !== QueueStatus.Active) return;
+        const item = queue.getFirst();
         if (!item) return;
-        if (q.cat === 'structure') {
+
+        const factoryType = p.production.getFactoryTypeForQueueType(queue.type);
+        const factoryCount = p.production.getFactoryCount(factoryType);
+        const multipleFactoryPenalty = 1 / Math.pow(GENERAL.multipleFactory, factoryCount - 1);
+        const wallSpeedModifier = item.rules.wall ? 1 / GENERAL.wallBuildSpeedCoefficient : 1;
+        const speedMul = p.production.buildSpeedModifier * multipleFactoryPenalty * wallSpeedModifier;
+
+        const baseTicks = Math.max(1, (item.rules.time ?? 0) * GENERAL.baseTicksPerSecond);
+        const buildTime = Math.max(1, Math.round(baseTicks / Math.max(0.05, speedMul)));
+        const remainingCost = item.creditsEach - item.creditsSpent;
+        const affordable = Math.min(
+            p.credits,
+            item.creditsEach / buildTime + item.creditsSpentLeftover,
+            remainingCost,
+        );
+
+        let hasProgress = false;
+        if (affordable > 0) {
+            const spend = Math.floor(affordable);
+            item.creditsSpentLeftover = affordable - spend;
+            if (spend) {
+                item.creditsSpent += spend;
+                item.progress = item.creditsSpent / Math.max(1, item.creditsEach);
+                p.credits -= spend;
+                hasProgress = true;
+            }
+        } else if (!item.creditsEach) {
+            const increment = item.progress * buildTime;
+            item.progress = Math.min(1, (1 + increment) / buildTime);
+            hasProgress = true;
+        }
+
+        if (hasProgress && item.progress >= 1) {
+            item.progress = 1;
+            queue.status = QueueStatus.Ready;
+            this.onQueueReady(p, queue);
+        }
+        if (hasProgress) queue.notifyUpdated();
+    }
+
+    /** the queue just finished an item — the owner may act on it immediately */
+    private onQueueReady(p: PlayerState, queue: ProductionQueue): void {
+        const item = queue.getFirst();
+        if (!item) return;
+        if (queue.type === QueueType.Structures || queue.type === QueueType.Armory) {
             if (p.isHuman) {
-                q.ready = true;
-                this.events.onMessage?.(`${BUILDINGS[item.defId].name} 建造完成 · 点击卡片放置`, 'good');
+                this.events.onMessage?.(`${item.rules.name} 建造完成 · 点击卡片放置`, 'good');
                 this.events.onSfx?.('ready');
-            } else {
-                // the AI places immediately; if the site is blocked it retries
-                // next tick instead of losing the structure
-                if (p.ai?.placeStructure(item.defId)) {
-                    q.items.shift();
-                    q.ready = false;
-                } else {
-                    q.ready = true;
-                }
+            } else if (p.ai?.placeStructure(item.defId)) {
+                queue.shift(item.rules, 1);
             }
             return;
         }
-        q.items.shift();
-        const def = UNITS[item.defId];
-        const fac = this.primaryFactory(p, q.cat);
-        if (!def || !fac) return;
-        const sp = this.spawnPointFor(fac);
-        const u = this.spawnUnit(p.id, def, sp.x, sp.y);
-        u.order = { k: 'idle' };
-        if (fac.rally) this.applyOrder(u, { k: 'move', x: fac.rally.x, y: fac.rally.y });
-        this.pushFx(sp.x, sp.y, 'spawn', 0.5, 1);
+        // Units are delivered by FactoryTrait, not here. Acknowledge the ready
+        // item so the player hears the cue on the same frame it completes.
         if (p.isHuman) this.events.onSfx?.('unitready');
-    }
-
-    private spawnPointFor(b: Building): { x: number; y: number } {
-        const off = (b.size * TILE) / 2 + 20;
-        const candidates: Array<[number, number]> = [
-            [0, -off], [off, -off * 0.4], [-off, -off * 0.4],
-            [off, off * 0.5], [-off, off * 0.5], [0, off],
-            [off * 1.5, 0], [-off * 1.5, 0],
-        ];
-        for (const [dx, dy] of candidates) {
-            const x = b.x + dx;
-            const y = b.y + dy;
-            if (!this.isBlocked(Math.floor((x + HALF) / TILE), Math.floor((y + HALF) / TILE))) {
-                return { x, y };
-            }
-        }
-        return { x: b.x, y: b.y - off };
     }
 
     private updateBuildings(dt: number) {
@@ -1823,25 +2918,40 @@ export class Game {
             const p = this.players[b.owner];
             b.pulse += dt;
 
-            if (b.status === 'builddown') {
+            /*
+             * C4 ticks on the *structure*, not on the placer, and it keeps
+             * ticking while the building is being sold or is still rising —
+             * a satchel charge does not care what the target is doing.
+             *
+             * The tick itself runs from the 15 Hz loop (`tickBuildingTraits`),
+             * never from here: `C4ChargeTrait` counts *ticks*, so driving it
+             * once per frame would make the fuse four times shorter on a 60 fps
+             * device than on a 15 fps one.
+             */
+            if (b.status === BuildStatus.BuildDown) {
                 b.buildT -= dt;
                 b.progress = Math.max(0.02, Math.min(1, b.buildT / Math.max(0.01, b.buildDur)));
                 if (b.buildT <= 0) {
                     b.progress = 0;
-                    b.status = 'ready';
+                    b.setBuildStatus(BuildStatus.Ready);
                     this.finishSell(b);
                 }
                 continue;
             }
 
-            if (b.status === 'buildup') {
+            if (b.status === BuildStatus.BuildUp) {
                 // rise animation only — the structure is already complete
                 b.buildT -= dt;
                 b.progress = b.buildDur > 0 ? clamp(1 - b.buildT / b.buildDur, 0, 1) : 1;
                 if (b.buildT <= 0) {
                     b.progress = 1;
-                    b.status = 'ready';
+                    // reference WaitForBuildUpTask: BuildUp -> Ready is what
+                    // unlocks the weapon and the factory queue
+                    const wasStatus = b.status;
+                    b.setBuildStatus(BuildStatus.Ready);
                     this.pushFx(b.x, b.y, 'spawn', 0.6, b.size);
+                    // reference FreeUnitTrait[NotifyBuildStatus.onStatusChange]
+                    b.freeUnitTrait?.onStatusChange(wasStatus, b, this.freeUnitWorld, BuildStatus.Ready, BuildStatus.BuildUp);
                     if (p.isHuman) {
                         this.events.onMessage?.(`${b.def.name} 部署完成`, 'good');
                         this.events.onSfx?.('ready');
@@ -1849,6 +2959,10 @@ export class Game {
                 }
                 continue;
             }
+
+            /* ---- reference trait ticks ---- */
+            if (b.factoryTrait) (b.factoryTrait as any).onTick(b, this.factoryWorld);
+            if (b.dockTrait) b.dockTrait.onTick();
 
             // battle damage: smoke first, then open flames
             const hurt = b.hp / b.maxHp;
@@ -1884,12 +2998,19 @@ export class Game {
                 }
             }
 
-            // defensive weapon
-            if (b.def.weapon) {
-                b.cd -= dt * (this.prodFactor(p) < 1 ? 0.6 : 1);
+            // defensive weapon — reference Building.update disables it unless
+            // the structure is Ready and powered
+            if (b.def.weapon && b.status === BuildStatus.Ready && (!b.poweredTrait || b.poweredTrait.isPoweredOn())) {
+                b.cd -= dt;
                 if (b.cd <= 0) {
                     const tgt = this.findTargetFor(b, b.def.weapon, b.x, b.y, b.def.weapon.range);
                     if (tgt) {
+                        /* TurretTrait: rotate one step per tick, fire when aligned */
+                        if (b.turretTrait) {
+                            b.turretTrait.setDesiredFacing(radToFacing(Math.atan2(tgt.y - b.y, tgt.x - b.x)));
+                            b.turretTrait.onTick(b);
+                            if (b.turretTrait.isRotating()) continue;
+                        }
                         this.fire(b, b.def.weapon, tgt);
                         b.cd = b.def.weapon.cd;
                     }
@@ -1936,7 +3057,20 @@ export class Game {
             }
 
             if (u.isHarvester) this.updateHarvester(u, dt);
+            else if (u.isCrashing) { /* falling: no orders, no shooting */ }
+            else if (u.isAir) this.updateAircraft(u, dt);
             else this.updateCombatant(u, dt);
+
+            /*
+             * Reference: every NotifyTick trait runs after the order logic.
+             * For infantry that is SuppressionTrait (30-tick prone timer),
+             * IdleActionTrait (fraidycat scatter + idle sequence trigger) and
+             * CrashableTrait (falling aircraft).
+             */
+            u.suppressionTrait?.onTick();
+            u.idleActionTrait?.onTick(u, this.infantryWorld);
+            u.spawnLinkTrait?.onTick(u, this.spawnLinkWorld);
+            u.unlandableTrait?.onTick(u, this.unlandableWorld);
 
             // the order above decided what the turret is interested in; swing it
             if (u.focus && !u.focus.dead) u.aimAt(u.focus.x, u.focus.y);
@@ -1985,8 +3119,19 @@ export class Game {
             this.simAcc -= TICK;
             steps++;
             this.simWorld.currentTick++;
+            // building traits that count in ticks run on the same clock as units
+            this.tickBuildingTraits();
             for (const u of this.units) {
                 if (u.dead) continue;
+                // a crashing aircraft is pure falling physics — fixed 60 Hz, so
+                // the fall takes the same wall-clock time at any frame rate
+                if (u.isCrashing) {
+                    u.crashableTrait?.onTick(u, this.crashWorld);
+                    continue;
+                }
+                // cosmetic traits that count in ticks, not seconds
+                u.rockingTrait?.update();
+                if (u.hoverBobTrait) u.hoverBobTrait.onTick(u, this.hoverWorld());
                 u.orders.tick(u);
                 // Idle bookkeeping — reference MoveTrait[NotifyTick.onTick]
                 if (u.moveTrait.moveState !== MoveState.Idle && u.moveTrait.collisionState === 1 && !u.orders.hasTasks()) {
@@ -2000,6 +3145,25 @@ export class Game {
             if (u.dead) continue;
             u.face = facingToRad(u.direction);
             u.speedCur = u.moveTrait.velocity.length() * 60;
+        }
+    }
+
+    /**
+     * 15 Hz tick for building traits.
+     *
+     * These four all count *ticks* in the reference (`Timer` / `cooldownTicks` /
+     * `blackoutFrames`), so they have to be driven from the fixed-step loop, not
+     * from `updateBuildings(dt)` — a per-frame drive would make every one of
+     * them frame-rate dependent.
+     */
+    private tickBuildingTraits(): void {
+        for (const b of this.buildings) {
+            if (b.dead) continue;
+            b.c4ChargeTrait?.onTick(b, this.c4World);
+            if (b.unitReloadTrait) b.unitReloadTrait.onTick(b, this.reloadWorld);
+            // reference UnitRepairTrait: the pad heals what it is reloading
+            if (b.unitRepairTrait) b.unitRepairTrait.onTick(b, this.repairWorld);
+            if (b.overpoweredTrait) b.overpoweredTrait.onTick(b, this.overpoweredWorld);
         }
     }
 
@@ -2059,6 +3223,19 @@ export class Game {
             return;
         }
 
+        if (o.k === 'demolish') {
+            const t = o.target as Building;
+            if (!t || t.dead || !u.c4) { this.advanceOrder(u); return; }
+            const d = dist(u.x, u.y, t.x, t.y);
+            if (d > t.radius + TILE) {
+                if (!u.orders.hasTasks()) this.pathToEntity(u, t);
+            } else {
+                u.stop();
+                this.plantC4(u, t);
+            }
+            return;
+        }
+
         if (o.k === 'deploy') {
             if (u.isMcv) this.deployMcv(u);
             this.advanceOrder(u);
@@ -2105,123 +3282,18 @@ export class Game {
         }
     }
 
+    /**
+     * Harvester per-tick work.
+     *
+     * The old hand-written seek/toMine/mining/toBase/unload machine is gone:
+     * the truck now runs the reference task chain (GatherOreTask ->
+     * ReturnOreTask -> GatherOreTask), and all this method does is tick the
+     * trait's retry timers. Combat still runs underneath so a harvester that is
+     * shot at can shoot back while it works.
+     */
     private updateHarvester(u: Unit, dt: number) {
-        const p = this.players[u.owner];
-        let o = u.order;
-        // a direct move order always wins; once it finishes the truck returns to work
-        if (o.k === 'move') {
-            if (!u.orders.hasTasks()) this.advanceOrder(u);
-            return;
-        }
-        if (o.k !== 'harvest') {
-            o = { k: 'harvest', node: u.mineNode, phase: 'seek', timer: 0 };
-            u.order = o;
-        }
-        const order = o as { k: 'harvest'; node: CrystalNode | null; phase: string; timer: number };
-
-        switch (order.phase) {
-            case 'seek': {
-                let node = order.node;
-                if (!node || node.amount <= 0) node = this.pickHarvestNode(u);
-                order.node = node;
-                u.mineNode = node;
-                if (!node) { u.order = { k: 'idle' }; return; }
-                /*
-                 * Reference: the truck gets a MoveTask to the ore cell with
-                 * closeEnoughTiles, and MoveTask itself relocates to a free cell
-                 * when the ore is crowded. No "is it reachable" pre-check: an
-                 * unreachable target ends the task with MoveResult.Fail, and the
-                 * phase machine below reacts to exactly that.
-                 */
-                this.startMove(u, this.tileAt(node.x, node.y), { closeEnoughTiles: 1 });
-                order.phase = 'toMine';
-                order.timer = 0;
-                break;
-            }
-            case 'toMine': {
-                const node = order.node;
-                if (!node || node.amount <= 0 || this.buildingAt(node.tx, node.ty)) { order.phase = 'seek'; return; }
-                const d = dist(u.x, u.y, node.x, node.y);
-                if (d < TILE * 1.45) {
-                    order.phase = 'mining';
-                    order.timer = u.def.mineTime || 3;
-                    u.stop();
-                    break;
-                }
-                if (!u.orders.hasTasks()) {
-                    const result = u.moveTrait.lastMoveResult;
-                    if (result === MoveResult.Fail) {
-                        this.coolNode(node, 8);
-                        order.node = null;
-                        order.phase = 'seek';
-                        order.timer = 0;
-                    } else {
-                        // stopped next to a full cell: mine from here
-                        order.phase = 'mining';
-                        order.timer = u.def.mineTime || 3;
-                    }
-                }
-                break;
-            }
-            case 'mining': {
-                const node = order.node!;
-                const drop = this.nearestDropoff(p, u.x, u.y);
-                if (!drop) {
-                    u.order = { k: 'idle' };
-                    u.stop();
-                    return;
-                }
-                order.timer -= dt;
-                const cargo = u.def.cargo || 500;
-                const rate = cargo / Math.max(0.5, u.def.mineTime || 3);
-                u.cargo = Math.min(cargo, u.cargo + rate * dt);
-                if (node) {
-                    node.amount -= rate * dt;
-                    if (node.amount < 0) node.amount = 0;
-                }
-                if (order.timer <= 0 || u.cargo >= cargo || !node || node.amount <= 0) {
-                    this.startMove(u, this.dockTile(u, drop), { closeEnoughTiles: 1 });
-                    order.phase = 'toBase';
-                    order.timer = 0;
-                }
-                break;
-            }
-            case 'toBase': {
-                const drop = this.nearestDropoff(p, u.x, u.y);
-                if (!drop) { order.phase = 'seek'; return; }
-                const dd = dist(u.x, u.y, drop.x, drop.y);
-                /*
-                 * "Beside the refinery" is what counts, not an exact point: the
-                 * retail dock is a set of cells around the foundation. A base can
-                 * also wall in its own refinery, in which case a truck parks as
-                 * close as it can and unloads there rather than shuttling forever.
-                 */
-                const insideFootprint = u.tile.rx >= drop.tx && u.tile.rx < drop.tx + drop.size
-                    && u.tile.ry >= drop.ty && u.tile.ry < drop.ty + drop.size;
-                if (insideFootprint || dd < drop.radius + 40
-                    || (!u.orders.hasTasks() && dd < drop.radius + 80)) {
-                    order.phase = 'unload';
-                    order.timer = UNLOAD_TIME;
-                    u.stop();
-                    break;
-                }
-                if (!u.orders.hasTasks()) this.startMove(u, this.dockTile(u, drop), { closeEnoughTiles: 1 });
-                break;
-            }
-            case 'unload': {
-                order.timer -= dt;
-                if (order.timer <= 0) {
-                    const gain = Math.floor(u.cargo);
-                    p.credits = Math.min(MAX_CREDITS, p.credits + gain);
-                    p.earned += gain;
-                    u.cargo = 0;
-                    order.phase = 'seek';
-                    order.node = order.node && order.node.amount > 0 ? order.node : null;
-                    if (p.isHuman) this.events.onSfx?.('unload');
-                }
-                break;
-            }
-        }
+        u.harvesterTrait?.onTick(u, this.harvestWorld);
+        this.updateCombatant(u, dt);
     }
 
     /* ------------------------------------------------------------ */
@@ -2282,6 +3354,10 @@ export class Game {
         if (!this.canShootAt(src, w, target)) return;
         const isUnit = src instanceof Unit;
         const u = isUnit ? src as Unit : null;
+        // reference AmmoTrait: every shot spends a round; at zero the aircraft
+        // has to go home (updateAircraft sends it)
+        if (u && u.isAir && u.ammoTrait && u.ammoTrait.ammo <= 0) return;
+        if (u && u.isAir && u.ammoTrait) u.ammoTrait.ammo = u.ammoTrait.ammo - 1;
         const phys = PROJ_PHYSICS[w.proj];
 
         // muzzle sits on the hull edge in the facing direction
@@ -2487,19 +3563,97 @@ export class Game {
         target.hp -= amount * mult;
         target.lastHit = this.time;
         target.hitFlash = 0.12;
-        if (target.hp <= 0) this.kill(target, owner, source);
+        /*
+         * Reference PowerTrait[NotifyHealthChange.onChange]: a damaged power
+         * plant produces proportionally less. This is why shelling the reactor
+         * browns out the base before it dies.
+         */
+        if (target instanceof Building && target.def.power > 0 && !target.dead) {
+            this.players[target.owner].powerTrait.updateFrom(target, 'update', this.powerWorld);
+        }
+        if (target instanceof Unit && !target.dead) this.onWarheadHitInfantry(target);
+        /*
+         * Reference Warhead `Rocker=yes`: an explosive hit rocks a tank on its
+         * suspension. Amplitude follows the damage, capped so a light shell
+         * does not send it flying.
+         */
+        if (target instanceof Unit && !target.dead && target.rockingTrait && type === 'explosive') {
+            const facing = Math.round((Math.atan2(target.x - (source?.x ?? target.x), target.y - (source?.y ?? target.y)) * 180) / Math.PI) & 0xff;
+            target.rockingTrait.applyRocking(target, facing, Math.min(2, Math.max(0.4, amount / 40)));
+        }
+        if (target.hp <= 0) {
+            // reference CrashableTrait: an aircraft with a crash trait does not
+            // simply vanish, it falls and explodes where it lands
+            if (target instanceof Unit && target.isAir && target.crashableTrait && !target.isCrashing) {
+                this.startCrash(target, owner, source);
+                return;
+            }
+            this.kill(target, owner, source);
+        }
+    }
+
+    /** Reference `CrashableTrait.crash()` — hand the aircraft over to gravity */
+    private startCrash(u: Unit, killer: PlayerId, source: Unit | null): void {
+        u.hp = 0;
+        u.crashAltitude = u.altitude;
+        u.crashableTrait!.crash({ player: killer, obj: source ?? undefined });
+        u.attackTarget = null;
+        u.focus = null;
+        u.engage = null;
+        u.orders?.clear(u);
+        this.events.onSfx?.('crash', u.x, u.y);
+    }
+
+    /**
+     * Reference `Warhead.suppressOrScatterTarget`.
+     *
+     * Two very different reactions to being shot at:
+     *   - a `fraidycat` civilian panics and runs (once — the scatter task is
+     *     only queued while it has no orders);
+     *   - a soldier only goes prone if he was standing still (or was already
+     *     suppressed). A running infantryman keeps running, which is why
+     *     charging a machine gun position works at all.
+     */
+    private onWarheadHitInfantry(target: Unit): void {
+        if (!target.isInfantry()) return;
+        if ((target.def as any).fraidycat) {
+            if (!target.orders?.hasTasks()) {
+                target.isPanicked = true;
+                this.scatterUnit(target);
+                this.afterTick(() => { target.isPanicked = false; });
+            }
+            return;
+        }
+        const idle = !target.isMoving && !target.orders?.hasTasks();
+        if ((idle || target.suppressionTrait?.isSuppressed()) && target.suppressionTrait) {
+            target.suppressionTrait.suppress();
+        }
     }
 
     kill(e: Entity, killer: PlayerId, source: Unit | null = null) {
         if (e.dead) return;
         e.dead = true;
-        if (e instanceof Unit) this.occupancy.unoccupySingleTile(e.tile, e);
+        if (e instanceof Unit) {
+            this.occupancy.unoccupySingleTile(e.tile, e);
+            if (e.harvesterTrait) e.harvesterTrait.status = 0;
+            if (e.dockableTrait?.reservedDock?.dockTrait) {
+                e.dockableTrait.reservedDock.dockTrait.unreserveDockForUnit(e);
+            }
+        }
         e.hp = 0;
         this.players[e.owner].lost++;
         if (killer !== e.owner) this.players[killer].kills++;
         const big = e.isBuilding;
         if (big) {
             if (this.selectedBuilding === (e as Building)) this.selectedBuilding = null;
+            const victim = e as Building;
+            /*
+             * Reference NotifyDestroy.onDestroy fan-out: crew bail out *before*
+             * the structure is unregistered, so the survivors can still read the
+             * footprint they are climbing out of.
+             */
+            victim.crewedTrait?.onDestroy(victim, this.crewWorld, this.damageInfoFor(killer, source), false);
+            this.unregisterBuilding(victim);
             this.ruins.push({
                 x: e.x, y: e.y, size: (e as Building).size,
                 seed: Math.floor(this.rng() * 100000),

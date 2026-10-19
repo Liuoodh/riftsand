@@ -6,7 +6,7 @@
 - 引擎：Cocos Creator 3.8.8
 - 语言：TypeScript
 - 仓库：https://github.com/Liuoodh/riftsand
-- 当前版本：**v0.22.0-dev — 修掉周期性卡顿；遮挡改为原版相机深度排序**
+- 当前版本：**v0.24.0-dev — 七大系统 + 建筑/飞机 trait 族按原版逐行重建**
 
 ![主菜单](docs/shots/menu.png)
 
@@ -160,6 +160,30 @@ frameIndex = startFrame + facingMult * facingIndex + animFrame
 
 等距下屏幕矩形对应世界**菱形**，把两个角反投影成世界 AABB 必然漏选。
 现在框选是「逐单位投影到屏幕再判断是否在矩形内」——这是等距下唯一正确的做法。
+
+## v0.24：建筑 / 飞机 trait 族按原版逐行重建
+
+v0.23 搬完七大系统的**主干**之后，这一轮补的是 `gameobject/trait/` 下那层"决定手感"的
+建筑与飞机 trait。方法不变：读原版源码 → 逐函数落到 `sim/traits/` → Game 层只加 world 适配器。
+
+- **C4 爆破**（`C4ChargeTrait` + `PlantC4Task`）：工兵现在有**两条**指令 —— 占领按钮＝进门接管，
+  攻击指令＝在楼上安炸药、3 秒后塌楼（`DeathType.Demolish`）。`setCharge` 拒绝重复点燃，
+  四个工兵扑同一栋楼不会叠四个引信。
+- **幸存者**（`CrewedTrait`）：楼塌或拆楼时跑出 `退款 / SurvivorDivisor` 个人（载具 1、建筑上限 5），
+  基地车类建筑最后一个出楼的是工程师。退款**不看血量**、AI 房**全额**，两条都是原版怪癖。
+- **免费单位**（`FreeUnitTrait`）：只在升起动画结束那一瞬间送，落点用 `RadialBackFirstTileFinder`
+  从背面扫环、避开矿格，实在没位置就退款而不是静默丢弃。
+- **超武归属**（`SuperWeaponTrait` + `SuperWeaponsTrait`）：归属权从"每帧扫表"改成 trait 自己维护，
+  卖掉两座力场锚中的一座不会丢充能，工兵缴获超武楼时跟着换主。
+- **维修**（`UnitRepairTrait`）：机场落地加油的同时按 `RepairPercent` 扣费补血，
+  走的是**装填时钟**而不是维修厂时钟（原版 `rules.unitReload` 分支）。
+- **围墙 / 超载 / 子机 / 导弹 / 离场**（`WallTrait`、`OverpoweredTrait`、`SpawnLinkTrait`、
+  `MissileSpawnTrait`、`UnlandableTrait`）：逐行移植完成，本阵容暂时没有对应的楼/兵，
+  代码与适配器就位但未接线，不造假行为。
+- **顺带修掉一个时钟错误**：tick 型 trait 原来挂在每帧的 `updateBuildings(dt)` 上，
+  60 fps 机器上引信只有 0.75 秒。现在统一由 15 Hz 定步循环里的 `tickBuildingTraits()` 驱动。
+
+细节与逐行对应表见 `docs/REFERENCE-PARITY.md` 第 22 章；新增回归脚本 `tools/buildingtest.mjs`（13 条断言）。
 
 ## v0.22：周期性卡顿的根因是 AI 选址；遮挡改用原版相机深度
 

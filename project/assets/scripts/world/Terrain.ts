@@ -24,6 +24,14 @@ export enum TileKind {
 /** a tile's step cost for connectivity, mirroring |Δz| <= 1 in the reference */
 export const MAX_STEP_LEVEL = 1;
 
+/**
+ * Credits per ore bail. Retail `[Tiberium]` Ore=25, Gems=50; this map has no
+ * gem patches yet, so every bail is ore. Kept as one constant because the
+ * harvester task tells ore from gems by comparing the bail value.
+ */
+export const ORE_BAIL_VALUE = 25;
+export const GEM_BAIL_VALUE = 50;
+
 export interface CrystalNode {
     id: number;
     tx: number;
@@ -357,6 +365,52 @@ export class TerrainMap {
             if (Math.abs(n.tx - tx) <= 1 && Math.abs(n.ty - ty) <= 1) return n;
         }
         return null;
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* TIBERIUM (ore overlay)                                            */
+    /* ---------------------------------------------------------------- */
+
+    /** reference: the tile's `landType === LandType.Tiberium` test */
+    hasOre(tx: number, ty: number): boolean {
+        if (!this.inside(tx, ty)) return false;
+        const n = this.nodeAt(tx, ty);
+        return !!n && n.amount > 0 && this.kind[this.idx(tx, ty)] === TileKind.Crystal;
+    }
+
+    /** credits contained in one bail on this tile (0 = no ore) */
+    oreValueAt(tx: number, ty: number): number {
+        return this.hasOre(tx, ty) ? ORE_BAIL_VALUE : 0;
+    }
+
+    /**
+     * Reference TiberiumTrait.collectBail: remove one bail, and when the last
+     * bail is gone the overlay disappears and the ground becomes passable sand
+     * again. Our patches are node-based, so the whole node is cleared at once —
+     * visually one crystal cluster, not a single sparkling cell.
+     */
+    collectBail(tx: number, ty: number): number {
+        if (!this.hasOre(tx, ty)) return 0;
+        const n = this.nodeAt(tx, ty)!;
+        n.amount = Math.max(0, n.amount - ORE_BAIL_VALUE);
+        if (n.amount <= 0) {
+            for (let y = n.ty - 1; y <= n.ty + 1; y++) {
+                for (let x = n.tx - 1; x <= n.tx + 1; x++) {
+                    if (!this.inside(x, y)) continue;
+                    const i = this.idx(x, y);
+                    if (this.kind[i] === TileKind.Crystal) this.kind[i] = TileKind.Sand;
+                }
+            }
+            this.rebuildSpeed();
+        }
+        return ORE_BAIL_VALUE;
+    }
+
+    /** slow regrowth: a node refills only while it still has crystal left */
+    regrow(amount: number): void {
+        for (const n of this.nodes) {
+            if (n.amount > 0 && n.amount < n.max) n.amount = Math.min(n.max, n.amount + amount);
+        }
     }
 
     /**

@@ -14,15 +14,10 @@ import { PathFinder } from './Graph';
 import { MapBounds, RadialTileFinder, Tile, TileCollection, TileDirection } from './Tiles';
 import { TileOccupation, Occupant } from './TileOccupation';
 import { isBuildingObject } from './Constants';
+import { SpeedType, LandType, getSpeedModifier, getLandType } from './rules/TerrainRules';
 
-export enum SpeedType {
-    Foot = 0,
-    Track = 1,
-    Wheel = 2,
-    Hover = 3,
-    Amphibious = 4,
-    Winged = 5,
-}
+export { SpeedType };
+export { LandType };
 
 export enum MovementZone {
     Ground = 0,
@@ -403,7 +398,22 @@ export class Passability {
         skipBlockerCheck = false,
     ): number {
         if (!tile || !this.world.mapBounds.isWithinBounds(tile)) return 0;
-        const speedModifier = this.world.speedAt(tile.rx, tile.ry, isInfantry, speedType === SpeedType.Hover);
+        /*
+         * Port of Terrain.getPassableSpeed.
+         *
+         * The speed table is keyed by LandType, not by a per-cell float: a road
+         * and clear ground are both 100%, rough is 80/70/50 by locomotor, and
+         * tiberium slows tracks by 20%. `LandType.Wall` is re-read as the
+         * underlying terrain for tracked units (a wall has no track speed, but
+         * the ground under it does — that is what lets a crusher drive at a
+         * wall).
+         */
+        let landType = bridgeLevel ? tile.onBridgeLandType : tile.landType;
+        if (landType === undefined) return 0;
+        if (landType === LandType.Wall && speedType === SpeedType.Track) {
+            landType = getLandType((tile as any).terrainType ?? 0, false);
+        }
+        const speedModifier = getSpeedModifier(landType, speedType);
         if (!speedModifier) return 0;
         if (!skipBlockerCheck) {
             let blocked = false;
