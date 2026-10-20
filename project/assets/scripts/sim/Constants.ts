@@ -1,4 +1,5 @@
 /** Shared constants + tiny predicates with no dependencies (avoids import cycles). */
+import { GameSpeed } from './GameSpeed';
 
 export const SPEED = {
     /** one cell in leptons (= this project's world pixels) */
@@ -10,11 +11,12 @@ export const SPEED = {
  *
  * The reference never reads this from rules.ini — it is a property of the
  * simulation clock (`GameSpeed.BASE_TICKS_PER_SECOND`), and every "minutes" value
- * in the rules is multiplied by `60 * TICKS_PER_SECOND` to become ticks. It lives
- * here rather than in `GeneralRules` for exactly that reason: it is a clock
- * constant, not a tunable rule.
+ * in the rules is multiplied by `60 * TICKS_PER_SECOND` to become ticks. It is
+ * an alias of `GameSpeed.BASE_TICKS_PER_SECOND` rather than a second literal so
+ * the two cannot drift; `GameSpeed` itself imports nothing, so this stays
+ * cycle-free.
  */
-export const TICKS_PER_SECOND = 15;
+export const TICKS_PER_SECOND = GameSpeed.BASE_TICKS_PER_SECOND;
 
 /**
  * Bails of ore a standard harvester carries.

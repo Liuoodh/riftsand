@@ -171,19 +171,26 @@
 | 原版总计 | 1,207 | 125,799 |
 | 豁免（不做 / 原创） | 605 | 74,160 |
 | **应移植** | **602** | **51,639** |
-| 其中已移植 | 183 | 20,483 |
-| **待移植** | **419** | **≈31,100** |
+| 其中已移植 | 264 | 21,268 |
+| **待移植** | **338** | **≈30,371** |
 
-> 已移植的 20,483 行 = B1 数学地基（40 / 1,411）+ B2 规则全表（37 / 2,635）
+> 已移植的 21,268 行 = B1 数学地基（40 / 1,411）+ B2 规则全表（37 / 2,635）
 > + B3 战斗数学（33 / 3,258）+ B4 地图地形（20 / 4,074）+ B5a 对象模型（33 / 3,004）
-> + 此前 19 / 6,101。
+> + B6a 任务系统与事件目录（81 / 785）+ 此前 19 / 6,101。
 > B4 多出的 1,200 行是注释与 duck-type 接口，其内容层 `sim/content/`（2 / 273）
 > 是原创代码，不计入移植；同时删掉了 ≈1,000 行自研旧实现（`Tiles` / `Passability`）。
 > B5a 同理多出 ≈550 行注释；它的 `factory()` 装配（约 700 行）随 trait 批次落地，
-> 因此计入 B6 而非本批。
-> 也就是说：**剩余工作量约为此前全部工作的 1.5 倍**，且集中在 `task/`（B7）
+> 因此计入 B6d 而非本批。
+>
+> **计数口径修正（v0.25-B6a）**：B5/B6 的原始估算基于目录列表，未逐文件核对，
+> 偏低约 60%。本轮复核后按实测重划：`gameobject/trait` 实为 **69 实现文件 /
+> 6,671 行**（原估 44 / 3,800），`gameobject/task` 实为 **43 / 4,439**
+> （原估 40 / 5,700），`event` 只有 **68 / 529**（原估计入 B10 的 68 文件未给行数）。
+> 另外原版 `game/gameobject/` 根还有 `Debris`(117) 此前漏列。
+>
+> 也就是说：**剩余工作量约为此前全部工作的 1.4 倍**，且集中在 `trait/`（B6d）
 > 与 `Game.ts` 编排层（B10）——"对象行为"与"装配"两块，行数密度和耦合度都高于
-> 已完成的五批。
+> 已完成的六批。
 
 ---
 
@@ -196,15 +203,22 @@
 | **B3 战斗数学** | `Warhead`、`Weapon`、`WeaponTargeting`、`Target`、`trait/DamageTrait` 族 | 33 | 2,600 | B2 | ✅ 完成 |
 | **B4 地图地形** | `game/map/**` 21 文件（Terrain 重写、Bridges、MapShroud、PathFinder、OreSpread、TileOcclusion） | 21 | 2,863 | B2 | ✅ 完成 |
 | **B5a 对象模型** | `gameobject/` 根 13（`GameObject`/`Techno`/四个兵种/`Overlay`/`Smudge`/`Terrain`/`Bridge`/`Weapon`/`ObjectPosition`）+ `locomotor` 7 + `unit` 8 + `selection` 5 + `Traits` + `rampHeights` | 33 | 3,004 | B3 B4 | ✅ 完成 |
-| **B5b 装配与弹道** | `Projectile`(948) + `ObjectFactory`(266) + `Winged`/`Jumpjet` locomotor(659)。`Projectile.factory` 与 `ObjectFactory` 的装配清单本身就是 trait 目录，故整批后置 | 4 | 1,873 | B5a → **B6** | ⏳ |
-| **B6 trait 补齐** | 剩余 44 个 `gameobject/trait/*` + 四个兵种类与 `ObjectFactory` 的 `factory()` 装配（≈700 行） | 44 | 3,800 | B5a ✅ | ⏳ |
-| **B7 Task 全族** | 40 个 `task/**`（含 `MoveTask` 1,037、`AttackTask` 682） | 40 | 5,700 | B6 | ⏳ |
-| **B8 指令与动作** | `order/**` 19 + `action/**` 34 | 53 | 2,772 | B7 | ⏳ |
-| **B9 玩家与超武** | `player/**` 7 + `superweapon/**` 11 + `ConstructionWorker` + `GameFactory` + `Alliances` + `StartingUnitsGenerator` + `Country` | 28 | 3,700 | B8 | ⏳ |
-| **B10 编排层** | `Game.ts` 重构 + `World` + `GameMap` + `GameTurnManager` + `api/**` 18 + `event/**` 68 | 90 | 3,300 | B9 | ⏳ |
-| **B11 AI（可选）** | `ai/thirdpartbot/**` 59 | 59 | 11,481 | B10 | ❌ 不做（保留现有 AI） |
+| **B5b 装配与弹道** | `Projectile`(948) + `ObjectFactory`(266) + `Debris`(117) + `Winged`/`Jumpjet` locomotor(659)。`Projectile.factory` 与 `ObjectFactory` 的装配清单本身就是 trait 目录，故整批后置 | 5 | 1,990 | B5a → **B6d** | ⏳ |
+| **B6a 任务系统与事件** | `task/system` 8（`Task`/`TaskRunner`/`TaskStatus`/`TaskGroup`/`CallbackTask`/`WaitTicks`/`WaitMinutes`/`TargetLinesConfig`）+ `event/**` 68 + `GameSpeed` | 81 | 785 | B5a | ✅ 完成 |
+| **B6b 移动任务** | `task/move` 10（`MoveTask` 1,037、`MoveInWeaponRangeTask` 286、`MoveInside`/`Forward`/`Outside`、`ExitFactoryTask` …） | 10 | 1,809 | B6a | ⏳ |
+| **B6c 其余任务** | `task` 其余 23（`AttackTask`、`harvester/*`、`morph/*`、`Enter*Task`、`GarrisonBuildingTask` …）+ `UnitOrderTrait` 接线 | 23 | 2,403 | B6b | ⏳ |
+| **B6d trait 全族** | 剩余 64 个 `gameobject/trait/*` + 16 个 `interface` + 四个兵种类与 `ObjectFactory` 的 `factory()` 装配（≈700 行） | 64 | ≈6,400 | B6c | ⏳ |
+| **B7 指令与动作** | `order/**` 19 + `action/**` 34 | 53 | 2,772 | B6d | ⏳ |
+| **B8 玩家与超武** | `player/**` 7 + `superweapon/**` 11 + `ConstructionWorker` + `GameFactory` + `Alliances` + `StartingUnitsGenerator` + `Country` | 28 | 3,700 | B7 | ⏳ |
+| **B9 编排层** | `Game.ts` 重构 + `World` + `GameMap` + `GameTurnManager` + 事件分发接线 | 90 | ≈3,300 | B8 | ⏳ |
+| **B10 AI（可选）** | `ai/thirdpartbot/**` 59 | 59 | 11,481 | B9 | ❌ 不做（保留现有 AI） |
 
-**B1–B10 合计：437 文件 / ≈34,400 行。**
+**B1–B9 合计：≈389 文件 / ≈30,400 行。**
+
+> 批次编号在 v0.25-B6a 重排过一次：原 B6「trait 补齐」与 B7「Task 全族」
+> 的依赖方向是反的（每个 trait 都 `import` task），因此拆成 B6a→B6d 四段，
+> 并接上原来的 B7–B11。原文的 `event/**` 68 从 B10 前移到 B6a，
+> 因为它是 task/trait 的公共依赖。
 
 每批的验收铁律：
 1. `tsc -p tsconfig.check.json` **0 error**

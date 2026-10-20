@@ -2276,3 +2276,213 @@ J  LosHelper / CollisionHelper / MovePositionHelper / DriveLocomotor 各一条�
 还是旧的自研类。真正切换发生在 B10（编排层）。在那之前，B5a 的正确性只由
 `objecttest` 保证，不受主循环验证。B6 完成后会先做一次"影子接线"：
 让 `ObjectFactory` 造出并行对象但不驱动，逐帧比对位置与血量。
+
+---
+
+## 28. v0.25-B6a：任务系统与事件目录（原版 76 文件 / 723 行）
+
+计划里 B6 是「trait 补齐（44 文件 / 3,800 行）」。动手前逐文件复核，发现这个
+批次的前提是错的，两处：
+
+1. `gameobject/trait` 实为 **69 个实现文件 / 6,671 行**，不是 44 / 3,800。
+2. **每一个真正的 trait 都 `import` 了 `task/**`**。`AttackTrait` 要 `AttackTask`，
+   `MoveTrait` 要 `MoveTask`，`FactoryTrait` 要 `ExitFactoryTask`，`UnitOrderTrait`
+   要 `TaskRunner`。也就是说「先 trait 后 task」的依赖方向是反的。
+
+所以 B6 重新拆成四段，本批先做真正的地基：
+
+| | 内容 | 文件 | 行数 |
+|---|---|---:|---:|
+| **B6a** | `task/system` 8 + `event/**` 68 | 76 | 723 |
+| B6b | `task/move` 10（含 `MoveTask` 1,037） | 10 | 1,809 |
+| B6c | `task` 其余 23（harvester / morph / enter / …） | 23 | 2,403 |
+| B6d | `trait` 剩余 64 + 各 `factory()` 装配 | 64 | ≈6,400 |
+
+### 28.1 原来的 `Task` 差在哪：它只跑队首
+
+B5a 之前的 `sim/Task.ts` 是自研的，驱动逻辑只有五行：
+
+```ts
+while (this.tasks.length) {
+    const task = this.tasks[0];
+    if (task.tick(obj)) this.tasks.shift();
+    else return;
+}
+```
+
+这五行与原版 `TaskRunner.tickChildren` 的差别不是风格，是**语义**：
+
+| | 自研版 | 原版 |
+|---|---|---|
+| 队列推进 | 每 tick 只碰队首 | 一次 tick 内**排空所有非阻塞任务** |
+| 连续两个 `CallbackTask` | 需要 2 帧 | 1 帧内跑完 |
+| 阻塞任务 | 无此概念 | `blocking` 中断队列，非阻塞的继续 |
+| 死循环防护 | 无 | `processedTasks` 集合，每个任务每 tick 最多 tick 一次 |
+
+第二条最要命。采收逻辑里"到达 / 被堵 / 矿没了"三个判定各挂一个 `CallbackTask`，
+自研版每帧只判一个，于是收割机在矿边会**凭空多停两帧**——不报错，
+只是手感发黏。这种缺陷只有把驱动换成原版才看得出来。
+
+`processedTasks` 也不是防御性编程：没有它，一个"非阻塞且本帧没完成"的任务
+会被 `find` 立刻再次选中，而它的位置没变，于是 `while` 原地打转。
+
+### 28.2 三个容易抄错的状态细节
+
+**(1) `TaskStatus` 的数值不是生命周期顺序**
+
+```
+NotStarted=0  Running=1  Finished=2  Cancelling=3  Cancelled=4
+```
+
+`Finished` 排在 `Cancelling` 前面。整理成 0→1→2→3→4 的生命周期序看着更"对"，
+但重放格式存的是数值，改了会让旧重放把"完成"读成"取消中"。
+
+**(2) `preventOpportunityFire` 默认是 `true`**
+
+直觉上"任务在跑"应该允许顺带开火，原版相反：**默认不许**，需要开火的任务
+显式写 `preventOpportunityFire = false`（`MoveTask` 就写了）。
+`blocking` / `preventLanding` 同样默认 `true`。
+
+**(3) `WaitTicksTask` 有 n+1 的 off-by-one**
+
+```ts
+onTick() { return this.isCancelling() || !(this.ticks-- > 0); }
+```
+
+`n` tick 的任务在第 `n+1` 次 `onTick` 才返回 `true`。这不是笔误——
+`TurnTask` 在旋转之上叠了一个 `WaitTicksTask`，差一 tick 在炮塔上表现为抖动。
+所以本批的断言直接钉「n → n+1」，不是「n → n」。
+
+### 28.3 `cancel` 的三种前置状态
+
+原版 `Task.cancel` 分支很少但每个都不显然：
+
+```
+cancellable = false          →  什么都不做（任务自己否决）
+status = Running             →  Cancelling，并递归取消子任务
+status = NotStarted + 有子任务 →  Cancelled + throw
+status = NotStarted 无子任务  →  什么都不做
+```
+
+第三行是唯一抛错的分支：一个还没开始却有子任务的任务，说明有人绕过了
+`TaskRunner.startTask` 手工塞了 `children`，属于编程错误。
+
+第四条容易被"顺手补全"成"也置 Cancelling"，但那样 `tickChildren` 会在下一帧
+把任务跑起来再取消它——正好和调用方想要的相反。
+
+### 28.4 `waitingForChildrenToFinish`：唯一的回写标志
+
+`TaskRunner.tickTask` 会把 `onTick` 的结果和子任务状态做一次合流：
+
+```
+shouldContinue = waitingForChildrenToFinish || onTick(obj)
+if (children 非空 && 无阻塞子任务 && shouldContinue) {
+    allChildrenFinished = children.every(c => c.Cancelled || c.Finished)
+    waitingForChildrenToFinish = !allChildrenFinished
+}
+shouldContinue &&= allChildrenFinished
+```
+
+场景是"抛出一个非阻塞子任务然后自己收工"。`onTick` 第一次就返回 `true`，
+但子任务还在跑，于是父任务被挂起（`waitingForChildrenToFinish = true`）而不是
+提前 `Finished`。注意 `||` 的短路：一旦挂了，**后续帧不再调用 `onTick`**，
+避免"收工"逻辑被重复执行。
+
+### 28.5 事件目录：68 个文件，525 行，一次抄错两次
+
+`game/event/` 有 65 个事件类，全是 `readonly type` 判别符 + 位置参数构造，
+平均 8 行。它们不承载逻辑，只承载**字段名**——而字段名正是最容易抄错的地方。
+B5a 就抄错了两个：
+
+```ts
+// 原版
+constructor(public readonly gameObject: any)
+// B5a 写的
+constructor(public readonly target: any)
+```
+
+`ObjectLandEvent` / `ObjectLiftOffEvent` / `ObjectSpawnEvent` / `ObjectUnspawnEvent` /
+`ObjectCrashingEvent` 这五个的载荷**永远是对象本身**，没有攻击者/受害者角色，
+所以原版统一叫 `gameObject`；其余事件才叫 `target`。字段名错了不会有类型
+错误（都是 `any`），只会在渲染层读到 `undefined` 后静默不播动画。
+
+所以这一批用**生成脚本** `tools/port-events.mjs` 落地：表里逐行转录原版的
+类名、`EventType` 成员、参数名与可选性，脚本负责写文件与 `.meta`。
+手抄 57 个 8 行类，出错概率高于写脚本。
+
+`EventType` 的 65 个数值一个都不能动——它是重放与网络层的线格式。
+
+### 28.6 `GameSpeed`：速度是循环频率，不是 tick 长度
+
+```
+speed 1 → 12 tick/s → ×0.8
+speed 6 → 60 tick/s → ×4.0
+```
+
+`computeGameSpeed` 里 5 和 6 被特判，只因为 `60/(6-5)=60` 而 `60/(6-6)` 除零。
+规则里的 `Rate=` 全部按 **base 15 tick/s** 折算成 tick，与玩家选的速度无关——
+这就是同一份重放在 3 档和 6 档下结果一致的原因。
+
+顺带把 `Constants.TICKS_PER_SECOND` 从字面量 `15` 改成
+`GameSpeed.BASE_TICKS_PER_SECOND` 的别名：两处各自写 15 迟早会漂。
+
+### 28.7 这一批为什么保留 `sim/Task.ts`
+
+老的 `MoveTask` / `TurnTask` / harvester 任务都 `extends` 自研 `Task`，
+而它们要到 B6b / B6c 才被替换。直接删会连锁改 7 个文件并且没有验收手段。
+
+于是 `sim/Task.ts` 改成**兼容门面**：`TaskStatus` 从新枚举 re-export（两个枚举
+并存会让人比错值），`Task` 继承新基类并补回 `tick()` / `onTick` 默认实现 /
+旧版 `cancel` 语义，`WaitTicksTask` 等四个原语各加一个 `tick()` 方法。
+
+**没有接通 `UnitOrders` → `TaskRunner`**：`TaskRunner.tickTask` 会检查
+`object.isSpawned`，而旧实体上没有这个字段，接过去会让所有单位当场停摆。
+这是有意的"两套驱动并存一版"，B6c 删掉门面时一并收口。
+
+### 28.8 验收
+
+`tasktest.mjs`（B6a 专项）**32 条**，九组：
+
+| 组 | 覆盖 |
+|---|---|
+| A | `TaskStatus` 五个数值与名字集合 |
+| B | `Task` 七个默认值、`setCancellable`/`setBlocking` 链式返回 |
+| C | `cancel` 的四种前置状态（含 NotStarted+children 抛错） |
+| D | 非阻塞同帧排空、阻塞中断、`processedTasks` 防自旋 |
+| E | `!isSpawned` 整队不跑且状态不变 |
+| F | `waitingForChildrenToFinish` 挂起与恢复 |
+| G | `WaitTicksTask` 的 n+1、取消短路、`TaskGroup` 顺序、`CallbackTask` 单次、`WaitMinutesTask` = 900·min |
+| H | `GameSpeed` 六档倍率与 base 值 |
+| I | 65 个事件类、`EventType` 无重复占用、`type` 自洽、六个载荷字段名 |
+
+跑测试时踩到的两个坑（都已写进断言注释）：
+
+- **同一个数组连 tick 两次是对的，重新传 `[t]` 是错的**：`tickChildren` 完成后
+  会把任务从数组里 `splice` 掉；再传一个新建的 `[t]` 会让 `tickChildren` 看到
+  `Finished` 状态并抛 `Unhandled task status Finished`。这是原版的正确行为，
+  不是缺陷。
+- **可选参数属性仍然存在于实例上**：`PlayerResignedEvent.assetsRedistributed`
+  声明为 `?`，但 TS 的参数属性会无条件赋值，所以 `getOwnPropertyNames` 里
+  有它、值为 `undefined`。断言要写成"属性在、值为 undefined"。
+
+全量回归（19 套件 / **523 条**）：
+
+| 套件 | 结果 | 套件 | 结果 |
+|---|---|---|---|
+| mathtest | 40 | menutest | 11 |
+| rulestest | 63 | assettest | 20 |
+| combattest | 71 | inputtest | 20 |
+| movetest | 18 | featuretest | 14 |
+| crowdtest | 7 | harvesttest | 6 |
+| phystest | 10 | maptest | 21 |
+| occltest | 5 | maptest2 | 63 |
+| dirtest | 9 | buildingtest | 13 |
+| speedtest | 12 | objecttest | 88 |
+| tasktest | 32 | | |
+
+`battletest`（21 杀 17 损）与 `smoke`（16 单位 / 9 建筑 / 60fps）均 `ERRORS 0`。
+`tsc --noEmit` 0 错误，`web-mobile` 构建通过。
+
+**已知风险**：`TaskRunner` 目前只有测试在用，主循环仍走旧 `UnitOrders.tick`。
+真正的切换发生在 B6c（`UnitOrderTrait`）——届时需要一起把 `isSpawned` 补到
+所有实体上，否则 `tickChildren` 会认为每个单位都已消失。

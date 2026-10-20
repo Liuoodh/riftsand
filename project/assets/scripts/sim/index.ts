@@ -69,14 +69,96 @@ export { NotifyHealthChange } from './gameobject/trait/interface/NotifyHealthCha
 export { NotifyHeal } from './gameobject/trait/interface/NotifyHeal';
 export { NotifyTick } from './gameobject/trait/interface/NotifyTick';
 export { NotifyWarpChange } from './gameobject/trait/interface/NotifyWarpChange';
+export { NotifyCrash } from './gameobject/trait/interface/NotifyCrash';
+export { NotifyOrder } from './gameobject/trait/interface/NotifyOrder';
+export { NotifySell } from './gameobject/trait/interface/NotifySell';
+export { NotifyTeleport } from './gameobject/trait/interface/NotifyTeleport';
+export { NotifyBuildStatus } from './gameobject/trait/interface/NotifyBuildStatus';
+export { NotifyDestroy } from './gameobject/trait/interface/NotifyDestroy';
+export { NotifyOwnerChange } from './gameobject/trait/interface/NotifyOwnerChange';
+export { NotifySpawn } from './gameobject/trait/interface/NotifySpawn';
+export { NotifyUnspawn } from './gameobject/trait/interface/NotifyUnspawn';
+export { NotifyTileChange } from './gameobject/trait/interface/NotifyTileChange';
 
-/* events */
+/* events — the full 68-file catalogue from game/event/ */
+export { AllianceChangeEvent } from './event/AllianceChangeEvent';
+export { BridgeRepairEvent } from './event/BridgeRepairEvent';
+export { BuildingCaptureEvent } from './event/BuildingCaptureEvent';
+export { BuildingEvacuateEvent } from './event/BuildingEvacuateEvent';
+export { BuildingFailedPlaceEvent } from './event/BuildingFailedPlaceEvent';
+export { BuildingGarrisonEvent } from './event/BuildingGarrisonEvent';
+export { BuildingInfiltrationEvent } from './event/BuildingInfiltrationEvent';
+export { BuildingPlaceEvent } from './event/BuildingPlaceEvent';
+export { BuildingRepairFullEvent } from './event/BuildingRepairFullEvent';
+export { BuildingRepairStartEvent } from './event/BuildingRepairStartEvent';
+export { BuildStatusChangeEvent } from './event/BuildStatusChangeEvent';
+export { CheerEvent } from './event/CheerEvent';
+export { CratePickupEvent } from './event/CratePickupEvent';
+export { DeployNotAllowedEvent } from './event/DeployNotAllowedEvent';
+export { EnterObjectEvent } from './event/EnterObjectEvent';
+export { EnterTileEvent } from './event/EnterTileEvent';
+export { EnterTransportEvent } from './event/EnterTransportEvent';
+export { EventMap } from './event/EventMap';
 export { EventType } from './event/EventType';
+export { FactoryProduceUnitEvent } from './event/FactoryProduceUnitEvent';
+export { HealthChangeEvent } from './event/HealthChangeEvent';
+export { InflictDamageEvent } from './event/InflictDamageEvent';
+export { InsufficientFundsEvent } from './event/InsufficientFundsEvent';
+export { LeaveTransportEvent } from './event/LeaveTransportEvent';
+export { LightningStormCloudEvent } from './event/LightningStormCloudEvent';
+export { LightningStormManifestEvent } from './event/LightningStormManifestEvent';
+export { ObjectAttackedEvent } from './event/ObjectAttackedEvent';
+export { ObjectCloakChangeEvent } from './event/ObjectCloakChangeEvent';
+export { ObjectCrashingEvent } from './event/ObjectCrashingEvent';
+export { ObjectDestroyEvent } from './event/ObjectDestroyEvent';
+export { ObjectDisguiseChangeEvent } from './event/ObjectDisguiseChangeEvent';
+export { ObjectLandEvent } from './event/ObjectLandEvent';
+export { ObjectLiftOffEvent } from './event/ObjectLiftOffEvent';
+export { ObjectMorphEvent } from './event/ObjectMorphEvent';
+export { ObjectOwnerChangeEvent } from './event/ObjectOwnerChangeEvent';
+export { ObjectSellEvent } from './event/ObjectSellEvent';
+export { ObjectSpawnEvent } from './event/ObjectSpawnEvent';
+export { ObjectTeleportEvent } from './event/ObjectTeleportEvent';
+export { ObjectUnspawnEvent } from './event/ObjectUnspawnEvent';
+export { PingLocationEvent } from './event/PingLocationEvent';
+export { PlayerDefeatedEvent } from './event/PlayerDefeatedEvent';
+export { PlayerDroppedEvent } from './event/PlayerDroppedEvent';
+export { PlayerResignedEvent } from './event/PlayerResignedEvent';
+export { PowerChangeEvent } from './event/PowerChangeEvent';
+export { PowerLowEvent } from './event/PowerLowEvent';
+export { PowerRestoreEvent } from './event/PowerRestoreEvent';
+export { PrimaryFactoryChangeEvent } from './event/PrimaryFactoryChangeEvent';
+export { RadarEvent } from './event/RadarEvent';
+export { RadarOnOffEvent } from './event/RadarOnOffEvent';
+export { RallyPointChangeEvent } from './event/RallyPointChangeEvent';
+export { ShipSubmergeChangeEvent } from './event/ShipSubmergeChangeEvent';
+export { StalemateDetectEvent } from './event/StalemateDetectEvent';
+export { SuperWeaponActivateEvent } from './event/SuperWeaponActivateEvent';
+export { SuperWeaponReadyEvent } from './event/SuperWeaponReadyEvent';
+export { TimerExpireEvent } from './event/TimerExpireEvent';
+export { TriggerAnimEvent } from './event/TriggerAnimEvent';
+export { TriggerEvaEvent } from './event/TriggerEvaEvent';
+export { TriggerSoundFxEvent } from './event/TriggerSoundFxEvent';
+export { TriggerStopSoundFxEvent } from './event/TriggerStopSoundFxEvent';
+export { TriggerTextEvent } from './event/TriggerTextEvent';
+export { UnitDeployUndeployEvent } from './event/UnitDeployUndeployEvent';
+export { UnitPromoteEvent } from './event/UnitPromoteEvent';
+export { UnitRecycleEvent } from './event/UnitRecycleEvent';
+export { UnitRepairFinishEvent } from './event/UnitRepairFinishEvent';
+export { UnitRepairStartEvent } from './event/UnitRepairStartEvent';
 export { WarheadDetonateEvent } from './event/WarheadDetonateEvent';
 export { WeaponFireEvent } from './event/WeaponFireEvent';
-export { ObjectAttackedEvent } from './event/ObjectAttackedEvent';
-export { InflictDamageEvent } from './event/InflictDamageEvent';
-export { HealthChangeEvent } from './event/HealthChangeEvent';
+
+/* task system */
+export { TaskStatus } from './gameobject/task/system/TaskStatus';
+export { Task } from './gameobject/task/system/Task';
+export { TaskRunner } from './gameobject/task/system/TaskRunner';
+export { TaskGroup } from './gameobject/task/system/TaskGroup';
+export { CallbackTask } from './gameobject/task/system/CallbackTask';
+export { WaitTicksTask } from './gameobject/task/system/WaitTicksTask';
+export { WaitMinutesTask } from './gameobject/task/system/WaitMinutesTask';
+export type { TargetLinesConfig } from './gameobject/task/system/TargetLinesConfig';
+export { GameSpeed } from './GameSpeed';
 
 /* rules */
 export { RULES, Rules, RULES_CONTENT } from './rules';
@@ -207,12 +289,6 @@ export { ChronoLocomotor } from './gameobject/locomotor/ChronoLocomotor';
 export { MissileLocomotor } from './gameobject/locomotor/MissileLocomotor';
 export { LocomotorFactory } from './gameobject/locomotor/LocomotorFactory';
 
-/* trait interfaces + the two tasks the object core needs */
-export { NotifyDestroy } from './gameobject/trait/interface/NotifyDestroy';
-export { NotifyOwnerChange } from './gameobject/trait/interface/NotifyOwnerChange';
-export { NotifySpawn } from './gameobject/trait/interface/NotifySpawn';
-export { NotifyUnspawn } from './gameobject/trait/interface/NotifyUnspawn';
-export { NotifyTileChange } from './gameobject/trait/interface/NotifyTileChange';
-export { NotifyBuildStatus } from './gameobject/trait/interface/NotifyBuildStatus';
+/* legacy tasks from the object core (die in B6c, replaced by gameobject/task/**) */
 export { TurnTask } from './task/TurnTask';
 export { WaitForBuildUpTask } from './task/WaitForBuildUpTask';
