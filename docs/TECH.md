@@ -226,8 +226,9 @@ node tools/battletest.mjs
 | `buildingtest` | 建筑 trait 族 | 13 |
 | `objecttest` | 对象模型：type 谓词 / Traits 双路径 / tick 快照 / 位置派生 / 三态建筑 / 视线与碰撞 | 88 |
 | `tasktest` | 任务系统：TaskStatus 数值 / TaskRunner 排空与挂起 / 原语 off-by-one / 事件目录自洽 | 32 |
+| `movetasktest` | 移动子系统：四态机 / 取消快照 / 三人一格 / 基础速度 / 看门狗 / 碾压与传送 / 让路扫描序 / 垂直起降 / 定翼驻泊 / 靠港预订 | 70 |
 
-**合计 19 套件 / 523 条。**
+**合计 20 套件 / 593 条。**
 
 另有探针型脚本（输出 JSON 不判定）：`steertest` / `walktest` / `pathsim` / `physshowcase`。
 

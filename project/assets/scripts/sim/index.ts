@@ -79,6 +79,13 @@ export { NotifyOwnerChange } from './gameobject/trait/interface/NotifyOwnerChang
 export { NotifySpawn } from './gameobject/trait/interface/NotifySpawn';
 export { NotifyUnspawn } from './gameobject/trait/interface/NotifyUnspawn';
 export { NotifyTileChange } from './gameobject/trait/interface/NotifyTileChange';
+/*
+ * The *global* tile-change hook shares its name with the per-object one above.
+ * Two different `Symbol()`s, two subscriber lists — re-exported under a distinct
+ * name because this module is a flat namespace. See REFERENCE-PARITY §27.
+ */
+export { NotifyTileChange as GlobalNotifyTileChange } from './trait/interface/NotifyTileChange';
+export { NotifyElevationChange } from './trait/interface/NotifyElevationChange';
 
 /* events — the full 68-file catalogue from game/event/ */
 export { AllianceChangeEvent } from './event/AllianceChangeEvent';
@@ -253,6 +260,26 @@ export { OreOverlayStub } from './content/oreOverlay';
 /* object core — the model that replaces `game/Entities.ts` (B5) */
 export { Traits } from './Traits';
 export { MoveTrait, MoveState, MoveResult, CollisionState } from './MoveTrait';
+/*
+ * B6b — the movement subsystem, ported against the object model. `MoveTrait`
+ * exists twice on purpose: the name above is the legacy trait the live game
+ * still drives (`World.ts`), the alias below is the reference's own trait, which
+ * takes a `GameState` argument on every call. They share the enums.
+ */
+export { MoveTrait as GameObjectMoveTrait } from './gameobject/trait/MoveTrait';
+export { MoveTask } from './gameobject/task/move/MoveTask';
+export type { MoveOptions } from './gameobject/task/move/MoveTask';
+export { MoveAsideTask } from './gameobject/task/move/MoveAsideTask';
+export { MoveTargetTask } from './gameobject/task/move/MoveTargetTask';
+export { MoveInsideTask } from './gameobject/task/move/MoveInsideTask';
+export { MoveOutsideTask } from './gameobject/task/move/MoveOutsideTask';
+export { MoveToBlockTask } from './gameobject/task/move/MoveToBlockTask';
+export { AttackMoveTask } from './gameobject/task/move/AttackMoveTask';
+export { MoveInWeaponRangeTask, STRAFE_CLOSE_ENOUGH } from './gameobject/task/move/MoveInWeaponRangeTask';
+export { MoveToDockTask } from './gameobject/task/MoveToDockTask';
+export { ScatterTask } from './gameobject/task/ScatterTask';
+export { WingedLocomotor } from './gameobject/locomotor/WingedLocomotor';
+export { JumpjetLocomotor } from './gameobject/locomotor/JumpjetLocomotor';
 export { GameObject } from './gameobject/GameObject';
 export { Techno } from './gameobject/Techno';
 export { Unit } from './gameobject/Unit';

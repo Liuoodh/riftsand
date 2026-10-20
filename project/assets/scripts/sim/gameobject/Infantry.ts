@@ -19,7 +19,7 @@ import { ObjectType } from '../type/ObjectType';
 import { ZoneType } from './unit/ZoneType';
 import { StanceType } from './StanceType';
 import { InfDeathType } from './InfDeathType';
-import { MoveTrait } from '../MoveTrait';
+import type { MoveTrait } from './trait/MoveTrait';
 import { CrateBonuses } from './unit/CrateBonuses';
 import { Techno } from './Techno';
 

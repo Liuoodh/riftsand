@@ -2486,3 +2486,209 @@ speed 6 → 60 tick/s → ×4.0
 **已知风险**：`TaskRunner` 目前只有测试在用，主循环仍走旧 `UnitOrders.tick`。
 真正的切换发生在 B6c（`UnitOrderTrait`）——届时需要一起把 `isSpawned` 补到
 所有实体上，否则 `tickChildren` 会认为每个单位都已消失。
+
+---
+
+## 29. v0.25-B6b：移动子系统（原版 15 文件 / 2,770 行）
+
+| 原版 | 行 | 落点 |
+|---|---:|---|
+| `gameobject/trait/MoveTrait.ts` | 301 | `sim/gameobject/trait/MoveTrait.ts` |
+| `task/move/MoveTask.ts` | 1,037 | `sim/gameobject/task/move/MoveTask.ts` |
+| `task/move/MoveInWeaponRangeTask.ts` | 286 | 同目录 |
+| `task/MoveToDockTask.ts` | 151 | `sim/gameobject/task/` |
+| `task/move/MoveAsideTask.ts` | 93 | `sim/gameobject/task/move/` |
+| `task/move/AttackMoveTask.ts` | 57 | 同目录 |
+| `task/move/MoveTargetTask.ts` | 47 | 同目录 |
+| `task/move/MoveToBlockTask.ts` | 40 | 同目录 |
+| `task/ScatterTask.ts` | 40 | `sim/gameobject/task/` |
+| `task/move/MoveInsideTask.ts` | 34 | 同目录 |
+| `task/move/MoveOutsideTask.ts` | 13 | 同目录 |
+| `locomotor/WingedLocomotor.ts` | 336 | `sim/gameobject/locomotor/` |
+| `locomotor/JumpjetLocomotor.ts` | 323 | 同目录 |
+| `trait/interface/NotifyElevationChange.ts` | 6 | `sim/trait/interface/` |
+| `trait/interface/NotifyTileChange.ts`（全局） | 6 | 同目录 |
+
+`ExitFactoryTask`（95）与 `AttackMoveTargetTask`（107）**没有**随本批落地：两者
+一个 `extends AttackTask`、一个 `import AttackTask`，而 `AttackTask` 是 682 行、
+挂在 B6c。硬塞进来等于让 B6b 反向依赖下一批。
+
+### 29.1 `MoveTrait` 与 `MoveTask` 是同一块逻辑
+
+原版两者互相 `import`（`MoveTrait.isMoveTask` 要 `instanceof MoveTask`，
+`MoveTask` 要读写 `moveTrait` 的全部状态）。这不是设计失误而是必然：状态机
+的**状态**在 trait 里，**迁移**在 task 里。所以本批把两者一起移植，没有别的
+切法。
+
+代价是运行时循环依赖。ESM 下安全的两个前提：
+
+1. `MoveTrait` 只在方法体里引用 `MoveTask`，不在模块求值期；
+2. `MoveInsideTask` / `MoveOutsideTask` / `MoveTargetTask` / `AttackMoveTask` /
+   `MoveInWeaponRangeTask` 都 `extends MoveTask`，但 `MoveTask` **不**反向
+   `import` 它们，所以「Class extends value undefined」不会发生。
+
+唯一需要小心的是 `MoveTask ↔ MoveAsideTask`：两边都在 `onTick` 里 `new` 对方，
+都在方法体里，安全。
+
+### 29.2 `onStart` 之后的第一次 `onTick` 会**先丢掉脚下的格**
+
+第一次 tick 时 `currentWaypoint` 还是 `undefined`，`findIndex` 返回 `-1`，
+于是走 `path.pop()` —— 去掉的是**起点**（路径是「终点在前、起点在后」）。
+如果按直觉实现成 `if (waypoint) 才 pop`，单位会在出发的格子上原地转两帧，
+而且路径里永远多留一个节点，`hasReachedDestination` 也就永远为假。
+
+配套的是 `splice(waypointIndex)`：到达某个路点时删掉它**以及它之后**的所有
+节点（那些更靠近起点）。所以路径只会从尾部缩短，`path[0]` 始终是终点，
+`destinationLeptons` 不需要重算。
+
+### 29.3 障碍级联的**顺序**就是手感
+
+`PlanMove` 里对 `pathToCheck` 的遍历顺序写死了一串判断，换任何两条的顺序
+都会改变行为。最值得单说的三条：
+
+* **「不为一辆更慢的同向车刹车」**（`pathToCheck.length === 1 && … &&
+  currentVelocity <= blockerVelocity && unit.direction === blocker.direction`）
+  —— 这一条是车队能流动的唯一原因。少了它，跟在后面的坦克会每帧停车。
+* **同向追尾 5 格回退** —— 不是往前挤，而是退到 5 格以前的一个空格重新接近。
+  这就是「坦克队列排成一条线而不是挤成一团」的来源。
+* **`allObstaclesAreBlockers`** —— 200 tick 还没绕过去时，把「所有障碍都算
+  阻挡」交给寻路器，等于放弃绕行、强制做决定。没有这个兜底，两个互不相让的
+  单位会永远停在原地（每帧都判「等」）。
+
+### 29.4 三个**抄错会静默**的地方
+
+1. **`closeEnoughTiles === 0` 与「已经贴脸」的短路**：
+   ```ts
+   if (!(this.options?.closeEnoughTiles === 0 ||
+       (Math.abs(unit.tile.rx - this.targetTile.rx) <= 1 &&
+        Math.abs(unit.tile.ry - this.targetTile.ry) <= 1))) { /* 重新寻路 */ }
+   ```
+   取反包住整个或表达式。写成 `if (closeEnoughTiles !== 0 || 距离 > 1)` 是
+   等价的——但写成 `&&` 会让「刚好在目标旁边」的单位陷入无限重寻路。
+2. **`unreachableTargets.length > MAX`** 是 `>` 不是 `>=`：允许记住 6 个失败
+   目标才放弃。差一在这里表现为「绕到第六个死胡同时才认输」。
+3. **`forceCancel` 的快照顺序**：先 `unreservePathNodes()`，再写
+   `lastMoveResult`，再 `onEnd`，最后才存 `lastTargetOffset` / `lastVelocity`。
+   `onEnd` 里会清 `currentWaypoint`，把快照写在它前面就会拿到已清空的状态。
+
+### 29.5 碾压规则：传送**不**放过友军
+
+`MoveTrait.handleTileChange` 的过滤条件
+
+```ts
+(!(obj.isTechno() && !teleporting) || !gameState.areFriendly(obj, gameObject))
+```
+
+读起来像「传送时放过友军」，实际相反：
+
+| 目标 | 正常行驶 | 传送 |
+|---|---|---|
+| 非 Techno（树、墙） | 碾 | 碾 |
+| 敌方 Techno | 碾 | 碾 |
+| **友方 Techno** | **不碾** | **碾** |
+
+因为 `teleporting = true` 时 `!(isTechno && false)` 直接为真，跳过了后面的
+敌我判断。语义上说得通：瞬移落点必须清空，不管站的是谁。测试里钉死了这两行
+（F2/F3），免得以后有人「顺手修正」成对称逻辑。
+
+### 29.6 原版内部的 **三处自相矛盾**，按契约归一
+
+这一批第一次遇到**同一份参考实现内部对不上**的情况。三处都只在
+`MoveInWeaponRangeTask` / `MoveTrait` 里，且都是「调用点与签名不符」：
+
+| 位置 | 原版写法 | 归一为 | 理由 |
+|---|---|---|---|
+| `MoveInWeaponRangeTask` 构造 | `super(game, tile, unit, {...})` | `super(game, tile, false, {...})` | `MoveTask` 第三参是 `toBridge: boolean`；其余 8 个子类全传布尔 |
+| 同文件 `findRelocationTile` | `(fromTile, toTile, unit)` | `(preferredTile, preferredBridge, unit)` | 基类签名是 `(tile, bridge, unit)`，调用点按位置转发 |
+| `MoveTrait.teleportUnitToTile` | `new ObjectTeleportEvent(obj, fromTile, oldTile)` | `(obj, true, oldTile)` | 事件签名是 `(target, isChronoshift: boolean, prevTile)`；`MoveTask` 里就是 `(unit, true, oldTile)` |
+
+第一条若照抄，每个攻击者都会认为自己在桥面层（`toBridge` 是对象 → 真值），
+寻路全部走桥层。这不是「实现差异」，是参考文件的转录噪声，因此按契约修正并
+在此登记。
+
+### 29.7 一处**故意保留**的畸形表达式
+
+`MoveInsideTask.canStopAtTile`：
+
+```ts
+return (!this.isCancelling() || !isOccupied) && !(!this.isCancelling() && !isOccupied);
+```
+
+令 `A = isCancelling`、`B = isOccupied`，化简得 `A XOR B`。这显然是转录事故，
+但**没有改**——因为改成直觉上的 `B && !A` 会改变「取消时站在目标格上」的行为，
+而那段行为又和 `MoveTask` 的 `cancelProcessed` / `cancelRepositionPending`
+互相咬合。没有原版可对照时，改一个自己都说不清的分支比留着更危险。
+文件头写明了这一点。
+
+### 29.8 `MoveAsideTask` 的自比较：**这一处改了**
+
+```ts
+.filter(unit => unit.isUnit() && unit.owner === unit.owner && …)
+```
+
+箭头参数遮蔽了外层 `unit`，`owner === owner` 恒真。照抄的后果是**推挤时不分
+敌我**——你的坦克可以把敌方坦克推到一边。这不是「实现差异」，是恒真式，所以
+改成 `obj.owner === unit.owner`，并在文件头与 §29.9 登记。
+
+同批还顺手修了一个**跨批缺陷**：`sim/gameobject/Infantry.ts` 的
+`moveTrait: MoveTrait` 一直指向 B0 的旧 `MoveTrait`（`../MoveTrait`）。类型上
+不报错，但两个同名类字段不兼容，等接线时才炸。改为 `import type … from
+'./trait/MoveTrait'`。
+
+### 29.9 枚举收敛
+
+`MoveState` / `MoveResult` / `CollisionState` 原先在 `sim/MoveTrait.ts` 里有一份，
+本批在 `gameobject/trait/MoveTrait.ts` 又出现一份。两份数值相同、比较仍能工作，
+但 `Object.values`、序列化和「以后有人加一项」都会分叉。处理方式与 B6a 的
+`TaskStatus` 一致：**新文件是唯一定义处**，`sim/MoveTrait.ts` 改成
+`import … ; export { … }`，旧类保留但只做门面。
+
+`index.ts` 里因此出现两个 `MoveTrait`：原名仍指旧类（主循环在用），新类以
+`GameObjectMoveTrait` 别名导出。全局 `NotifyTileChange` 与被测对象级同名，
+同样以 `GlobalNotifyTileChange` 别名导出，注释标明「两个不同 Symbol」。
+
+### 29.10 `WingedLocomotor` 的反混淆
+
+原版这份文件到达时是单字母标识符（`e, t, i, r, s, a, n, o, l, h, u, d, g, p,
+m, f, y, T, v, b, S, w, C`）。移植时逐个还原为语义名，控制流一字未动，并在
+注释里标出关键变量对应的原字母。唯一「读起来像 bug」的地方是：
+
+```ts
+if ((S !== 0 && !circleContainsPoint(turnCircle, i)) ||
+    (maneuverType === HoverStrafe || n > LPT
+        ? (deceleratingToTurn = true)
+        : maneuverType === None && (maneuverType = HoverStrafe))) { }
+```
+
+空 `if` 体 + 条件里带副作用。按求值顺序展开后等价于：
+
+```ts
+if (speed !== 0 && !circleContains(dest)) {
+    // 目标在转弯圆外，保持速度
+} else if (maneuverType === HoverStrafe || dist > cell) {
+    deceleratingToTurn = true;
+} else if (maneuverType === None) {
+    maneuverType = HoverStrafe;
+}
+```
+
+写成显式分支而不是留着空 `if`，是为了让下一个人不必再推一遍。
+
+### 29.11 验收
+
+`tsc --noEmit` 0 错误。
+
+`movetasktest`（新增，70 条，十一组 A–K）：
+
+```
+A 状态机 13 · B 取消 6 · C 可停格 5 · D 基础速度 6 · E 看门狗 6
+F 换格 8 · G 让路 4 · H 垂直起降 7 · I 定翼 5 · J 靠港 5 · K 散开 4
+```
+
+全量 **20 套件 / 593 条**全绿；`battletest`（21 杀 22 损）与 `smoke`
+（16 单位 / 9 建筑 / 60fps）均 `ERRORS 0`；`web-mobile` 构建通过。
+
+**已知风险**：与 B5a/B6a 相同——`MoveTrait` 与 `MoveTask` 目前**未接线**到
+主循环，正确性由 `movetasktest` 的桩保证，真实地图（桥、斜坡、拥挤路口）
+尚未验证。B6c 接 `UnitOrderTrait` 时才是第一次实跑，届时应先做「影子接线」：
+并行造对象但不驱动，逐帧比对位置与 `lastMoveResult`。

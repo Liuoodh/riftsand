@@ -11,24 +11,15 @@ import { Vec2 } from './Math2';
 import type { PathNode } from './map/Terrain';
 import { TileOccupation } from './map/TileOccupation';
 
-export enum MoveState {
-    Idle = 0,
-    ReachedNextWaypoint = 1,
-    PlanMove = 2,
-    Moving = 3,
-}
+/*
+ * One set of enums for the whole build. The ported object model owns them now
+ * (`gameobject/trait/MoveTrait.ts`); this legacy trait imports and re-exports
+ * them so the live game and the new tree can never disagree about what
+ * `PlanMove` is.
+ */
+import { MoveState, MoveResult, CollisionState } from './gameobject/trait/MoveTrait';
 
-export enum MoveResult {
-    Success = 0,
-    Cancel = 1,
-    CloseEnough = 2,
-    Fail = 3,
-}
-
-export enum CollisionState {
-    Waiting = 0,
-    Resolved = 1,
-}
+export { MoveState, MoveResult, CollisionState };
 
 export const TICK = 1 / 60;
 
