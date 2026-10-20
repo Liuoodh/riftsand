@@ -186,7 +186,14 @@ node "<Cocos>/resources/app.asar.unpacked/node_modules/typescript/bin/tsc" -p ts
 
 ### 8.1 自动回归
 
-`tools/` 下两个脚本用 puppeteer-core + 本机 Chrome headless 跑真实构建产物，无需手动点击：
+所有脚本都是 puppeteer-core + 本机 Chrome headless，跑真实构建产物，无需手动点击。
+先起一个静态服务（默认端口 8950，脚本的默认 URL 指向它）：
+
+```bash
+cd project/build/web-mobile && python -m http.server 8950 --bind 127.0.0.1
+```
+
+**端到端**
 
 ```bash
 # 静态检查：能否启动、开局单位/建筑数量、帧率、控制台错误、关键界面截图
@@ -194,21 +201,34 @@ node tools/smoke.mjs
 
 # 动态检查：?auto=1 进对局，内置脚本玩家 + AI 快进 6 分钟，输出经济/兵力/超武/老兵
 node tools/battletest.mjs
-
-# 触屏与系统：CDP 真实触摸事件 + 直接调用模拟 API，回归 20 项
-node tools/inputtest.mjs
-
-# 物理：地形/碰撞/碾压/弹道/防空/防穿模，回归 10 项
-node tools/phystest.mjs
-
-# 物理截图：交火爆炸与矿区作业
-node tools/physshowcase.mjs
 ```
 
-`inputtest.mjs` 通过 `canvas/App` 上的 `RiftApp` 实例读取 `game`、`cam`、`ui` 状态，覆盖：
-框选 / 双击同类 / 双指平移与缩放 / 指令盘 / 编队 / 批量生产 / 矿脉吸附 /
-姿态与路径开关 / 建筑队列就绪与放置 / 超级武器充能与伤害 / 工兵接管。
-失败时返回非零退出码，可直接进 CI。
+**按子系统**（失败即非零退出码，可直接进 CI）
+
+| 脚本 | 覆盖 | 条数 |
+|---|---|---:|
+| `mathtest` | 数学地基：查表三角、取整、区间 | 40 |
+| `rulestest` | 规则全表：陆地速度、护甲、驻军、超武 | 63 |
+| `combattest` | 战斗数学：computeDamage / detonate / 事件链 | 71 |
+| `maptest` | 地图生成与地形语义 | 21 |
+| `maptest2` | 地图层专项：五个矩形 / 八向表 / 通行图 / 地表派生 / 迷雾 / 遮挡 / 桥链 | 63 |
+| `movetest` | 移动与互堵：对向、让路、容量、可抵达性 | 18 |
+| `crowdtest` | 人群挤压与分离 | 7 |
+| `phystest` | 地形/碰撞/碾压/弹道/防空/防穿模 | 10 |
+| `occltest` | 建筑遮挡 | 5 |
+| `dirtest` | 八向行驶的图块朝向抖动 | 9 |
+| `speedtest` | 速度与减速 | 12 |
+| `menutest` | 菜单/建造面板 | 11 |
+| `assettest` | 资产加载与图集 | 20 |
+| `inputtest` | 框选/指令盘/编队/生产/超武/工兵接管 | 20 |
+| `featuretest` | 玩法特性 | 14 |
+| `harvesttest` | 采矿三件套 | 6 |
+| `buildingtest` | 建筑 trait 族 | 13 |
+
+另有探针型脚本（输出 JSON 不判定）：`steertest` / `walktest` / `pathsim` / `physshowcase`。
+
+> `inputtest` 通过 `canvas/App` 上的 `RiftApp` 实例读取 `game`、`cam`、`ui` 状态。
+> 失败时返回非零退出码，可直接进 CI。
 
 为此保留两个开发钩子（不会影响正常玩家）：
 
