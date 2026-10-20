@@ -33,7 +33,7 @@ import { CurvePath } from '../../math/CurvePath';
 import { LineCurve } from '../../math/LineCurve';
 import { QuadraticBezierCurve } from '../../math/QuadraticBezierCurve';
 import * as math from '../../util/math';
-import { TurnTask } from '../../task/TurnTask';
+import { TurnTask } from '../task/TurnTask';
 
 enum WaypointType {
     None = 0,

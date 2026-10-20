@@ -6,10 +6,25 @@
  * layout. Hand-written files (the vector / matrix / quaternion layer, which the
  * reference inherits from three.js) are NOT produced here.
  *
- * Run:  node tools/port-b1.mjs
+ * Run:  node tools/port-b1.mjs --force
+ *
+ * **This is a one-shot generator.** Every file it writes has since been
+ * hand-polished: `QuadTree` imports `../math/*` instead of `@/game/math/*`,
+ * `LandType` dropped the obsolete `TileKind` mapper (terrain is now the
+ * reference `TerrainType`), `PowerupType` gained `UNSUPPORTED_POWERUP_TYPES`.
+ * Re-running without `--force` would silently undo all of that, so the guard
+ * below refuses by default.
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+
+if (!process.argv.includes('--force')) {
+    console.error(
+        '[port-b1] refused: this generator overwrites hand-polished B1 output.\n' +
+            '          Re-run with --force only if you intend to re-port from scratch.',
+    );
+    process.exit(1);
+}
 
 const ROOT = resolve(process.cwd());
 const SRC = resolve(ROOT, 'RedAlert2-Android-main/redalert2/src');

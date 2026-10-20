@@ -25,7 +25,7 @@ import { Techno } from './Techno';
 import { NotifyBuildStatus } from './trait/interface/NotifyBuildStatus';
 import { BuildStatusChangeEvent } from '../event/BuildStatusChangeEvent';
 import { Task } from '../Task';
-import { WaitForBuildUpTask } from '../task/WaitForBuildUpTask';
+import { WaitForBuildUpTask } from './task/WaitForBuildUpTask';
 
 export enum BuildStatus {
     BuildUp = 0,

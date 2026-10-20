@@ -1,13 +1,16 @@
 /**
  * Compatibility facade over `gameobject/task/system/**` — **scheduled for
- * deletion in B6c.**
+ * deletion in B9, when `game/Game.ts` is replaced by the ported orchestrator.**
  *
  * Before B6a this file *was* the task system: a home-grown `Task` with its own
  * `tick()` driver, a three-state `TaskStatus`, and a `UnitOrders` queue. The
  * faithful port now lives in `sim/gameobject/task/system/`, and that port is
  * materially different in four ways (see `TaskRunner`'s header). This file
- * exists only so the not-yet-ported `MoveTask` / `TurnTask` / harvester tasks
- * keep compiling and behaving exactly as they did.
+ * survives only because the *live* hand-written engine (`game/Game.ts`) and the
+ * two harvester tasks written for it (`sim/task/harvester/**`) drive tasks
+ * through it. B6c removed the last two reference-faithful tasks from this
+ * directory (`TurnTask`, `WaitForBuildUpTask`), so nothing new should be added
+ * here.
  *
  * What is shared and what is not:
  *

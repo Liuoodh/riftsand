@@ -171,13 +171,13 @@
 | 原版总计 | 1,207 | 125,799 |
 | 豁免（不做 / 原创） | 605 | 74,160 |
 | **应移植** | **602** | **51,639** |
-| 其中已移植 | 279 | 24,038 |
-| **待移植** | **323** | **≈27,601** |
+| 其中已移植 | 307 | 27,255 |
+| **待移植** | **295** | **≈24,384** |
 
-> 已移植的 24,038 行 = B1 数学地基（40 / 1,411）+ B2 规则全表（37 / 2,635）
+> 已移植的 27,255 行 = B1 数学地基（40 / 1,411）+ B2 规则全表（37 / 2,635）
 > + B3 战斗数学（33 / 3,258）+ B4 地图地形（20 / 4,074）+ B5a 对象模型（33 / 3,004）
 > + B6a 任务系统与事件目录（81 / 785）+ B6b 移动子系统（15 / 2,770）
-> + 此前 19 / 6,101。
+> + B6c 其余任务与指令接线（28 / 3,217）+ 此前 19 / 6,101。
 > B4 多出的 1,200 行是注释与 duck-type 接口，其内容层 `sim/content/`（2 / 273）
 > 是原创代码，不计入移植；同时删掉了 ≈1,000 行自研旧实现（`Tiles` / `Passability`）。
 > B5a 同理多出 ≈550 行注释；它的 `factory()` 装配（约 700 行）随 trait 批次落地，
@@ -207,8 +207,8 @@
 | **B5b 装配与弹道** | `Projectile`(948) + `ObjectFactory`(266) + `Debris`(117)。`Projectile.factory` 与 `ObjectFactory` 的装配清单本身就是 trait 目录，故整批后置（两个 aircraft locomotor 已随 B6b 落地） | 3 | 1,331 | B5a → **B6d** | ⏳ |
 | **B6a 任务系统与事件** | `task/system` 8（`Task`/`TaskRunner`/`TaskStatus`/`TaskGroup`/`CallbackTask`/`WaitTicks`/`WaitMinutes`/`TargetLinesConfig`）+ `event/**` 68 + `GameSpeed` | 81 | 785 | B5a | ✅ 完成 |
 | **B6b 移动子系统** | `MoveTrait`(301) + `task/move` 8（`MoveTask` 1,037、`MoveInWeaponRange` 286、`MoveAside`/`MoveTarget`/`MoveInside`/`MoveOutside`/`MoveToBlock`/`AttackMove`）+ `MoveToDock`(151) + `ScatterTask`(40) + `Winged`/`Jumpjet` locomotor(659) + 2 个 `Notify*` 接口。`ExitFactoryTask`/`AttackMoveTargetTask` 依赖 `AttackTask`，后移到 B6c | 15 | 2,770 | B6a | ✅ 完成 |
-| **B6c 其余任务** | `task` 其余 21（`AttackTask` 682、`harvester/*`、`morph/*`、`Enter*Task`、`GarrisonBuildingTask`、`ExitFactoryTask`、`AttackMoveTargetTask` …）+ `UnitOrderTrait` 接线 | 21 | ≈2,212 | B6b | ⏳ |
-| **B6d trait 全族** | 剩余 63 个 `gameobject/trait/*` + 14 个 `interface` + 四个兵种类与 `ObjectFactory` 的 `factory()` 装配（≈700 行） | 63 | ≈6,100 | B6c | ⏳ |
+| **B6c 其余任务与指令接线** | `task` 其余 25（`AttackTask` 682、`EvacuateTransportTask` 243、`EnterTransportTask` 164、`EnterHospitalTask` 134、`harvester/*` 559、`morph/*` 126、`Enter*Task`、`GarrisonBuildingTask`、`ExitFactoryTask`、`AttackMoveTargetTask` …）+ `AttackTrait`(504) + `UnitOrderTrait`(229) + `SequenceType`(37)。顺带删除两个手写旧文件 `sim/task/{TurnTask,WaitForBuildUpTask}.ts` | 28 | 3,217 | B6b | ✅ 完成 |
+| **B6d trait 全族** | 剩余 61 个 `gameobject/trait/*`（5,348，含 `FactoryTrait` 396、`DockTrait` 333、`AirSpawnTrait` 246）+ 四个兵种类与 `ObjectFactory` 的 `factory()` 装配（≈700 行）。16 个 `interface/*` 已在 B6a–B6c 全部落地 | 61 | ≈6,050 | B6c | ⏳ |
 | **B7 指令与动作** | `order/**` 19 + `action/**` 34 | 53 | 2,772 | B6d | ⏳ |
 | **B8 玩家与超武** | `player/**` 7 + `superweapon/**` 11 + `ConstructionWorker` + `GameFactory` + `Alliances` + `StartingUnitsGenerator` + `Country` | 28 | 3,700 | B7 | ⏳ |
 | **B9 编排层** | `Game.ts` 重构 + `World` + `GameMap` + `GameTurnManager` + 事件分发接线 | 90 | ≈3,300 | B8 | ⏳ |

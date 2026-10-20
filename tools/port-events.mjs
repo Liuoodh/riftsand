@@ -16,6 +16,15 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
+if (!process.argv.includes('--force')) {
+    console.error(
+        '[port-events] refused: this generator rewrites every `.meta` uuid, which\n' +
+            '             breaks existing Cocos asset references. Re-run with --force\n' +
+            '             only when you actually mean to regenerate the whole directory.',
+    );
+    process.exit(1);
+}
+
 const OUT = join(import.meta.dirname, '..', 'project', 'assets', 'scripts', 'sim', 'event');
 
 /** @type {Array<[string, string, Array<[string, string, boolean?]>]>} */

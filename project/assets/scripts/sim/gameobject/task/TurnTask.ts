@@ -6,9 +6,18 @@
  * `cancellable = false`: a turn is never interrupted halfway, otherwise the
  * unit's facing and its velocity disagree for a frame and the renderer picks
  * the wrong sprite.
+ *
+ * `spinVelocity` is the *signed* delta the turn produced this tick, not the
+ * target facing — the renderer rolls the hull by it. It must be zeroed on the
+ * final tick, otherwise a unit that finished turning keeps a permanent bank.
+ *
+ * Note this task does nothing per tick except rotate: it is driven by the
+ * owning `TaskRunner`, so `onTick` returning `false` just means "still
+ * turning". A `direction` that is already exact completes on the very first
+ * tick without touching `direction`.
  */
-import { Task } from '../Task';
-import { FacingUtil } from '../gameobject/unit/FacingUtil';
+import { Task } from './system/Task';
+import { FacingUtil } from '../unit/FacingUtil';
 
 export class TurnTask extends Task {
     private direction: number;

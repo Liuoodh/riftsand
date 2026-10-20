@@ -2692,3 +2692,267 @@ F 换格 8 · G 让路 4 · H 垂直起降 7 · I 定翼 5 · J 靠港 5 · K �
 主循环，正确性由 `movetasktest` 的桩保证，真实地图（桥、斜坡、拥挤路口）
 尚未验证。B6c 接 `UnitOrderTrait` 时才是第一次实跑，届时应先做「影子接线」：
 并行造对象但不驱动，逐帧比对位置与 `lastMoveResult`。
+
+---
+
+## 30. v0.25-B6c：其余任务与指令接线（原版 28 文件 / 3,217 行）
+
+| 原版 | 行 | 落点 |
+|---|---:|---|
+| `task/AttackTask.ts` | 682 | `sim/gameobject/task/AttackTask.ts` |
+| `task/EvacuateTransportTask.ts` | 243 | 同目录 |
+| `task/EnterTransportTask.ts` | 164 | 同目录 |
+| `task/EnterHospitalTask.ts` | 134 | 同目录 |
+| `task/move/AttackMoveTargetTask.ts` | 107 | `task/move/` |
+| `task/move/ExitFactoryTask.ts` | 95 | 同目录 |
+| `task/EnterBuildingTask.ts` | 59 | `task/` |
+| `task/GarrisonBuildingTask.ts` | 36 | 同目录 |
+| `task/CaptureBuildingTask.ts` | 37 | 同目录 |
+| `task/ParadropTask.ts` | 33 | 同目录 |
+| `task/RepairBuildingTask.ts` | 27 | 同目录 |
+| `task/PlantC4Task.ts` | 27 | 同目录 |
+| `task/CheerTask.ts` | 27 | 同目录 |
+| `task/EnterRecyclerTask.ts` | 22 | 同目录 |
+| `task/TurnTask.ts` | 21 | 同目录 |
+| `task/EnterBunkerTask.ts` | 19 | 同目录 |
+| `task/InfiltrateBuildingTask.ts` | 17 | 同目录 |
+| `task/WaitForBuildUpTask.ts` | 12 | 同目录 |
+| `task/harvester/ReturnOreTask.ts` | 267 | `task/harvester/` |
+| `task/harvester/GatherOreTask.ts` | 244 | 同目录 |
+| `task/harvester/TeleportMoveToRefineryTask.ts` | 48 | 同目录 |
+| `task/morph/MorphIntoTask.ts` | 81 | `task/morph/` |
+| `task/morph/PackBuildingTask.ts` | 18 | 同目录 |
+| `task/morph/DeployIntoTask.ts` | 15 | 同目录 |
+| `task/morph/UndeployIntoTask.ts` | 12 | 同目录 |
+| `trait/AttackTrait.ts` | 504 | `sim/gameobject/trait/AttackTrait.ts` |
+| `trait/UnitOrderTrait.ts` | 229 | 同目录 |
+| `SequenceType`（`art/` 枚举） | 37 | `sim/art/SequenceType.ts` |
+
+两个原版文件被**删除**而不是移植：`sim/task/TurnTask.ts` 与
+`sim/task/WaitForBuildUpTask.ts` 是 B6a 之前的手写版，现在有了原版对应物，
+`Building.ts` / `DriveLocomotor.ts` 的 import 一并改指 `gameobject/task/`。
+
+### 30.1 `AttackTask` 是这台机器的曲轴
+
+原版 682 行里有 6 段顺序短路，全部写成 `return this.onTick(obj)` 自递归：
+
+```
+A 取消 / 目标消失        → 置 Idle 并 finish
+B FireUp   → Firing      （部署武器、棱镜充能）
+C Firing    → JustFired  （等冷却、等炮弹落地）
+D 目标维护               （shouldDropTarget / requestTargetUpdate）
+E CheckRange             （含 moveAttempts 计数）
+F PrepareToFire          （转向、找位置、进入射击）
+```
+
+自递归意味着**一次外部 `onTick` 内部可能迭代多次**。测试里 `moveAttempts`
+的计数、`fireOnce` 的「第 N tick」都必须按外部调用次数断言，否则会看到
+「一次 tick 涨了两格」。
+
+`AttackOptions` 五个开关（`force` / `passive` / `holdGround` / `leashTiles` /
+`disallowTurning`）不是装饰：`disallowTurning` 让「宁可不开炮也不转身」成立，
+`leashTiles` 给追击加了回绳半径，`holdGround` 是飞行单位与部署状态的默认。
+
+### 30.2 `moveAttempts > MAX_MOVE_ATTEMPTS`
+
+`MAX_MOVE_ATTEMPTS = 3`，判定写的是 `>` 不是 `>=`——**第 4 次失败才放弃**。
+原版如此。改成 `>=` 会让单位少试一次，在拥挤路口表现为「明明能绕过去却站着不动」。
+
+### 30.3 `AttackTrait[NotifyTick.onTick]` 里的逗号表达式
+
+```ts
+if (
+    (this.opportunityFireTask &&
+        (!obj.unitOrderTrait.hasTasks() ||
+            (obj.isUnit() && !obj.unitOrderTrait.getTasks()[0].preventOpportunityFire) ||
+            (obj.unitOrderTrait.getTasks()[0] instanceof AttackTask
+                ? (this.opportunityFireTask = undefined)
+                : this.opportunityFireTask.cancel())),
+    this.opportunityFireTask)
+)
+```
+
+`&&` 链跑副作用（命令本身就是攻击 → 直接丢弃环境射击任务；否则 cancel），
+逗号运算符把结果扔掉，条件只剩「手里还有没有 opportunityFireTask」。
+所以整段在「刚切到攻击命令」的**那一 tick 被跳过**。改成
+`if (this.opportunityFireTask)` 会让环境射击和指令射击在同一帧各开一炮。
+
+**故意保留，并在源码注释里写清了原因。**
+
+### 30.4 `computeThreat` 的六段加法
+
+```
+① verses 取 max（目标主/副武器打我的装甲）
+② 目标已瞄着我 → ① 取反          （crowd 里挑不同的受害者）
+③ + specialThreatValue
+④ + 我的武器打目标的装甲
+⑤ + health/100
+⑥ + distance
+⑦ + 1e5                          （保证「有目标」永远压过「没目标」）
+⑧ vhpScan：Strong 且投影血量 ≤0 → -Infinity；Normal → 半血以下 ×2、死透 ÷2
+⑨ distributedFire 每次 -1e6 × 命中次数
+```
+
+② 只作用于 ①，不影响 ③–⑦。① 为 0 时「取反」是 `0 * -1 = -0`，看着没变化——
+测试必须先给目标装上武器才能观察到这一项，否则会误判成「未生效」。
+
+`vitals` 这层的 `Strong` 是「打不动就别选」，`Normal` 是「优先补刀」，
+两者共用同一个 `getProjectedHitPoints()`。
+
+### 30.5 `updateDistributedFireHistory` 的 `!== 50` 守卫
+
+重复打同一目标**不重置**它的 50，其他条目每次 -1，归零即删。守卫写成
+`!== 50` 而不是「总是重置」，是为了让连射同一目标时衰减继续；否则一个
+target-rich 的场面会让所有其他条目永远停在 50，`distributedFire` 就退化成
+「只打第一个」。
+
+### 30.6 `checkArmor` 的 `100 * verses <= (isDefensive ? 1 : 0)`
+
+普通射击只要 verses **非零**就能打；防御射击（`isDefensive`）要求 **> 1%**。
+写成统一阈值会让 0.5% 的弹药也能拦截，或让 0 值弹药参与防御。
+
+缺 `ArmorType` 条目时不是静默 false，而是 `console.warn` 后 false——
+数据错误必须响。
+
+### 30.7 `UnitOrderTrait` 的双阶段 tick
+
+阶段 1 只跑 `TaskRunner`；阶段 2 只在「没有任务，或头任务正在取消」时推进
+命令队列，且 `if (processedOrder) break` 保证**每 tick 最多产出一条有效命令**。
+`orderCount` 在阶段 1 之前拍快照，所以「本 tick 新产出的任务」不会让阶段 2
+误以为队列已空。
+
+`addOrder` 的顺序是：
+
+```ts
+if (order.onAdd(this.tasks, queued) === false) return;   // 先问
+this.clearOrders();                                      // 再清
+this.tasks = this.tasks.filter(t => t.status !== NotStarted);  // 再滤
+this.cancelAllTasks();                                   // 最后取消
+```
+
+filter 在 cancel **之前**：新任务还没开始，不能被自己的命令取消掉。
+
+`cancelAllTasks()` 对 `NotStarted` 任务**无效**（`Task.cancel` 只处理
+`Running`，`NotStarted` 分支只在有 children 时抛错）。所以换主时未开始的
+任务会保持 `NotStarted` 直到 `TaskRunner` 自行处理——这是原版行为，不是
+漏清理。断言要写成「运行中的进入 `Cancelling`，未开始的仍是 `NotStarted`，
+队列长度不变」。
+
+### 30.8 `queuedOrders` 垫片
+
+排队命令（shift 点地）真正产出任务前，先插 `WaitTicksTask(5)` +
+`CallbackTask(resetGuardModeToIdle)`。5 tick 是「下一条命令的视觉间隔」，
+回调是「排队走完一圈，警戒模式回到 Idle」。
+
+垫片在 **tick 时**插入，不是 `addOrder` 时——`addOrder` 之后立刻读
+`getTasks().length` 还是 0。
+
+### 30.9 `cleanupWaypoint` 的引用计数
+
+只有当**没有其他单位**指向该路点、且**没有其他路点的 `next`** 指向它时，
+才从数组里 splice。少一个条件，多人同路径时后到者会把前者的路点删掉。
+
+### 30.10 三个「走进建筑」的硬规则
+
+- `EnterBuildingTask` 两阶段闩锁：`movePerformed && children.length` → 只
+  记录 `lastOutsideTile` 并等待；站上 footprint 后 `isAllowed` 再校验一次，
+  `onEnter` 返回 `false` 表示**软退出**（推 `MoveOutsideTask`，任务不算失败）。
+- `EnterTransportTask`：运输单位换格或非 Idle → 任务**失败**（不是等待）；
+  `!!unit.onBridge === !!target.onBridge` 层共位；`preventOpportunityFire`
+  延迟到 `MoveInsideTask` 真正入队才置 true。
+- `EvacuateTransportTask`：`soft=true` 重试 3 次后放弃，`false` 无落脚点直接
+  处死。出舱是 **LIFO**（`units[units.length - 1]`）。`evacState === All` 只在
+  「单乘客且是 gunner」时成立。
+
+`EnterRecyclerTask` 是五重否决连写（Fly / Chrono / engineer / refund>0 /
+Ready 且同主），任意一条命中就 abort；`PlantC4Task.onEnter` 返回 `false`
+是因为装好炸药后必须退出，否则自爆；`InfiltrateBuildingTask` 用 `unspawn`
+而不是 `destroy`（间谍是「消失」不是「阵亡」）。
+
+### 30.11 采集线的两个易错点
+
+- `ReturnOreTask` 有**两种坞位编号**：`getFirstAvailableDockNumber` 是
+  「现在真的空闲」，`getFirstEmptyDockNumber` 是「物理空但可能被预订」。
+  后者必须置 `needsReservation` 并走排队分支，否则两台矿车会同时 claim 同一格。
+- `GatherOreTask` 的 `forceMoveTried` 闩锁：贴近目标却站在不可采格时，先强推
+  一次移动；失败才换目标。`PRIORITY_MATRIX` 的评分是
+  `1000 * valueDiff + (priorityB - priorityA)`——收益差压倒一切，只有同收益
+  时才看固定空间优先级。
+- `getIslandIdMap` 只在自身格可通行时才建；不可通行时直接放弃这次搜索，
+  否则会把「自己在孤岛上」误判成「矿在另一个岛」。
+
+`AIVirtualPurifiers = 4,2,0`（brutal / normal / easy）在 `owner.isAi` 时
+叠加到精炼厂容量上——AI 不真的建那么多精炼厂，但按上限结算。
+
+### 30.12 其余任务的一句话要点
+
+| 任务 | 必须照抄的那一句 |
+|---|---|
+| `ExitFactoryTask` | `checkRampTiles` 推挤时跳过 `obj === unit`，否则退出单位把自己堵死 |
+| `MorphIntoTask` | `replacedBy` 让攻击任务追踪变形后的目标；move 任务跨变形移交 |
+| `ParadropTask` | `bridgeHeight < Math.max(bridgeHeight, currentHeight - fallRate)` 是地板，防止落到桥面以下 |
+| `CheerTask` | `executed` 双态 + `WaitMinutesTask(1/60).setCancellable(false)`，欢呼不可打断 |
+| `GarrisonBuildingTask` | 只在「中立且空」时 `changeObjectOwner` |
+| `CaptureBuildingTask` | `multiEngineer` 分支要给 `minHealth` 做 clamp |
+| `RepairBuildingTask` | `cabHut` 分支无条件优先；`!owner.isCombatant() && garrisonTrait` 可修中立 |
+| `EnterHospitalTask` | 医院自管治疗队列，五个状态各自结算 |
+| `WaitForBuildUpTask` | `TaskGroup` + `WaitMinutesTask` + `CallbackTask(setBuildStatus(Ready))`，`cancellable=false` |
+| `SequenceType` | 35 个动画槽，**数值顺序不可改**（`Cheer = 33`） |
+
+### 30.13 `implements NotifyTick` 会报 TS2420
+
+`NotifyTick` 带 `[key: symbol]` 索引签名，类上写 `implements NotifyTick`
+要求整类可被任意 symbol 索引，直接 `TS2420`。原版不写、`MoveTrait` 也不写，
+B6c 的两个类同样移除 `implements`，只用 `[NotifyTick.onTick]()` 方法签名。
+
+### 30.14 生成器不能重跑
+
+跑全量回归时误把 `tools/port-b1.mjs` 与 `tools/port-events.mjs` 扫进了循环，
+两个**一次性生成器**把手工精修过的文件覆回去了：
+
+- `port-b1` 把 `QuadTree` 的 `../math/*` 改回 `@/game/math/*`，并给
+  `LandType` 重新追加了早已废弃的 `TileKind` 映射、删掉了
+  `PowerupType.UNSUPPORTED_POWERUP_TYPES`。
+- `port-events` 给 57 个 `.meta` 重发了 `randomUUID()`，会打断 Cocos 的
+  资源引用。
+
+已全部 `git checkout --` 回滚，并给两个脚本加了 `--force` 闸门（默认拒绝执行
+并打印原因）。**教训**：回归脚本清单要按名字白名单，不能 `*test*.mjs` 通配
+（`port-b1`/`port-events` 名字里没有 `test`，但同目录的探测脚本有副作用）。
+
+### 30.15 回归过程中「读起来像 bug 但正确」的清单
+
+| 现象 | 真相 |
+|---|---|
+| `onAdd` 之后 `getTasks()` 长度没变 | 垫片在 tick 时才插 |
+| 第二条 `addOrder` 把第一条挤掉 | 非排队命令会 `clearOrders` 并 cancel 前一条 |
+| 被丢弃的 `NotStarted` 任务还剩 1 条 | `filter` 摘除 `NotStarted`，但 `Running` 的那条只是被 cancel（变 `Cancelling`） |
+| 同一实例 `addTaskToFront` 两次出现两遍 | 原版不去重 |
+| `lastOutsideTile` 一直是 `null` | 只有「站在 footprint 上」或「就是上次那格」时才刷新 |
+| `-Infinity` 断言跨 `page.evaluate` 变 `null` | 结构化克隆把 `-Infinity` 序列化成 `null`，要在页内先算成布尔 |
+
+### 30.16 验收
+
+`tsc --noEmit` 0 错误。
+
+`attacktasktest`（新增，**103 条**，十组 A–J）：
+
+```
+A 启动与目标 12 · B 弹药 7 · C 状态谓词 6 · D 五态机 12 · E 开火 8
+F 武器与评分 19 · G 指令队列 14 · H 入建筑 10 · I 装载 6 · J 疏散 9
+```
+
+全量 **21 套件 / 696 条**全绿（`bash tools/runall.sh`）；`battletest`
+（22 杀 15 损，每次运行略有出入）与 `smoke`（16 单位 / 9 建筑 / 60fps）
+均 `ERRORS 0`；`web-mobile` 构建通过。
+
+> `inputtest` 在机器满载（多个 puppeteer 并行）时会偶发「双击选中」/
+> 「单指拖拽框选」失败——两次失败项不同、单独连跑 3 次全绿，是点击间隔
+> 超过双击窗口的时序抖动，不是回归。回归时不要让多个套件并行。
+
+**已知风险**：`UnitOrderTrait` 虽然已接线，但四个兵种类（`Infantry` /
+`Vehicle` / `Aircraft` / `Building`）还没把 trait 挂进 `Traits` 集合，
+`ObjectFactory.factory()` 也没装配——真正的实跑要等 B6d。
+本轮正确性由 `attacktasktest` 的桩保证；桩件的 `worldPosition` 用格心
+（`rx * LPT + LPT/2`），不是格角，否则 `distance3` 恰好落在 `maxRange`
+边界上，`Firing` / `CheckRange` 会来回抖到爆栈。

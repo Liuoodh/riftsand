@@ -316,6 +316,40 @@ export { ChronoLocomotor } from './gameobject/locomotor/ChronoLocomotor';
 export { MissileLocomotor } from './gameobject/locomotor/MissileLocomotor';
 export { LocomotorFactory } from './gameobject/locomotor/LocomotorFactory';
 
-/* legacy tasks from the object core (die in B6c, replaced by gameobject/task/**) */
-export { TurnTask } from './task/TurnTask';
-export { WaitForBuildUpTask } from './task/WaitForBuildUpTask';
+/*
+ * B6c — the rest of the reference task set, plus the two traits it cannot exist
+ * without. `AttackTrait` and `UnitOrderTrait` are pulled forward from B6d
+ * because `AttackTask` *is* the attack state machine's other half and because
+ * `UnitOrderTrait` is the only thing that drives tasks at all.
+ *
+ * `sim/task/**` still exists for the live hand-written engine (`game/Game.ts`);
+ * it is not the same code and is deleted in B9, not here.
+ */
+export { TurnTask } from './gameobject/task/TurnTask';
+export { WaitForBuildUpTask } from './gameobject/task/WaitForBuildUpTask';
+export { EnterBuildingTask } from './gameobject/task/EnterBuildingTask';
+export { EnterBunkerTask } from './gameobject/task/EnterBunkerTask';
+export { EnterRecyclerTask } from './gameobject/task/EnterRecyclerTask';
+export { EnterHospitalTask } from './gameobject/task/EnterHospitalTask';
+export { EnterTransportTask } from './gameobject/task/EnterTransportTask';
+export { EvacuateTransportTask } from './gameobject/task/EvacuateTransportTask';
+export { GarrisonBuildingTask } from './gameobject/task/GarrisonBuildingTask';
+export { InfiltrateBuildingTask } from './gameobject/task/InfiltrateBuildingTask';
+export { CaptureBuildingTask } from './gameobject/task/CaptureBuildingTask';
+export { RepairBuildingTask } from './gameobject/task/RepairBuildingTask';
+export { PlantC4Task } from './gameobject/task/PlantC4Task';
+export { CheerTask } from './gameobject/task/CheerTask';
+export { ParadropTask } from './gameobject/task/ParadropTask';
+export { AttackTask, IS_ATTACK_TASK } from './gameobject/task/AttackTask';
+export { AttackMoveTargetTask } from './gameobject/task/move/AttackMoveTargetTask';
+export { ExitFactoryTask } from './gameobject/task/move/ExitFactoryTask';
+export { GatherOreTask } from './gameobject/task/harvester/GatherOreTask';
+export { ReturnOreTask } from './gameobject/task/harvester/ReturnOreTask';
+export { TeleportMoveToRefineryTask } from './gameobject/task/harvester/TeleportMoveToRefineryTask';
+export { MorphIntoTask } from './gameobject/task/morph/MorphIntoTask';
+export { DeployIntoTask } from './gameobject/task/morph/DeployIntoTask';
+export { UndeployIntoTask } from './gameobject/task/morph/UndeployIntoTask';
+export { PackBuildingTask } from './gameobject/task/morph/PackBuildingTask';
+export { AttackTrait, AttackState } from './gameobject/trait/AttackTrait';
+export { UnitOrderTrait } from './gameobject/trait/UnitOrderTrait';
+export { SequenceType } from './art/SequenceType';
