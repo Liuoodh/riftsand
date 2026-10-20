@@ -6,7 +6,7 @@
  * would make the produced unit immediately stuck, so the finder walks outward
  * up to 20 cells and takes the first legal one.
  */
-import { RadialTileFinder } from '../Tiles';
+import { RadialTileFinder } from '../map/tileFinder/RadialTileFinder';
 import { SpeedType } from '../type/SpeedType';
 
 export class RallyTrait {
@@ -30,7 +30,7 @@ export class RallyTrait {
             0,
             20,
             (tile: any) =>
-                !world.tileOccupation.getGroundObjectsOnTile(tile).some((obj: any) => obj.isBuilding && !obj.dead) &&
+                !world.tileOccupation.getGroundObjectsOnTile(tile).some((obj: any) => obj.isBuilding() && !obj.dead) &&
                 world.passability.getPassableSpeed(tile, gameObject?.rules?.speedType ?? SpeedType.Track, false) > 0,
         );
         return finder.getNextTile();
@@ -49,7 +49,7 @@ export class RallyTrait {
                 world.passability.findObstacles({ tile, onBridge: undefined }, unit).length === 0 &&
                 (targetElevation === undefined || Math.abs(targetElevation - tile.z) < 4) &&
                 (!checkBuildings ||
-                    !world.tileOccupation.getGroundObjectsOnTile(tile).some((obj: any) => obj.isBuilding && !obj.dead)) &&
+                    !world.tileOccupation.getGroundObjectsOnTile(tile).some((obj: any) => obj.isBuilding() && !obj.dead)) &&
                 world.passability.getPassableSpeed(tile, unit.rules.speedType, unit.isInfantry(), false) > 0,
         );
         return finder.getNextTile() ?? targetTile;

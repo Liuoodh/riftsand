@@ -109,6 +109,7 @@ export { mpAllowedColors } from './rules/mpAllowedColors';
 /* reference vocabulary */
 export { ArmorType } from './type/ArmorType';
 export { LandType, getLandType } from './type/LandType';
+export { TerrainType } from './type/TerrainType';
 export { SpeedType } from './type/SpeedType';
 export { MovementZone } from './type/MovementZone';
 export { LocomotorType } from './type/LocomotorType';
@@ -138,3 +139,29 @@ export {
     rectIntersect, rectContainsPoint, rectContainsRect, rectClampPoint,
     circleIntersect, circleContainsPoint, octileDistance, pointEquals, rectEquals,
 } from './util/geometry';
+
+/* map — cells, bounds, passability, bridges, shroud */
+export { TileCollection, TileDirection } from './map/TileCollection';
+export type { Tile, TileData } from './map/TileCollection';
+export { MapBounds } from './map/MapBounds';
+export { TileOccupation, LayerType } from './map/TileOccupation';
+export { TileOcclusion } from './map/TileOcclusion';
+export { Terrain } from './map/Terrain';
+export type { PathNode, PathOptions, Obstacle } from './map/Terrain';
+export { Bridges, BridgeHeadType } from './map/Bridges';
+export { MapShroud, ShroudType, ShroudFlag } from './map/MapShroud';
+export { OreSpread } from './map/OreSpread';
+export { wallTypes } from './map/wallTypes';
+export { RadialBackFirstTileFinder } from './map/tileFinder/RadialBackFirstTileFinder';
+export { RandomTileFinder } from './map/tileFinder/RandomTileFinder';
+export { CardinalTileFinder } from './map/tileFinder/CardinalTileFinder';
+export { DirectionalTileFinder } from './map/tileFinder/DirectionalTileFinder';
+export { FloodTileFinder } from './map/tileFinder/FloodTileFinder';
+
+/* theater — the tile-set seam (abstract only; the art is ours) */
+export { HighBridgeHeadType } from './theater/TileSets';
+export type { TileSets, TileSetEntry, TileImage } from './theater/TileSets';
+
+/* content — our generated theater expressed in engine terms */
+export { ProceduralTileSets, buildTileData, TERRAIN_TYPE_OF_KIND } from './content/tileSets';
+export { OreOverlayStub } from './content/oreOverlay';

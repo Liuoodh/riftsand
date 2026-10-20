@@ -9,7 +9,7 @@
  * crush checks.
  */
 import { Vec2 } from './Math2';
-import { TileCollection } from './Tiles';
+import { TileCollection } from './map/TileCollection';
 import { TILE, HALF } from '../core/Core';
 
 export class Position {

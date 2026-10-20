@@ -5,8 +5,9 @@
  * tileOccupation) plus the three retail `[General]` values. Keeping it explicit
  * means the tasks contain no `any`-shaped guesses about Game internals.
  */
-import { MapBounds, Tile, TileCollection } from '../../Tiles';
-import { TileOccupation } from '../../TileOccupation';
+import type { Tile, TileCollection } from '../../map/TileCollection';
+import type { MapBounds } from '../../map/MapBounds';
+import type { TileOccupation } from '../../map/TileOccupation';
 import { SimWorld } from '../../World';
 
 export interface MoveTarget {

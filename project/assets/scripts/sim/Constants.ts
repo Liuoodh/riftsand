@@ -27,10 +27,12 @@ export const TICKS_PER_SECOND = 15;
 export const HARVESTER_STORAGE = 20;
 
 /**
- * `isBuilding` is a boolean flag on Entity in this project and a method in the
- * reference; every sim call site goes through this predicate so a structure is
- * recognised either way.
+ * Reference `object.isBuilding()`.
+ *
+ * `isBuilding` used to be a boolean field on Entity and this predicate papered
+ * over the difference. It is a method now, everywhere, so the only thing left
+ * to do is guard against a null occupant.
  */
 export function isBuildingObject(obj: any): boolean {
-    return !!obj && (obj.isBuilding === true || (typeof obj.isBuilding === 'function' && obj.isBuilding()));
+    return !!obj && typeof obj.isBuilding === 'function' && obj.isBuilding();
 }

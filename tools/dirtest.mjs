@@ -79,7 +79,7 @@ const rows = await page.evaluate(async () => {
         for (const u of g.units.slice()) {
             if (u.def.id === 'rampart') {
                 u.dead = true;
-                g.occupancy.remove(u, u.cellX, u.cellY);
+                g.occupancy.unoccupySingleTile(u.tile, u);
                 g.units.splice(g.units.indexOf(u), 1);
             }
         }

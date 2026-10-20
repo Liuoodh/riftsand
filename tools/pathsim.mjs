@@ -105,7 +105,7 @@ const out = await page.evaluate((ROUNDS) => {
             if (d > 260 && d < 760) { target = w; break; }
         }
         if (!target) {
-            for (const u of us) { u.dead = true; g.units.splice(g.units.indexOf(u), 1); g.occupancy.remove(u, u.cellX, u.cellY); }
+            for (const u of us) { u.dead = true; g.units.splice(g.units.indexOf(u), 1); g.occupancy.unoccupySingleTile(u.tile, u); }
             return;
         }
         for (const u of us) g.applyOrder(u, { k: 'move', x: target.x, y: target.y });
@@ -168,7 +168,7 @@ const out = await page.evaluate((ROUNDS) => {
         for (const u of us) {
             u.dead = true;
             g.units.splice(g.units.indexOf(u), 1);
-            g.occupancy.remove(u, u.cellX, u.cellY);
+            g.occupancy.unoccupySingleTile(u.tile, u);
         }
     }
 

@@ -746,7 +746,8 @@ export class TechnoRules extends ObjectRules {
         this.occupyWeapon = this.parseWeaponName(data.occupyWeapon);
         this.eliteOccupyWeapon = this.parseWeaponName(data.eliteOccupyWeapon);
         this.veteranAbilities = new Set(data.veteranAbilities ?? []);
-        this.eliteAbilities = new Set([...this.veteranAbilities, ...(data.eliteAbilities ?? [])]);
+        // `Array.from` on the Set half — loose-mode spread would nest the Set itself
+        this.eliteAbilities = new Set([...Array.from(this.veteranAbilities), ...(data.eliteAbilities ?? [])]);
         this.selfHealing = !!data.selfHealing;
         this.wall = !!data.wall;
         this.gate = !!data.gate;

@@ -19,7 +19,7 @@
  * `objectsOnTile(tile)` and the same `(isBuilding() || isOverlay()) && name`
  * filter is applied verbatim.
  */
-import { wallTypes } from '../wallTypes';
+import { wallTypes } from '../map/wallTypes';
 
 /** How the world answers the two map queries the trait needs. */
 export interface WallWorld {

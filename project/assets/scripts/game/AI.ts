@@ -397,7 +397,7 @@ export class AIController {
             for (const o of targets) {
                 const d = dist(t.x, t.y, o.x, o.y);
                 if (d > 150) continue;
-                score += o.isBuilding ? 3 : 1;
+                score += o.isBuilding() ? 3 : 1;
             }
             if (score > bestScore) { bestScore = score; best = t; }
         }

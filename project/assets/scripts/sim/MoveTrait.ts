@@ -8,8 +8,8 @@
  * around; `MoveTask` decides.
  */
 import { Vec2 } from './Math2';
-import { PathNode } from './Passability';
-import { TileOccupation } from './TileOccupation';
+import type { PathNode } from './map/Terrain';
+import { TileOccupation } from './map/TileOccupation';
 
 export enum MoveState {
     Idle = 0,
@@ -97,6 +97,18 @@ export class MoveTrait {
      */
     handleTileChange(oldTile: any, bridge: any, teleporting: boolean, isTeleport = false): void {
         const obj = this.gameObject;
+        /*
+         * Reference: `gameObject.onBridge = !!bridge` (only when the layer
+         * actually changes). The caller passes `undefined` for ground travel,
+         * so this normalises the field to `false` on the first tile change.
+         *
+         * It has to exist: `Terrain.findObstacles` tests
+         * `obj.onBridge === !!pathNode.onBridge`, and `undefined === false` is
+         * false — without this line two vehicles never regard each other as
+         * being on the same cell, drive into each other's tile, and only the
+         * sub-cell spread keeps them visually apart.
+         */
+        if ((obj as any).onBridge !== !!bridge) (obj as any).onBridge = !!bridge;
         /*
          * Units cover exactly one cell, so the single-tile API is enough and —
          * unlike occupyTileRange — it does not allocate a tile array nor fire

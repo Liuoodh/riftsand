@@ -16,7 +16,7 @@
 import { CallbackTask, Task, WaitTicksTask } from '../../Task';
 import { MoveTask } from '../../MoveTask';
 import { MoveResult } from '../../MoveTrait';
-import { RadialTileFinder } from '../../Tiles';
+import { RadialTileFinder } from '../../map/tileFinder/RadialTileFinder';
 import { HarvestWorld } from './HarvestWorld';
 import { HarvesterStatus } from '../../traits/HarvesterTrait';
 import { RULES } from '../../rules';

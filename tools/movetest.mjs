@@ -184,7 +184,7 @@ const arrive = await page.evaluate(() => {
         });
         u.dead = true;
         g.units.splice(g.units.indexOf(u), 1);
-        g.occupancy.remove(u, u.cellX, u.cellY);
+        g.occupancy.unoccupySingleTile(u.tile, u);
     }
     return out;
 });
@@ -281,7 +281,7 @@ const capacity = await page.evaluate(() => {
         const ca = M.cell(a.x, a.y), cb = M.cell(b.x, b.y);
         if (ca[0] === cb[0] && ca[1] === cb[1]) same++;
     }
-    return { same, fill: g.occupancy.fillAt(a.cellX, a.cellY) };
+    return { same, fill: g.occupancy.getObjectsOnTile(a.tile).length };
 });
 console.log('   capacity', JSON.stringify(capacity));
 check('同一格不能挤下两辆车', capacity.same === 0, `同格帧数=${capacity.same}`);

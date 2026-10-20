@@ -1,5 +1,5 @@
 import { ObjectType } from '../../type/ObjectType';
-import { TileDirection } from '../../Tiles';
+import { TileDirection } from '../../map/TileCollection';
 import { LandType } from '../../type/LandType';
 import { TiberiumTrait } from '../trait/TiberiumTrait';
 
@@ -64,7 +64,7 @@ export class AnimTerrainEffect {
                     TileDirection.BottomLeft,
                     TileDirection.BottomRight,
                 ].every((dir) => game.map.tiles.getNeighbourTile(tile, dir));
-                const validSmudges = [...game.rules.smudgeRules.values()].filter(
+                const validSmudges = Array.from(game.rules.smudgeRules.values() as Iterable<any>).filter(
                     (rule: any) =>
                         ((rule.crater && rule.width === craterSize && rule.height === craterSize) ||
                             (isScorch && rule.burn)) &&

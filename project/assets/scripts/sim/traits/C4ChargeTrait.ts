@@ -54,7 +54,7 @@ export class C4ChargeTrait {
     onTick(target: any, world: C4World): void {
         if (this.timer.isActive() && this.timer.tick(world.currentTick) === true) {
             if (!target.invulnerable) {
-                if (!!target.isBuilding && target.cabHutTrait && world.demolishBridge) {
+                if (!!target.isBuilding() && target.cabHutTrait && world.demolishBridge) {
                     world.demolishBridge(target, this.attackerInfo);
                 } else {
                     target.deathType = DeathType.Demolish;

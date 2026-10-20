@@ -14,7 +14,7 @@ const req = createRequire(
 );
 const puppeteer = req('puppeteer-core');
 
-const URL = process.argv[2] || 'http://127.0.0.1:8899/index.html';
+const URL = process.argv[2] || 'http://127.0.0.1:8950/index.html';
 const OUT = process.argv[3] || '.shots';
 const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 

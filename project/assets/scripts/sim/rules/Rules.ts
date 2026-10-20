@@ -322,7 +322,7 @@ export class Rules {
     }
 
     getMultiplayerCountries(): CountryRules[] {
-        return [...this.countryRules.values()].filter((country) => country.multiplay);
+        return Array.from(this.countryRules.values()).filter((country) => country.multiplay);
     }
 
     getMultiplayerColors(): Map<string, Color> {
@@ -397,7 +397,7 @@ export class Rules {
             [ObjectType.Terrain, this.terrainTypes],
         ]);
         const typeMap = typeMaps.get(type);
-        const entry = typeMap && [...typeMap.entries()].find(([, typeName]) => typeName === name);
+        const entry = typeMap && Array.from(typeMap.entries()).find(([, typeName]) => typeName === name);
         if (!entry) {
             return false;
         }

@@ -51,7 +51,7 @@ const out = await page.evaluate(() => {
     };
     const drop = (u) => {
         u.dead = true;
-        g.occupancy.remove(u, u.cellX, u.cellY);
+        g.occupancy.unoccupySingleTile(u.tile, u);
         const i = g.units.indexOf(u);
         if (i >= 0) g.units.splice(i, 1);
     };

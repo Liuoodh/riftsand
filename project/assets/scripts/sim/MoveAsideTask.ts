@@ -12,7 +12,7 @@ import { Task, WaitTicksTask } from './Task';
 import { MoveTask } from './MoveTask';
 import { MoveTrait, CollisionState, MoveState } from './MoveTrait';
 import { rotateVec2, Vec2 } from './Math2';
-import { MovementZone } from './Passability';
+import { MovementZone } from './type/MovementZone';
 import { SimWorld } from './World';
 
 export class MoveAsideTask extends Task {

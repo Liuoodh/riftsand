@@ -15,7 +15,7 @@ import { MoveResult } from '../../MoveTrait';
 import { MoveTarget, HarvestWorld } from './HarvestWorld';
 import { HarvesterStatus } from '../../traits/HarvesterTrait';
 import { LandType } from '../../type/LandType';
-import { RadialTileFinder } from '../../Tiles';
+import { RadialTileFinder } from '../../map/tileFinder/RadialTileFinder';
 
 /**
  * Neighbour priority when several ore tiles are the same distance away.

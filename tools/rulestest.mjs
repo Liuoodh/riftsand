@@ -122,6 +122,9 @@ const land = await T(() => {
         rockFoot: rock.getSpeedModifier(SpeedType.Foot),
         rockHover: rock.getSpeedModifier(SpeedType.Hover),
         waterTrack: water.getSpeedModifier(SpeedType.Track),
+        waterFoot: water.getSpeedModifier(SpeedType.Foot),
+        waterWheel: water.getSpeedModifier(SpeedType.Wheel),
+        waterHover: water.getSpeedModifier(SpeedType.Hover),
         cliffTrack: cliff.getSpeedModifier(SpeedType.Track),
         clearBuildable: clear.buildable,
         rockBuildable: rock.buildable,
@@ -137,10 +140,13 @@ check('Rock: 只有 Track/Wheel 保留小数，Foot 被夹成 1',
     land.rockTrack === 0.7 && land.rockFoot === 1,
     `track=${land.rockTrack} foot=${land.rockFoot}`);
 check('Rock: Hover 被夹成 1', land.rockHover === 1, String(land.rockHover));
-check('Water 无列 → 1（不可通行由地形承担，不是 land 表）',
-    land.waterTrack === 1, String(land.waterTrack));
-check('Cliff 走显式 [Cliff] 段而不是回落 [Rock]',
-    land.cliffTrack === 1 && land.isLandRules, String(land.cliffTrack));
+check('Water: 三条地面列显式为 0（水不可通行）',
+    land.waterTrack === 0 && land.waterFoot === 0 && land.waterWheel === 0,
+    `track=${land.waterTrack} foot=${land.waterFoot} wheel=${land.waterWheel}`);
+check('Water: Hover 缺列 → 1（气垫船能过水）',
+    land.waterHover === 1, String(land.waterHover));
+check('Cliff 走显式 [Cliff] 段（硬不可通行，不回落 [Rock] 的 0.7）',
+    land.cliffTrack === 0 && land.isLandRules, String(land.cliffTrack));
 check('buildable: Clear=true / Rock=false',
     land.clearBuildable === true && land.rockBuildable === false);
 

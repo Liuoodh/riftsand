@@ -19,7 +19,7 @@ export class SuperWeaponsTrait {
     constructor(private mirror?: any[]) {}
 
     getAll(): any[] {
-        return [...this.superWeapons.values()];
+        return Array.from(this.superWeapons.values());
     }
 
     add(superWeapon: any): void {

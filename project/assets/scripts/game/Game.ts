@@ -17,10 +17,18 @@ import {
     unitCategory, BUILD_REQUIRES, VET_XP_RATIO, VET_MAX_LEVEL, CRATE_INTERVAL,
     BUILD_RADIUS_TILES, makeRng, PROJ_PHYSICS, gameSpeedMul, GAME_SPEED_MAX, BUILDUP_TIME, MAPS, mapById, colorById, setActiveTeamColor,
 } from '../core/Core';
-import { TerrainMap, CrystalNode, ORE_BAIL_VALUE, GEM_BAIL_VALUE } from '../world/Terrain';
-import { TileCollection, MapBounds, Tile, RadialBackFirstTileFinder } from '../sim/Tiles';
-import { TileOccupation } from '../sim/TileOccupation';
-import { Passability, MovementZone, SpeedType } from '../sim/Passability';
+import { TerrainMap, CrystalNode, ORE_BAIL_VALUE, GEM_BAIL_VALUE, TileKind } from '../world/Terrain';
+import { TileCollection } from '../sim/map/TileCollection';
+import type { Tile } from '../sim/map/TileCollection';
+import { MapBounds } from '../sim/map/MapBounds';
+import { TileOccupation } from '../sim/map/TileOccupation';
+import { Terrain } from '../sim/map/Terrain';
+import { RadialBackFirstTileFinder } from '../sim/map/tileFinder/RadialBackFirstTileFinder';
+import { MovementZone } from '../sim/type/MovementZone';
+import { SpeedType } from '../sim/type/SpeedType';
+import { TheaterType } from '../sim/type/TheaterType';
+import { ProceduralTileSets, buildTileData, TERRAIN_TYPE_OF_KIND } from '../sim/content/tileSets';
+import { OreOverlayStub } from '../sim/content/oreOverlay';
 import { MoveTask } from '../sim/MoveTask';
 import { MoveTrait, MoveState, MoveResult, TICK } from '../sim/MoveTrait';
 import { facingToRad, radToFacing } from '../sim/Math2';
@@ -176,9 +184,17 @@ export class Game {
     /** cell grid the sim reasons about (reference: game.map.tiles) */
     tiles!: TileCollection;
     mapBounds!: MapBounds;
+    /** tile-set answers for our generated theater (content half of the map) */
+    tileSets!: ProceduralTileSets;
+    /**
+     * Ore as an overlay, one per crystal cell — the reference models tiberium
+     * as an occupied overlay, so the cell's land class becomes `Tiberium` only
+     * while this object is registered.
+     */
+    oreOverlays!: Map<Tile, OreOverlayStub>;
     /** passability graph + A* (reference: game.map.terrain) */
-    passability!: Passability;
-    /** who stands on which cell — see sim/TileOccupation.ts */
+    passability!: Terrain;
+    /** who stands on which cell — see sim/map/TileOccupation.ts */
     occupancy!: TileOccupation;
     /** adapter handed to MoveTask / locomotors */
     simWorld!: SimWorld;
@@ -278,22 +294,43 @@ export class Game {
          * Simulation world.
          *
          * The reference keeps a `GameMap` object with tiles / bounds / terrain /
-         * tileOccupation; MoveTask and the locomotors only ever talk to that
+         * tileOccupation; MoveTask and the locomotives only ever talk to that
          * object. We build the same thing here, backed by the existing
          * TerrainMap, so the ported code needs no special cases.
+         *
+         * The assembly order is the reference's and it matters: `MapBounds`
+         * needs the tile collection (for `getCutoffTileHeight`), and `Terrain`
+         * needs the bounds. `Terrain` subscribes to `TileOccupation.onChange`
+         * itself, so nothing here has to forward occupancy events.
          */
-        this.tiles = new TileCollection(MAP_TILES);
-        this.mapBounds = new MapBounds(MAP_TILES, MAP_TILES);
-        this.syncTiles();
-        this.occupancy = new TileOccupation(MAP_TILES, this.tiles);
-        this.passability = new Passability({
-            tiles: this.tiles,
-            mapBounds: this.mapBounds,
-            tileOccupation: this.occupancy,
-            speedAt: (rx, ry, isInfantry, hover) => this.terrain.speedAt(rx, ry, isInfantry, hover),
-        });
-        // a structure appearing / disappearing changes passability
-        this.occupancy.onChange = (tiles, obj) => this.passability.handleTileOccupationUpdate(tiles, obj);
+        this.tileSets = new ProceduralTileSets();
+        this.tiles = new TileCollection(
+            buildTileData(this.terrain),
+            this.tileSets,
+            { cliffBackImpassability: 0 },
+            () => 0,
+        );
+        this.mapBounds = new MapBounds().fromMapFile(
+            {
+                fullSize: { width: MAP_TILES, height: MAP_TILES },
+                localSize: { x: 0, y: 0, width: MAP_TILES, height: MAP_TILES },
+            },
+            this.tiles,
+        );
+        this.occupancy = new TileOccupation(this.tiles);
+        this.passability = new Terrain(
+            this.tiles,
+            TheaterType.Temperate,
+            this.mapBounds,
+            this.occupancy,
+            RULES,
+        );
+        this.oreOverlays = new Map();
+        for (const tile of this.tiles.getAll()) {
+            if (this.terrain.kind[this.terrain.idx(tile.rx, tile.ry)] === TileKind.Crystal) {
+                this.placeOreOverlay(tile);
+            }
+        }
         this.simWorld = {
             terrain: this.passability,
             tiles: this.tiles,
@@ -907,7 +944,7 @@ export class Game {
                 const value = this.terrain.collectBail(tile.rx, tile.ry);
                 // the last bail clears the overlay: the cell becomes clear
                 // ground for pathing, exactly like removing a tiberium object
-                if (before && !this.terrain.hasOre(tile.rx, tile.ry)) this.syncTiles();
+                if (before && !this.terrain.hasOre(tile.rx, tile.ry)) this.removeOreOverlay(tile);
                 return value;
             },
             hasRefinery: (unit: Unit) => unit.owner != null && this.players[unit.owner].buildings.some((b) => !!b.def.dropoff && !b.dead),
@@ -1470,7 +1507,7 @@ export class Game {
                 if (!onRing) continue;
                 const t = this.tiles.getByMapCoords(tx, ty);
                 if (!t) continue;
-                if (this.passability.getPassableSpeed(t, SpeedType.Track, false) > 0) return t;
+                if (this.passability.getPassableSpeed(t, SpeedType.Track, false, false) > 0) return t;
             }
         }
         return null;
@@ -2361,16 +2398,44 @@ export class Game {
     /* movement — everything below goes through the ported MoveTask   */
     /* ------------------------------------------------------------ */
 
-    /** height level + land kind for every cell, refreshed after map load */
+    /**
+     * Re-read the generated terrain into the existing cell objects.
+     *
+     * Deliberately *in place*: a `Tile` is referenced by every unit that stands
+     * on it, by building footprints and by the cached passability edges, so
+     * rebuilding the collection would orphan all of them. Only `z` and
+     * `terrainType` change here; `landType` is then re-derived through
+     * `TileOccupation`, which is the only place allowed to write it.
+     *
+     * The two-step assignment is not redundant: `computeTileLandType` bails out
+     * early when the *current* value is `Rock`, so the base value has to be
+     * restored first or a rock cell that becomes sand would stay rock forever.
+     */
     private syncTiles() {
-        this.tiles.syncFrom(
-            (rx, ry) => this.terrain.levelAt(rx, ry),
-            (rx, ry) => {
-                const i = this.terrain.idx(rx, ry);
-                return getLandType(this.terrain.kind[i], this.terrain.solid[i] === 1);
-            },
-            (rx, ry) => this.terrain.kind[this.terrain.idx(rx, ry)],
-        );
+        for (const tile of this.tiles.getAll()) {
+            const i = this.terrain.idx(tile.rx, tile.ry);
+            tile.terrainType = TERRAIN_TYPE_OF_KIND[this.terrain.kind[i]];
+            tile.z = this.terrain.level[i];
+            tile.landType = getLandType(tile.terrainType);
+            tile.landType = this.occupancy.computeTileLandType(tile);
+            tile.onBridgeLandType = this.occupancy.computeOnBridgeLandType(tile);
+        }
+    }
+
+    /** Register the ore overlay for one cell, which is what makes it `Tiberium`. */
+    private placeOreOverlay(tile: Tile) {
+        if (this.oreOverlays.has(tile)) return;
+        const overlay = new OreOverlayStub(tile);
+        this.oreOverlays.set(tile, overlay);
+        this.occupancy.occupySingleTile(tile, overlay);
+    }
+
+    /** Last bail harvested: drop the overlay, the cell returns to its ground class. */
+    private removeOreOverlay(tile: Tile) {
+        const overlay = this.oreOverlays.get(tile);
+        if (!overlay) return;
+        this.oreOverlays.delete(tile);
+        this.occupancy.unoccupySingleTile(tile, overlay);
     }
 
     tileAt(x: number, y: number): Tile {
@@ -2424,7 +2489,7 @@ export class Game {
      * approach picks, and let MoveTask handle the rest.
      */
     private approachTile(u: Unit, target: Entity): Tile {
-        if (target.isBuilding) {
+        if (target.isBuilding()) {
             /*
              * A structure is a footprint, not a point: aiming at
              * `centre + radius` puts the destination INSIDE the building for the
@@ -2441,7 +2506,7 @@ export class Game {
                     if (!onRing) continue;
                     const t = this.tiles.getByMapCoords(tx, ty);
                     if (!t) continue;
-                    if (!this.passability.getPassableSpeed(t, u.rules.speedType, u.isInfantry())) continue;
+                    if (!this.passability.getPassableSpeed(t, u.rules.speedType, u.isInfantry(), false)) continue;
                     const wx = tx * TILE + TILE / 2 - HALF;
                     const wy = ty * TILE + TILE / 2 - HALF;
                     const d = Math.hypot(wx - u.x, wy - u.y);
@@ -2450,7 +2515,7 @@ export class Game {
             }
             if (best) return best;
         }
-        const edge = target.isBuilding ? target.radius + TILE : target.radius + TILE * 0.6;
+        const edge = target.isBuilding() ? target.radius + TILE : target.radius + TILE * 0.6;
         const a = Math.atan2(u.y - target.y, u.x - target.x);
         return this.tileAt(target.x + Math.cos(a) * edge, target.y + Math.sin(a) * edge);
     }
@@ -2485,7 +2550,7 @@ export class Game {
                 if (!onRing) continue;
                 const t = this.tiles.getByMapCoords(tx, ty);
                 if (!t) continue;
-                if (!this.passability.getPassableSpeed(t, SpeedType.Track, false)) continue;
+                if (!this.passability.getPassableSpeed(t, SpeedType.Track, false, false)) continue;
                 if (this.occupancy.getGroundObjectsOnTile(t).length) continue;
                 ring.push(t);
             }
@@ -3199,7 +3264,7 @@ export class Game {
             if (u.isEngineer) { this.advanceOrder(u); return; }
             u.attackTarget = t;
             const d = dist(u.x, u.y, t.x, t.y);
-            const range = (w ? w.range : 90) * 0.92 + (t.isBuilding ? t.radius * 0.7 : t.radius);
+            const range = (w ? w.range : 90) * 0.92 + (t.isBuilding() ? t.radius * 0.7 : t.radius);
             if (d > range) {
                 if (!u.orders.hasTasks()) this.pathToEntity(u, t);
             } else {
@@ -3335,7 +3400,7 @@ export class Game {
         for (const e of this.tmp) {
             if (!this.canShootAt(shooter, w, e)) continue;
             const d = dist(x, y, e.x, e.y);
-            const pad = e.isBuilding ? (e as Building).radius : e.armor === 'air' ? 10 : 8;
+            const pad = e.isBuilding() ? (e as Building).radius : e.armor === 'air' ? 10 : 8;
             if (d > range + pad) continue;
             let score = d;
             // AA weapons prioritise aircraft, ground weapons ignore them entirely
@@ -3488,7 +3553,7 @@ export class Game {
             if (eu.isAir && pr.z < 12) continue;      // ground fire passes underneath
             if (!eu.isAir && pr.z > 46) continue;     // high arcs fly over infantry
             // ballistic rounds only collide on the way down
-            if (pr.ballistic && pr.vz > 10 && e.isBuilding === false) continue;
+            if (pr.ballistic && pr.vz > 10 && e.isBuilding() === false) continue;
             const hitR = pr.hitRadius + e.radius;
             const t = segmentCircleT(pr.prevX, pr.prevY, dx, dy, e.x, e.y, hitR);
             if (t < 0 || t > 1 || t >= bestT) continue;
@@ -3653,7 +3718,7 @@ export class Game {
         e.hp = 0;
         this.players[e.owner].lost++;
         if (killer !== e.owner) this.players[killer].kills++;
-        const big = e.isBuilding;
+        const big = e.isBuilding();
         if (big) {
             if (this.selectedBuilding === (e as Building)) this.selectedBuilding = null;
             const victim = e as Building;

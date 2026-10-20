@@ -1,3 +1,19 @@
+/**
+ * Concentric square rings, one ring per distance, yielding accepted tiles.
+ *
+ * Reference: redalert2/src/game/map/tileFinder/RadialTileFinder.ts (75 lines).
+ *
+ * The ring order inside a single distance is bottom row → right column → top
+ * row → left column, going right-to-left and bottom-to-top. That order is *not*
+ * arbitrary: `Warhead.detonate` iterates all tiles within `cellSpread` and the
+ * per-tile processing order decides which object is recorded as the direct hit
+ * when two overlap, so the walk has to stay bit-identical to retail.
+ *
+ * Distance 0 yields only the start tile, and only if the predicate accepts it.
+ */
+import type { Tile } from '../TileCollection';
+import type { MapBounds } from '../MapBounds';
+
 interface TileCollection {
     getByMapCoords(x: number, y: number): Tile | undefined;
 }
@@ -7,38 +23,16 @@ interface Foundation {
     height: number;
 }
 
-interface MapBounds {
-    isWithinBounds(tile: Tile): boolean;
-}
-
-interface Tile {
-    rx: number;
-    ry: number;
-}
-
-/**
- * Verbatim from redalert2/src/game/map/tileFinder/RadialTileFinder.ts.
- *
- * A generator that walks concentric square rings outward from `startTile`, one
- * ring per `getNextTile()` round. The ring order inside a single distance is
- * bottom row → right column → top row → left column, going right-to-left and
- * bottom-to-top. That order is *not* arbitrary: `Warhead.detonate` iterates all
- * tiles within `cellSpread` and the per-tile processing order decides which
- * object is recorded as the direct hit when two overlap, so the ring walk has
- * to stay bit-identical to retail.
- *
- * Distance 0 yields only the start tile, and only if the predicate accepts it.
- */
 export class RadialTileFinder<T extends Tile = Tile> {
     private tiles: TileCollection;
     private mapBounds: MapBounds;
     private startTile: T;
     private foundation: Foundation;
     private maxDistance: number;
-    private predicate: (tile: Tile) => boolean;
+    private predicate: (tile: T) => boolean;
     private checkBounds: boolean;
     private distance: number;
-    private generator: Generator<Tile | undefined>;
+    private generator: Generator<T | undefined>;
 
     constructor(
         tiles: TileCollection,
@@ -47,7 +41,7 @@ export class RadialTileFinder<T extends Tile = Tile> {
         foundation: Foundation,
         distance: number,
         maxDistance: number,
-        predicate: (tile: Tile) => boolean,
+        predicate: (tile: T) => boolean,
         checkBounds = true,
     ) {
         this.tiles = tiles;
@@ -61,16 +55,17 @@ export class RadialTileFinder<T extends Tile = Tile> {
         this.generator = this.generate();
     }
 
-    getNextTile(): Tile | undefined {
+    getNextTile(): T | undefined {
         return this.generator.next().value;
     }
 
-    private *generate(): Generator<Tile | undefined> {
-        const getTile = (x: number, y: number): Tile | undefined => {
-            const tile = this.tiles.getByMapCoords(x, y);
+    private *generate(): Generator<T | undefined> {
+        const getTile = (x: number, y: number): T | undefined => {
+            const tile = this.tiles.getByMapCoords(x, y) as T | undefined;
             if (tile && (!this.checkBounds || this.mapBounds.isWithinBounds(tile)) && this.predicate(tile)) {
-                return tile;
+                return tile as T;
             }
+            return undefined;
         };
 
         do {

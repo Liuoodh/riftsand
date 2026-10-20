@@ -1,3 +1,22 @@
+/**
+ * Land class of a tile — what the speed table is keyed by.
+ *
+ * Reference: redalert2/src/game/type/LandType.ts (verbatim).
+ *
+ * Two things in the reference are easy to miss and are preserved here:
+ *
+ *   - `getLandType` **throws** on an unknown terrain type. It is not a lookup
+ *     with a fallback: a tile whose art says `Default` maps to `Clear`, but a
+ *     tile with no recognised art at all is a data bug and must be loud.
+ *   - `LandType.Wall` and `LandType.Tiberium` are never produced by this
+ *     mapping. They exist only as *overlay* land types, assigned later by
+ *     `TileOccupation.computeTileLandType` when a wall or an ore field occupies
+ *     the cell. A generator that writes `Tiberium` straight into the terrain is
+ *     modelling ore as ground, which is exactly the confusion this split
+ *     exists to prevent.
+ */
+import { TerrainType } from './TerrainType';
+
 export enum LandType {
     Clear = 0,
     Road = 1,
@@ -9,37 +28,27 @@ export enum LandType {
     Water = 7,
     Wall = 8,
     Tiberium = 9,
-    Cliff = 10
+    Cliff = 10,
 }
 
-/**
- * Our theatre vocabulary -> LandType.
- *
- * The reference reads the engine's TerrainType (a tile-art property) and throws
- * on anything unknown. We generate terrain procedurally, so the mapping lives
- * here and every kind we can emit has a LandType.
- */
-import { TileKind } from '../../world/Terrain';
-
-const terrainToLandTypeMap = new Map<TileKind, LandType>([
-    [TileKind.Sand, LandType.Clear],
-    [TileKind.Dune, LandType.Rough],
-    [TileKind.Rock, LandType.Rock],
-    [TileKind.Crystal, LandType.Tiberium],
-    [TileKind.Road, LandType.Road],
-    [TileKind.Water, LandType.Water],
+const terrainToLandTypeMap = new Map<TerrainType, LandType>([
+    [TerrainType.Default, LandType.Clear],
+    [TerrainType.Clear, LandType.Clear],
+    [TerrainType.Tunnel, LandType.Cliff],
+    [TerrainType.Railroad, LandType.Railroad],
+    [TerrainType.Rock1, LandType.Rock],
+    [TerrainType.Rock2, LandType.Rock],
+    [TerrainType.Water, LandType.Water],
+    [TerrainType.Shore, LandType.Beach],
+    [TerrainType.Pavement, LandType.Road],
+    [TerrainType.Dirt, LandType.Road],
+    [TerrainType.Rough, LandType.Rough],
+    [TerrainType.Cliff, LandType.Cliff],
 ]);
 
-/**
- * `solidify` is our addition, not the reference's: our generator marks a cell as
- * `solid` (an impassable ridge) independently of its art, and a solid *rock* ridge
- * is what the reference calls Cliff. Only `Rock` is promoted — a solid dune or a
- * solid road cell keeps its own land type, because those are already impassable for
- * other reasons and re-labelling them would change the speed table.
- */
-export function getLandType(terrainType: TileKind, solidify = false): LandType {
-    if (solidify && terrainType === TileKind.Rock) return LandType.Cliff;
-    const mapped = terrainToLandTypeMap.get(terrainType);
-    if (mapped === undefined) throw new Error(`Unknown terrain type ${terrainType}`);
-    return mapped;
+export function getLandType(terrainType: TerrainType): LandType {
+    if (!terrainToLandTypeMap.has(terrainType)) {
+        throw new Error(`Unknown terrain type ${terrainType}`);
+    }
+    return terrainToLandTypeMap.get(terrainType)!;
 }

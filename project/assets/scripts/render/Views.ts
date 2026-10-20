@@ -534,7 +534,7 @@ export class EntityView {
     private frame = -1;
 
     constructor(parent: Node, public e: Entity, private terrain: TerrainMap) {
-        this.node = plainNode(parent, (e.isBuilding ? 'B:' : 'U:') + e.id);
+        this.node = plainNode(parent, (e.isBuilding() ? 'B:' : 'U:') + e.id);
         const p0 = worldToProj(e.x, e.y, terrain.heightAt(e.x, e.y));
         this.node.setPosition(p0.x, p0.y, 0);
         (this.node as any).__depth = this.computeDepth();
@@ -887,7 +887,7 @@ export class EntityView {
     private drawHp(ratio: number, selected: boolean) {
         const g = this.hp;
         g.clear();
-        const isB = this.e.isBuilding;
+        const isB = this.e.isBuilding();
         const w = isB ? Math.min(88, (this.e as Building).size * TILE * 0.8) : 26;
         const h = isB ? 3 : 2.5;
         const y = isB
@@ -1283,7 +1283,7 @@ export class WorldRenderer {
             const cpp = worldToProj(e.x, e.y, 0);
             const inView = cpp.x > cameraBounds.x0 - 140 && cpp.x < cameraBounds.x1 + 140
                 && cpp.y > cameraBounds.y0 - 140 && cpp.y < cameraBounds.y1 + 140;
-            const selected = e.isBuilding
+            const selected = e.isBuilding()
                 ? g.selectedBuilding === e
                 : sel.indexOf(e as Unit) >= 0;
             if (!selected && !inView) continue;

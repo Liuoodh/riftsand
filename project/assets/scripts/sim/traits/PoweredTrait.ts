@@ -21,7 +21,7 @@ export class PoweredTrait {
     }
 
     isCharged(): boolean {
-        return !!this.obj.isBuilding && !!this.obj.overpoweredTrait?.hasChargersToPowerOn?.();
+        return !!this.obj.isBuilding() && !!this.obj.overpoweredTrait?.hasChargersToPowerOn?.();
     }
 
     isPoweredOn(checkCharged = false): boolean {

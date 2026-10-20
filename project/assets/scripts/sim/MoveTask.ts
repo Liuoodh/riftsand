@@ -25,8 +25,13 @@ import { Task, TaskStatus, WaitTicksTask } from './Task';
 import { MoveAsideTask } from './MoveAsideTask';
 import { MoveTrait, MoveResult, MoveState, CollisionState, TICK } from './MoveTrait';
 import { DriveLocomotor, FootLocomotor } from './Locomotor';
-import { MovementZone, PathNode, SpeedType } from './Passability';
-import { MapBounds, RadialTileFinder, RandomTileFinder, Tile } from './Tiles';
+import { MovementZone } from './type/MovementZone';
+import { SpeedType } from './type/SpeedType';
+import type { PathNode } from './map/Terrain';
+import type { MapBounds } from './map/MapBounds';
+import type { Tile } from './map/TileCollection';
+import { RadialTileFinder } from './map/tileFinder/RadialTileFinder';
+import { RandomTileFinder } from './map/tileFinder/RandomTileFinder';
 import { Vec2, FacingUtil } from './Math2';
 import { SimWorld } from './World';
 import { SPEED, isBuildingObject } from './Constants';
@@ -761,7 +766,7 @@ export class MoveTask extends Task {
         if (unit.rules.movementZone === MovementZone.Fly) {
             const isValidTile = (tile: Tile): boolean =>
                 !map.tileOccupation.getGroundObjectsOnTile(tile).some((obj: any) => isBuildingObject(obj) && !obj.dead);
-            const randomFinder = new RandomTileFinder(map.tiles, map.mapBounds, preferredTile, 1, () => Math.random(), isValidTile);
+            const randomFinder = new RandomTileFinder(map.tiles, map.mapBounds, preferredTile, 1, { generateRandomInt: (min, max) => min + Math.floor(Math.random() * (max - min + 1)) }, isValidTile);
             let relocTile = randomFinder.getNextTile();
             if (!relocTile) {
                 const radialFinder = new RadialTileFinder(

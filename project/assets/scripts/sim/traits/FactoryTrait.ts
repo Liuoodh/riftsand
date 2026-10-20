@@ -13,7 +13,7 @@
 import { FactoryType } from '../player/Production';
 import { QueueStatus } from '../player/ProductionQueue';
 import { BuildStatus } from '../rules/BuildStatus';
-import { RadialTileFinder } from '../Tiles';
+import { RadialTileFinder } from '../map/tileFinder/RadialTileFinder';
 
 export enum FactoryStatus {
     Idle = 0,

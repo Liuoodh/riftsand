@@ -94,7 +94,7 @@ export class CrewedTrait {
                     world.setVeteran(unit);
                 }
                 world.spawnObject(unit, spawnTile);
-                if (!!target.isBuilding) {
+                if (!!target.isBuilding()) {
                     world.scatter(unit, target.dead ? [] : [target]);
                 }
             }

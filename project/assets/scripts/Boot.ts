@@ -559,7 +559,7 @@ export class RiftApp extends Component {
         const picked = this.pickAt(w.x, w.y);
         if (picked) {
             const engineers = g.selection.filter(u => !u.dead && u.isEngineer);
-            if (picked.isBuilding && engineers.length > 0) {
+            if (picked.isBuilding() && engineers.length > 0) {
                 if (picked.owner !== 0) {
                     g.orderCapture(picked);
                     this.ui.toast(`工兵前往接管 ${(picked as Building).def.name}`, 'info');
@@ -574,7 +574,7 @@ export class RiftApp extends Component {
                 }
             }
             if (picked.owner === 0) {
-                if (picked.isBuilding) {
+                if (picked.isBuilding()) {
                     g.selectBuilding(picked as Building);
                     this.ui.tab = 'structure';
                     this.ui.activeGroup = -1;

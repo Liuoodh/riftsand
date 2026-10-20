@@ -17,6 +17,7 @@
  */
 import { ProductionQueue, QueueStatus, QueueType } from './ProductionQueue';
 import { PowerLevel } from './PowerTrait';
+import { ObjectType } from '../type/ObjectType';
 
 export enum FactoryType {
     BuildingType = 0,
@@ -118,7 +119,7 @@ export class Production {
     }
 
     getQueueTypeForObject(object: any): QueueType {
-        if (object.isBuilding) {
+        if (object.isBuilding()) {
             return object.buildCat === BuildCat.Combat ? QueueType.Armory : QueueType.Structures;
         }
         if (object.kind === 'infantry') return QueueType.Infantry;
@@ -196,10 +197,26 @@ export class Production {
     }
 
     getFactoryTypeFor(object: any): FactoryType {
-        if (object.isBuilding || object.size !== undefined) return FactoryType.BuildingType;
-        if (object.kind === 'infantry') return FactoryType.InfantryType;
-        if (object.kind === 'air') return FactoryType.AircraftType;
-        return object.naval ? FactoryType.NavalUnitType : FactoryType.UnitType;
+        /*
+         * The reference dispatches on `object.type === ObjectType.Building`, and
+         * the object it is handed is a *rules* record — which has `type` but no
+         * `isBuilding()` method. Testing `isBuilding()` first therefore threw
+         * "object.isBuilding is not a function" the moment a captured factory
+         * made `ensurePrerequisites` re-check a queue.
+         *
+         * Entities (a live Building/Unit) are the other caller shape: they have
+         * the predicate and no `type`, so both branches are kept, rules first.
+         */
+        if (object?.type === ObjectType.Building) return FactoryType.BuildingType;
+        if (object?.type === ObjectType.Infantry) return FactoryType.InfantryType;
+        if (object?.type === ObjectType.Aircraft) return FactoryType.AircraftType;
+        if (typeof object?.isBuilding === 'function' && object.isBuilding()) return FactoryType.BuildingType;
+        if (object?.type === ObjectType.Vehicle || object?.kind === 'vehicle') {
+            return object?.naval ? FactoryType.NavalUnitType : FactoryType.UnitType;
+        }
+        if (object?.kind === 'infantry') return FactoryType.InfantryType;
+        if (object?.kind === 'air') return FactoryType.AircraftType;
+        return object?.naval ? FactoryType.NavalUnitType : FactoryType.UnitType;
     }
 
     meetsPrerequisites(object: any): boolean {

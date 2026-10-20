@@ -1644,3 +1644,231 @@ PASS  端到端：0.5 伤害一滴血都不掉
 全量回归：`mathtest 40 / rulestest 62 / combattest 71 / movetest 18 / crowdtest /
 phystest / occltest / dirtest / speedtest / menutest / assettest / inputtest /
 featuretest / harvesttest / maptest / buildingtest / battletest`，`smoke ERRORS 0`。
+
+---
+
+## 26. v0.25-B4：地图与地形（原版 21 文件 / 2,863 行）
+
+B3 把「一次命中」对到了数值层，B4 换成**世界**：格子怎么编号、哪一格能走、走一格的代价、
+建筑盖上去之后谁的边要重算。这一层的特点是——它出的错从来不在这层报错。地形错一格，
+表现出来是「坦克在一个空地上卡住」「工兵绕远路」「两辆车穿模」，全都在三层之外。
+
+### 26.1 本轮范围
+
+```
+sim/map/TileCollection.ts        430 行   rx/ry ↔ dx/dy、八向邻接、矩形取格
+sim/map/MapBounds.ts             250 行   五个矩形，两处"看起来该改"的地方
+sim/map/TileOccupation.ts        230 行   占位集合 + landType 派生（唯一写者）
+sim/map/Terrain.ts               700 行   通行图、A*、岛 id、速度、障碍
+sim/map/Bridges.ts               600 行   高架桥链、head 类型、帧表
+sim/map/MapShroud.ts             430 行   迷雾的折叠坐标与按层投影
+sim/map/TileOcclusion.ts         100 行   高建筑的投影遮挡（引用计数）
+sim/map/OreSpread.ts              30 行   矿石帧 id 的纯函数
+sim/map/wallTypes.ts              18 行   16 条墙体连接表
+sim/map/pathFinder/*.ts          265 行   A* + 二叉堆 + 搜索状态池
+sim/map/tileFinder/*.ts          220 行   六个取格器（径向/洗牌/卡氏/定向/洪泛）
+sim/theater/TileSets.ts          130 行   地块图集接口 + HighBridgeHeadType
+sim/type/TerrainType.ts           28 行   地形 id（= 零售 .map 的 id，不是序号）
+sim/type/LandType.ts              54 行   地形 → 地表类别，未知即 throw
+```
+
+引擎侧 20 文件 / 4,074 行（原版同范围 2,863 行，差额是注释与 duck-type 接口），
+外加**我们自己的内容层** `sim/content/`（2 文件 / 273 行，见 §26.6），
+并删掉旧的 `sim/Tiles.ts`(338)、`sim/Passability.ts`(495)、旧 `TileOccupation`(≈170)、
+重复的 `wallTypes`(18)，净减 ≈1,000 行自研代码。
+
+### 26.2 两套坐标，别混
+
+同一块地有两个编号，且**都不是**像素：
+
+```
+rx, ry   逻辑格：寻路、地基、占位、迷雾折叠全用它
+dx, dy   显示格：等轴投影用的，dx = rx - ry + (N-1)，dy = rx + ry
+```
+
+`TileCollection` 按 `rx + ry * width` 存成一维数组；`dx/dy` 只用来算屏幕位置和
+`MapBounds`。两者混用的后果很直观：`MapBounds` 拿 `dx` 去比 `localSize`，
+而 `localSize` 是按 `rx` 的宽度算的——在 80×80 的钻石图上会差出一整个象限。
+
+八向邻接表是这一层最容易「顺手归一化」的地方，四个对角方向的**轴是互换的**：
+
+| 方向 | 偏移 | | 方向 | 偏移 |
+|---|---|---|---|---|
+| Top | `rx-1, ry-1` | | Bottom | `rx+1, ry+1` |
+| TopLeft | `rx-1, ry` | | BottomRight | `rx+1, ry` |
+| TopRight | `rx, ry-1` | | BottomLeft | `rx, ry+1` |
+| Left | `rx-1, ry+1` | | Right | `rx+1, ry-1` |
+
+改两条就整体旋转 45°，而且不报错——只是所有桥头、所有斜向路径都歪了。所以这一项在
+`maptest2` 里是逐项字符串比对的，不是"数量对就行"。
+
+### 26.3 五个矩形与两处"看起来该改"的规则
+
+`MapBounds` 一次算五个矩形，各有各的用途，混用任意两个都会让「哪里能盖」错一格：
+
+| 矩形 | 含义 |
+|---|---|
+| `fullSize` | 逻辑尺寸 × 2（等轴后每格占两行两列） |
+| `clampedFullSize` | 整图减一格，`x=1, y=2` |
+| `rawLocalSize` | 地图文件给的 localSize，未加高 |
+| `localSize` | 加上 `max(9, cutoffTileHeight)` 之后的可视高度 |
+| `mapBuildableSize` | `localSize` 左右各内缩 1、上下各内缩 4 |
+
+两处容易"修"错的：
+
+1. `isWithinBounds` 测的是 **`dy - z`**，不是 `dy`。高台占的是它**上方**的那一行，
+   所以 z=1 的格子会比 z=0 的格子早一行出界。写成 `dy` 只在纯平地图上看不出问题。
+2. `clampWithinBounds` 里的 `y += (x % 2) - (y % 2)` 不是补偿，是**强制同奇偶**。
+   我们的 N=80 是偶数，`dx - dy = (N-1) - 2ry` 恒为奇数——也就是说真实格子的
+   `dx` 与 `dy` **永远异奇偶**，这一行会把每个界内格子再挪一行。所以它的正确断言是
+   「幂等 + 落在真实等轴格上」，而不是「恒等映射」。测试原本写的是后者，是错的。
+
+### 26.4 建边用北向，重算用南向
+
+`computePassability` 只连**北侧四向**（Left / TopLeft / Top / TopRight），因为
+`addLink` 是双向的，从两头各连一次就够。而 `updatePassability`（建筑出现/消失时）
+重算的是被影响格子**南侧四向**，理由是同一条：变化的是这块格子的边，但它北边的
+邻居也要重连，于是从邻居的角度看，它自己在南边。
+
+我们旧的 `Passability.ts` 两处都用了北向。这在"建筑出现"时能过，在"建筑消失"时
+**南侧邻居的边永远不重建**——表现是拆掉一堵墙之后，紧贴它南边的那条路依然走不通，
+直到别的原因碰巧重算到那里。这是 B4 之前真实存在的缺陷，`maptest2` 的
+`占格后反向路径也绕开该格` / `解除占用后反向路径逐格复原` 两条就是钉它的。
+
+### 26.5 这一轮挖出来的五个真缺陷
+
+**(1) Babel loose 模式把 `[...set]` 编成 `[].concat(set)`**
+
+Cocos 的构建把 Babel 跑在 loose 模式，数组展开会退化成 `[].concat(x)`：对数组正确，
+对 Set / Map 迭代器**错得无声无息**——`[].concat(set)` 得到 `[set]`，一个元素。
+`TileOccupation.getObjectsOnTile` 恰好写的是 `[...cell]`，于是它在运行时返回
+"一个 Set"，`Terrain.isBlockerObject` 拿到它调 `.isTerrain()` 就炸：
+
+```
+TypeError: obj.isTerrain is not a function
+  at Terrain.isBlockerObject ← getPassableSpeed ← RadialTileFinder.predicate
+```
+
+这不是 B4 独有的问题，是**全项目**的构建语义陷阱。凡是要把 Set / Map 变成数组的
+地方一律 `Array.from(...)`；`for (const x of set)` 不受影响（编译成迭代器助手）。
+本轮据此改了 9 处：`TileOccupation`(×2)、`Terrain`(×2)、`Bridges`、`Rules`(×2)、
+`SuperWeaponsTrait`、`TechnoRules`、`AnimTerrainEffect`。
+
+**(2) `getByMapCoords` 只查上界 → 西边界与东边界之间长出 201 条幻边**
+
+原版只判 `x >= width || y >= height`，负坐标靠"数组下标为负自然越界"。对
+`(x=-1, y=0)` 成立；对 `(x=-1, y>0)` **不成立**：`x + y*width` 落在数组里上一行的末尾，
+也就是 `(width-1, y-1)`——地图的**另一侧**。于是西边界每一格的 `Left/TopLeft/Top`
+都指向东边界的真实格子，`computePassability` 老老实实把它们连起来。
+
+在我们的 80×80 图上实测：**201 条**从第 0 列指向第 79 列的边，单位可以"一步"横穿全图。
+零售地图边缘是水或崖，所以原版从没暴露；我们的地图是程序生成的，边缘是可走地面。
+
+修法是把下界也判上，并把这个理由写进注释——**这是对参考实现的一处故意偏离**，
+`maptest2` 里的 `西边界不跨图回绕到东边界（修正原版潜伏缺陷）` 守着它。
+
+**(3) `onBridge` 恒为 `undefined` → 两辆车可以共格**
+
+`Terrain.findObstacles` 判断"这辆车是不是在我这一格"用的是
+
+```ts
+const sameLocation = obj.tile === pathNode.tile && obj.onBridge === !!pathNode.onBridge;
+```
+
+参考实现里 `gameObject.onBridge` 在第一次 `handleTileChange` 之后就是布尔值
+（`gameObject.onBridge = !!bridge`）。我们的 `MoveTrait.handleTileChange` 把这个赋值
+省掉了，于是单位身上 `onBridge === undefined`，而右边是 `false`：
+
+```
+undefined === false  // false —— 永远不是同格
+```
+
+两辆车就此互相"看不见"，各开各的，撞进同一格时只有子格偏移把它们在视觉上分开
+（`同格帧数=12 / 最近 0.2px`）。补上这一行赋值，并在 `Unit` 上把 `onBridge`
+默认成 `false`（出生后到第一次跨格之间也要有值）。
+
+这条也解释了为什么 B3 的 `movetest` 18 条当时是绿的：旧的 `findObstacles` 写的是
+`obj.tile === pathNode.tile`，没有 `onBridge` 这一半，把这处缺失挡住了。
+
+**(4) `[Water]` / `[Cliff]` 的速度表是空的**
+
+规则引擎的语义是**缺列 = 1**，不是 0（`LandRules.getSpeedModifier`）。旧实现把
+"水不能走""崖不能爬"写死在 `world/Terrain.speedAt` 里，B4 把移动搬到
+`Terrain.getPassableSpeed` 之后，两节空表就等于"水面可开、崖面可走"。
+补的是三条地面列显式为 0，Hover / Amphibious **故意不写**——缺列=1 正是气垫船和
+两栖车能过水的原因。
+
+**(5) `Production.getFactoryTypeFor` 对着 rules 对象调 `isBuilding()`**
+
+工兵接管工厂时走 `changeBuildingOwner → ensurePrerequisites → isAvailableForProduction
+→ hasFactoryFor → getFactoryTypeFor`，最后这一步原版是 `object.type === ObjectType.Building`，
+我们的移植版写成了 `object.isBuilding() || object.size !== undefined`。传进来的其实是
+**规则记录**（`TechnoRules`），它没有 `isBuilding` 方法：
+
+```
+TypeError: object.isBuilding is not a function
+  at Production.getFactoryTypeFor ← hasFactoryFor ← isAvailableForProduction
+  at Game.ensurePrerequisites ← changeBuildingOwner ← resolveEngineer
+```
+
+改回按 `type` 分派，实体对象那条路留在后面兜底。
+
+### 26.6 内容层：矿石不是一种地表
+
+参考引擎里矿石**不是地形**，是一个 overlay 占位对象；`TileOccupation.computeTileLandType`
+在它存在时把格子的**地表类别**算成 `Tiberium`，最后一车拉完、对象移除，格子回到
+`Clear`。这是有后果的：如果像旧实现那样把"矿区"当成一种地表类型，减慢就写进了地图，
+收割完的格子会**永久**比周围慢。
+
+所以 B4 的地图装配是三段，而不是一段：
+
+```
+ProceduralTileSets   地块图集（我们的美术，接口对齐 TileSets）
+buildTileData()      TerrainMap → TileData[]（含 solid 山脊 → Cliff 的抬升）
+TileCollection → MapBounds → TileOccupation → Terrain
+placeOreOverlay()    每个矿区格注册一个 OreOverlayStub，landType 随之变 Tiberium
+```
+
+`OreOverlayStub` 只回答引擎会问的那几个谓词（`isOverlay/isTiberium` 为真，其余为假），
+不是 `Entity`，也没有 HP——它只是让引擎用**和零售一样的路径**推出地表类别。
+收割完调用 `removeOreOverlay`，格子自己回到基础地表。
+
+同样在这一层处理的还有 **`TileKind.Rock`**：旧实现把它硬编码成不可通行，映射到
+`TerrainType.Rock1` 之后会变成 `[Rock]` 的 Track=0.7 可走慢地形。修法是给"实心山脊"
+一个虚拟 tileNum（`TILE_NUM_SOLID_ROCK = 6` → `TerrainType.Cliff`），按
+`terrain.solid[i] === 1` 分派，让"看起来是石头"和"走不过去"重新对齐。
+
+### 26.7 验收
+
+`maptest2.mjs`（B4 专项）63 条，分十组：五个矩形 / 八向表 / 速度与形参语义 /
+占格后双向重算 / landType 派生 / 矿石 id / 径向环序 / 迷雾折叠 / 遮挡引用计数 /
+高架桥链。其中几条是专门钉本轮缺陷的：
+
+```
+PASS  clampWithinBounds 稳定（再钳一次不再移动）且结果落在真实等轴格上  · 界内 6335 格，被对齐 6335 格
+PASS  西边界不跨图回绕到东边界（修正原版潜伏缺陷）  · none
+PASS  内部格 8 邻居 / 角落格 3 邻居  · 8 / 3
+PASS  建筑阻挡：Vehicle 只被第一格挡住（第 3 参就是 isInfantry）  · veh1=0 veh2=1
+PASS  解除占用后反向路径逐格复原（南向重算的回归点）  · 长度 15→15
+PASS  覆盖物按插入顺序，第一个声明者胜出（不是优先级表）  · landType=4
+PASS  高架桥面层恒为 Road  · onBridgeLandType=1
+PASS  矿石 id 覆盖全部 12 帧  · distinct=12
+PASS  occluded 按引用计数：删除一个遮挡者仍遮挡
+```
+
+全量回归（17 套件 / 403 条）：
+
+| 套件 | 结果 | 套件 | 结果 |
+|---|---|---|---|
+| mathtest | 40 | inputtest | 20 |
+| rulestest | 63 | featuretest | 14 |
+| combattest | 71 | harvesttest | 6 |
+| movetest | 18 | maptest | 21 |
+| crowdtest | 7 | maptest2 | 63 |
+| phystest | 10 | buildingtest | 13 |
+| occltest | 5 | battletest | ERRORS 0 |
+| dirtest | 9 | smoke | ERRORS 0 |
+| speedtest | 12 | menutest | 11 |
+| assettest | 20 | | |
+
+`tsc --noEmit` 0 错误，`web-mobile` 构建通过。

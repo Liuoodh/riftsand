@@ -500,12 +500,17 @@ const cap = await page.evaluate(() => {
     const engDef = g.availableUnitsFor(h, 'infantry').find((d) => d.engineer);
     const target = g.buildings.find((b) => b.owner === 1 && !b.def.isCore) || g.buildings.find((b) => b.owner === 1);
     if (!engDef || !target) return { skipped: '缺少工兵或目标' };
-    const e = g.spawnUnit(0, engDef, target.x + (target.size * 32) / 2 + 18, target.y);
-    e.invulnUntil = 1e9;
-    g.orderCaptureFor(e, target);
-    for (let i = 0; i < 300 && target.owner !== 0; i++) g.update(0.05);
+    try {
+        const e = g.spawnUnit(0, engDef, target.x + (target.size * 32) / 2 + 18, target.y);
+        e.invulnUntil = 1e9;
+        g.orderCaptureFor(e, target);
+        for (let i = 0; i < 300 && target.owner !== 0; i++) g.update(0.05);
+    } catch (ex) {
+        return { skipped: '异常', error: String(ex && ex.message), stack: String(ex && ex.stack).slice(0, 900) };
+    }
     return { captured: target.owner === 0, name: target.def.name };
 });
+if (cap.stack) console.log('   capture-stack', cap.stack);
 check('工兵接管敌方建筑', cap.captured === true, cap.skipped || `${cap.name} → owner 0`);
 
 /* ---------- wrap up ---------- */

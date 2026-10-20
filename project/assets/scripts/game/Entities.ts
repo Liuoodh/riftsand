@@ -13,7 +13,7 @@ import { MoveTrait, MoveState } from '../sim/MoveTrait';
 import { UnitOrders } from '../sim/Task';
 import { Position } from '../sim/Position';
 import { rulesFor, UnitRules } from '../sim/World';
-import { Tile } from '../sim/Tiles';
+import { Tile } from '../sim/map/TileCollection';
 import { HarvesterTrait } from '../sim/traits/HarvesterTrait';
 import { TurretTrait } from '../sim/traits/TurretTrait';
 import { PoweredTrait } from '../sim/traits/PoweredTrait';
@@ -63,7 +63,6 @@ export class Entity {
     hp = 1;
     maxHp = 1;
     dead = false;
-    isBuilding = false;
     armor: UnitDef['armor'] = 'light';
     view: any = null;
     /** last time this entity took damage (for hp bar fade) */
@@ -79,7 +78,7 @@ export class Entity {
     deathType: DeathType = DeathType.Normal;
 
     /** collision footprint; subclasses refine this */
-    get radius(): number { return this.isBuilding ? 16 : 8; }
+    get radius(): number { return this.isBuilding() ? 16 : 8; }
 
     /**
      * Reference HealthTrait: health as a 0..100 percentage.
@@ -113,6 +112,31 @@ export class Entity {
     isAircraft(): boolean { return false; }
     isTerrain(): boolean { return false; }
     isOverlay(): boolean { return false; }
+    isBuilding(): boolean { return false; }
+    /**
+     * Reference `GameObject.isTechno()` — true for everything that walks, drives,
+     * flies or stands: the whole of `Entity` minus smudges and placeholders,
+     * neither of which is an Entity here.
+     */
+    isTechno(): boolean { return true; }
+    /*
+     * Overlay-family predicates. Nothing outside `Overlay` answers true, but
+     * every object must *have* the method: the ported `Terrain.isBlockerObject`
+     * and `TileOccupation.computeTileLandType` ask any occupant these questions
+     * without first checking its class.
+     */
+    isSmudge(): boolean { return false; }
+    isTiberium(): boolean { return false; }
+    isBridge(): boolean { return false; }
+    isHighBridge(): boolean { return false; }
+    isLowBridge(): boolean { return false; }
+    isXBridge(): boolean { return false; }
+    isBridgePlaceholder(): boolean { return false; }
+    /** reference `GameObject.getFoundation()` — footprint in cells */
+    getFoundation(): { width: number; height: number } {
+        const art = (this as any).art;
+        return art?.foundation ?? { width: 1, height: 1 };
+    }
     get cost(): number { return 0; }
 }
 
@@ -150,6 +174,14 @@ export class Unit extends Entity {
     /* ------------------------------------------------------------------ */
     /** cell the unit stands on (sim/Tiles) */
     tile!: Tile;
+    /**
+     * Reference `GameObject.onBridge`: false on the ground layer, true while on
+     * a bridge deck. Defaulted here rather than left `undefined` because
+     * `Terrain.findObstacles` compares it with `===` against the path node's
+     * flag, and `undefined === false` would make every unit look like it is on
+     * a different layer from every other unit.
+     */
+    onBridge = false;
     /** heading in degrees, reference convention (0 = north, 90 = west) */
     direction = 0;
     /** degrees per tick, only used by TurnTask for the banking visual */
@@ -466,7 +498,7 @@ export { BuildStatus } from '../sim/rules/BuildStatus';
 import { BuildStatus as BuildStatusEnum } from '../sim/rules/BuildStatus';
 
 export class Building extends Entity {
-    isBuilding = true;
+    isBuilding(): boolean { return true; }
     def: BuildingDef;
     /**
      * The owning PlayerState.

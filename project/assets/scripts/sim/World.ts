@@ -5,9 +5,12 @@
  * how the port stays a *drop-in* copy of the reference: every `this.game.map.*`
  * call in the original has a matching member here.
  */
-import { MovementZone, Passability, SpeedType } from './Passability';
-import { MapBounds, TileCollection } from './Tiles';
-import { TileOccupation } from './TileOccupation';
+import { MovementZone } from './type/MovementZone';
+import { SpeedType } from './type/SpeedType';
+import { Terrain } from './map/Terrain';
+import { MapBounds } from './map/MapBounds';
+import { TileCollection } from './map/TileCollection';
+import { TileOccupation } from './map/TileOccupation';
 import { RAD } from './Math2';
 import { TICK } from './MoveTrait';
 
@@ -15,7 +18,7 @@ export { SPEED, isBuildingObject } from './Constants';
 import { SPEED } from './Constants';
 
 export interface SimWorld {
-    terrain: Passability;
+    terrain: Terrain;
     tiles: TileCollection;
     mapBounds: MapBounds;
     tileOccupation: TileOccupation;
@@ -68,7 +71,7 @@ export function rulesFor(def: any, turnRadPerSec: number): UnitRules {
                   : def.hover
                     ? SpeedType.Hover
                     : SpeedType.Track,
-        movementZone: kind === 'air' ? MovementZone.Fly : kind === 'infantry' ? MovementZone.Infantry : MovementZone.Ground,
+        movementZone: kind === 'air' ? MovementZone.Fly : kind === 'infantry' ? MovementZone.Infantry : MovementZone.Normal,
         crushable: kind === 'infantry',
         crusher: !!def.crush || kind === 'harvester' || kind === 'mcv',
         rot: turnRadPerSec * TICK * RAD,

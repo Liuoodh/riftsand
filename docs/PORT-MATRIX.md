@@ -171,12 +171,15 @@
 | 原版总计 | 1,207 | 125,799 |
 | 豁免（不做 / 原创） | 605 | 74,160 |
 | **应移植** | **602** | **51,639** |
-| 其中已移植 | 129 | 13,405 |
-| **待移植** | **473** | **≈38,200** |
+| 其中已移植 | 150 | 17,479 |
+| **待移植** | **452** | **≈34,100** |
 
-> 已移植的 13,405 行 = B1 数学地基（40 / 1,411）+ B2 规则全表（37 / 2,635）
-> + B3 战斗数学（33 / 3,258）+ 此前 19 / 6,101。
-> 也就是说：**剩余工作量约为此前全部工作的 4 倍**。
+> 已移植的 17,479 行 = B1 数学地基（40 / 1,411）+ B2 规则全表（37 / 2,635）
+> + B3 战斗数学（33 / 3,258）+ B4 地图地形（20 / 4,074）+ 此前 19 / 6,101。
+> B4 多出的 1,200 行是注释与 duck-type 接口，其内容层 `sim/content/`（2 / 273）
+> 是原创代码，不计入移植；同时删掉了 ≈1,000 行自研旧实现（`Tiles` / `Passability`）。
+> 也就是说：**剩余工作量约为此前全部工作的 2 倍**，且集中在 `gameobject/`（B5/B6）
+> 与 `task/`（B7）——这两块是"对象行为"，行数密度和耦合度都高于已完成的四批。
 
 ---
 
@@ -187,7 +190,7 @@
 | **B1 地基** | `util/math`+`geometry`、`game/math/*`、`game/type/*`、`Prng`、`Coords` | 40 | 1,411 | 无 | ✅ `8dd4d08` |
 | **B2 规则全表** | `game/rules/**` 全部 37 文件（含 WarheadRules 的 Verses 表） | 37 | 2,635 | B1 | ✅ |
 | **B3 战斗数学** | `Warhead`、`Weapon`、`WeaponTargeting`、`Target`、`trait/DamageTrait` 族 | 33 | 2,600 | B2 | ✅ 完成 |
-| **B4 地图地形** | `game/map/**` 21 文件（Terrain 重写、Bridges、MapShroud、PathFinder、OreSpread、TileOcclusion） | 21 | 2,863 | B2 | ⏳ |
+| **B4 地图地形** | `game/map/**` 21 文件（Terrain 重写、Bridges、MapShroud、PathFinder、OreSpread、TileOcclusion） | 21 | 2,863 | B2 | ✅ 完成 |
 | **B5 对象核心** | `gameobject/` 根 17 文件（含 `Projectile` 948）+ `locomotor` 9 + `unit` 14 + `selection` 5 | 45 | 6,200 | B3 B4 | ⏳ |
 | **B6 trait 补齐** | 剩余 44 个 `gameobject/trait/*` | 44 | 3,800 | B5 | ⏳ |
 | **B7 Task 全族** | 40 个 `task/**`（含 `MoveTask` 1,037、`AttackTask` 682） | 40 | 5,700 | B6 | ⏳ |

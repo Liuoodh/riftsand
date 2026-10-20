@@ -235,6 +235,19 @@ export const RULES_CONTENT: RulesContent = {
      * One entry per land type. `[Cliff]` is declared explicitly even though retail
      * reuses `[Rock]` for it: our generator emits cliffs that are hard-impassable,
      * and `[Rock]` is a passable-with-penalty surface.
+     *
+     * **A missing speed column means 1, not 0** (`LandRules.getSpeedModifier`).
+     * That default is what makes `speed: {}` a *passable* section, so an
+     * impassable surface has to spell out its zeros. Water and Cliff used to be
+     * expressed by the old `world/Terrain.speedAt`, which returned 0 for both;
+     * once movement moved onto `Terrain.getPassableSpeed`, empty sections made
+     * both of them drivable — tanks on open water, cliffs walkable. The three
+     * ground columns below restore that contract.
+     *
+     * Hover and Amphibious are deliberately *not* zeroed: retail leaves them
+     * absent on `[Water]`, which is exactly why hover skirts and amphibious
+     * hulls can cross it. Only the surfaces a walking or tracked unit stands on
+     * are declared.
      */
     landRules: {
         Clear: {
@@ -265,13 +278,19 @@ export const RULES_CONTENT: RulesContent = {
             buildable: true,
             speed: { [SpeedType.Foot]: 1, [SpeedType.Track]: 1, [SpeedType.Wheel]: 1 },
         },
-        Water: { buildable: false, speed: {} },
+        Water: {
+            buildable: false,
+            speed: { [SpeedType.Foot]: 0, [SpeedType.Track]: 0, [SpeedType.Wheel]: 0 },
+        },
         Wall: { buildable: false, speed: {} },
         Tiberium: {
             buildable: false,
             speed: { [SpeedType.Foot]: 0.9, [SpeedType.Track]: 0.8, [SpeedType.Wheel]: 0.7 },
         },
-        Cliff: { buildable: false, speed: {} },
+        Cliff: {
+            buildable: false,
+            speed: { [SpeedType.Foot]: 0, [SpeedType.Track]: 0, [SpeedType.Wheel]: 0 },
+        },
     },
 
     /* -------------------------------------------------------------- ore types */
