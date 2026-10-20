@@ -30,6 +30,51 @@ export {
 export { Coords } from './Coords';
 export { Prng } from './Prng';
 export { TICKS_PER_SECOND, HARVESTER_STORAGE } from './Constants';
+export { Timer } from './Timer';
+
+/* combat core (B3) */
+export { Target, TargetBridgeMode } from './Target';
+export { Weapon } from './Weapon';
+export { WeaponTargeting } from './WeaponTargeting';
+export { Warhead } from './Warhead';
+export type { WarheadTaskFactory } from './Warhead';
+export { RangeHelper } from './gameobject/unit/RangeHelper';
+export { FacingUtil } from './gameobject/unit/FacingUtil';
+export { TargetUtil } from './gameobject/unit/TargetUtil';
+export { ZoneType, getZoneType } from './gameobject/unit/ZoneType';
+export { CollisionType } from './gameobject/unit/CollisionType';
+export { HealthLevel } from './gameobject/unit/HealthLevel';
+export { StanceType } from './gameobject/StanceType';
+export { FlhCoords } from './art/FlhCoords';
+export { RadialTileFinder } from './map/tileFinder/RadialTileFinder';
+export { BridgeOverlayTypes, OverlayBridgeType } from './map/BridgeOverlayTypes';
+export { OreOverlayTypes } from './map/OreOverlayTypes';
+export { OverlayTibType } from './type/OverlayTibType';
+export { TiberiumType } from './type/TiberiumType';
+export { AnimTerrainEffect } from './gameobject/common/AnimTerrainEffect';
+
+/* combat traits (B3) */
+export { HealthTrait } from './gameobject/trait/HealthTrait';
+export { InvulnerableTrait } from './gameobject/trait/InvulnerableTrait';
+export { WarpedOutTrait } from './gameobject/trait/WarpedOutTrait';
+export { DelayedKillTrait } from './gameobject/trait/DelayedKillTrait';
+export { TiberiumTrait } from './gameobject/trait/TiberiumTrait';
+
+/* trait hooks */
+export { NotifyAttack } from './trait/interface/NotifyAttack';
+export { NotifyDamage } from './gameobject/trait/interface/NotifyDamage';
+export { NotifyHealthChange } from './gameobject/trait/interface/NotifyHealthChange';
+export { NotifyHeal } from './gameobject/trait/interface/NotifyHeal';
+export { NotifyTick } from './gameobject/trait/interface/NotifyTick';
+export { NotifyWarpChange } from './gameobject/trait/interface/NotifyWarpChange';
+
+/* events */
+export { EventType } from './event/EventType';
+export { WarheadDetonateEvent } from './event/WarheadDetonateEvent';
+export { WeaponFireEvent } from './event/WeaponFireEvent';
+export { ObjectAttackedEvent } from './event/ObjectAttackedEvent';
+export { InflictDamageEvent } from './event/InflictDamageEvent';
+export { HealthChangeEvent } from './event/HealthChangeEvent';
 
 /* rules */
 export { RULES, Rules, RULES_CONTENT } from './rules';

@@ -1513,3 +1513,134 @@ PASS  PowerupsRules: IonStorm/Gas/Pod/Squad 在读取时被剔除
 全量回归：`mathtest 40 / rulestest 62 / movetest 18 / crowdtest / phystest / occltest /
 dirtest / speedtest / menutest / assettest / inputtest / featuretest / harvesttest /
 maptest / buildingtest / battletest`，`smoke ERRORS 0`。
+
+## 25. v0.25-B3：战斗数学（原版 33 文件 / ≈2,600 行）
+
+B2 把 `WarheadRules.verses` 读进来了，B3 是第一次真的拿它去乘。这一层全是纯函数
+加两个状态机，所以验收方式也最硬：不测"看起来对不对"，只测**原版算出来的那个数**。
+
+### 25.1 本轮范围
+
+```
+sim/Warhead.ts                     775 行   canDamage / computeDamage / inflictDamage / detonate
+sim/Weapon.ts                      546 行   burst / cooldown / distributedFire 三套状态机
+sim/WeaponTargeting.ts             350 行   整本"什么能打什么"的规则
+sim/Target.ts                      135 行   目标是一个"落点"，不是一个对象
+sim/gameobject/unit/RangeHelper.ts 310 行   四种距离与唯一加射程的地方
+sim/gameobject/trait/HealthTrait.ts 162 行  百分比 ↔ HP 的双向转换
+sim/gameobject/unit/FacingUtil.ts    39 行
+sim/gameobject/unit/TargetUtil.ts    42 行   （当前未接调用方，B5 的导弹会用）
+sim/gameobject/unit/{ZoneType,CollisionType,HealthLevel}.ts
+sim/gameobject/trait/{Invulnerable,WarpedOut,DelayedKill,Tiberium}Trait.ts
+sim/gameobject/trait/interface/Notify{Damage,HealthChange,Heal,Tick,WarpChange}.ts
+sim/gameobject/common/AnimTerrainEffect.ts  矿石烧毁 + 焦痕
+sim/map/tileFinder/RadialTileFinder.ts      同心方环生成器
+sim/map/{BridgeOverlayTypes,OreOverlayTypes}.ts   写死的 id 区间
+sim/art/FlhCoords.ts
+sim/event/{EventType,WarheadDetonate,WeaponFire,ObjectAttacked,InflictDamage,HealthChange}Event.ts
+sim/trait/interface/NotifyAttack.ts
+sim/type/{OverlayTibType,TiberiumType}.ts
+```
+
+引擎侧 3,258 行（原版同范围 ≈2,600 行），差额是注释与 duck-type 接口声明。
+
+### 25.2 一次命中经过的六段
+
+```
+canDamage(obj, tile, zone)          能不能碰        → 布尔，16 道 early-out
+computeDamage(base, target, world)  该掉多少        → 纯函数，护甲 × verses × 各种除法
+detonate() 里按距离 lerp            溅射衰减        → lerp(dmg, percentAtMax*dmg, d/r)
+sign() 吸附                         亚 1 伤害       → ±1，有 25% 门槛
+inflictDamage()                     HP 真的变       → 事件 + 恐慌 + 崩溃 + 销毁
+pickExplodeAnim()                   炸成什么样      → damage/25 索引 animList
+```
+
+其中只有 `computeDamage` 是可重入的纯计算，其余四段都带副作用。这条链的**顺序**是
+语义的一部分：`HealthChange` 先于 `InflictDamage` 先于 `ObjectAttacked` 先于
+`WarheadDetonate`，四条事件在 `combattest` 里被逐字断言。
+
+### 25.3 五处「看着像 bug，必须照抄」
+
+1. **`verses.get(armor) || 1` 把显式的 0% 也变成 100%**。
+   写 `Verses=0%` 想表达"完全免疫"，读出来却是满伤。原版就是这样，我第一版断言
+   写"显式 0 应该是 0"直接挂了。要真免疫得用 `Immune=yes`，不是 `Verses=0`。
+
+2. **`computeDamage` 最后一行是 `damage > 0 ? floor : ceil`**。
+   取整方向**背离零**。于是 0.9 伤害在 `computeDamage` 处就已经变成 0，`detonate`
+   里那个 `Math.sign()` 吸附**够不着**它 —— 亚 1 伤害想造成 1 点，必须 `baseDamage`
+   本身就 ≥ 1，再靠溅射衰减把它压到亚 1，才会被吸附回 1。这是两个不同的入口，
+   很容易以为"0.5 伤害也会扣 1 血"。
+
+3. **`HealthTrait` 的百分比 → HP 不是往返的**。
+   `health = v` → `max(1, floor(v * maxHP / 100))`。50 上限的单位设 1% 得到 1 HP，
+   再读回来是 2%。那个 `max(1, ...)` 是"设正值永远杀不死"的保证，血条上的 1% 和
+   内部的 1 HP 本来就不是同一个数。
+
+4. **建筑副武器的射程被主武器封顶**，`min(primary.range, own.range)`，
+   只有 `overpoweredTrait`（磁暴线圈充能）能绕过。所以给防空炮写 `Range=12` 而主炮
+   `Range=8`，实际只有 8。
+
+5. **`RadialTileFinder` 的环序是固定的**：底行右→左、右列下→上、顶行左→右、
+   左列下→上。看起来只是遍历顺序，但 `detonate` 里"谁算直击"取决于它，
+   两个重叠单位谁吃 `isDirectHit` 由这个顺序决定。
+
+### 25.4 两个载体换掉
+
+**`ScatterTask` 还没出生**。`Warhead.suppressOrScatterTarget` 里要
+`new ScatterTask(...)`，而 `ScatterTask` 依赖 `MoveTask`（1,037 行，B7）。按
+"能力先到、载体后到"的原则，改成 `Warhead.taskFactory` 静态注入点：
+
+```ts
+static taskFactory?: WarheadTaskFactory;   // B7 由 ScatterTask 注册
+```
+
+条件分支（`fraidycat` / `hasTasks` / `isPanicked` / `isSuppressed`）100% 保留，
+只有"实例化"被延后。未注册时那一步是空操作，不会崩。
+
+**`new IniSection("Dummy")` → `new WeaponRules({ name: "Dummy" })`**。
+`createDummyWeaponInfo()` 需要一份"什么都没有"的武器规则给无武器弹头用。
+原版从空 INI 段构造，我们从空数据对象构造——同义。
+
+### 25.5 一处顺手补齐的上游
+
+`TileDirection` 原本只有四个北向成员（寻路只需要这些）。`AnimTerrainEffect`
+的 2×2 焦痕需要 `Bottom` / `BottomLeft` / `BottomRight` 三格都存在，所以把枚举补到
+完整八向。原版是数字枚举、我们是字符串枚举，能力等价。
+
+### 25.6 验证：`tools/combattest.mjs`（71 条断言）
+
+```
+PASS  verses[Flak]=0.5 生效 → 10 × 0.5 = 5
+PASS  verses 缺槽位 → `|| 1` 满伤 10
+PASS  verses 显式写 0 → `0 || 1` 仍是满伤 10（原版如此）
+PASS  负伤害向上取整 -1.9 → -1
+PASS  0.9 伤害在 computeDamage 处归 0（±1 吸附在 detonate 里，够不着）
+PASS  老兵护甲是除数：10 / 2 = 5
+PASS  卧倒步兵吃 0.5 倍；辐射/时空弹头不吃这个折扣
+PASS  WallAbsoluteDestroyer → 正无穷
+PASS  Wood=yes 打木墙 → 10（不是 0）；打混凝土墙 → 0
+PASS  health = 1% → 1 HP，不是 0
+PASS  max 50 / health 1% → 1 HP 且回报 2%
+PASS  projectDamage 下限是 -30
+PASS  arcing 速度 = 0.75 × min(256, 128) = 96
+PASS  !rot / inviso / isLaser / isElectricBolt → 正无穷
+PASS  建筑副武器被主武器射程封顶 → min(8,12) = 8；Overpowered 解封 → 12
+PASS  驻军 3 人 → rof 60/3 = 20
+PASS  老兵 ROF 乘完再 floor：61 × 0.5 = 30.5 → 30
+PASS  Secondary 专用对空武器不能打地面（zone 判定拦截）
+PASS  空降中（>2 格）步兵需要防空武器；高度 2 不吃豁免
+PASS  4x2 建筑 × 平射武器 → ceil(min(4,2)/2) = 1 → 11
+PASS  下坡 (4-0)×5 = 20 加成 → 30；上坡无加成
+PASS  矿石 overlay：isOre=true 但不设 obj
+PASS  桥 overlay 强制 bridgeMode = Bridge(2)
+PASS  建筑 target 用 centerTile，不是 tile
+PASS  环 1 的环序：4,4 5,5 4,5 3,5 5,4 5,3 3,3 4,3 3,4
+PASS  矿 id 127 落在 Riparius/Vinifera 重叠区 → Riparius（先测 Riparius）
+PASS  端到端：100 伤害打 100 HP → 死亡且 HP 归零
+PASS  端到端：事件链 29 → 28 → 12 → 30
+PASS  端到端：0.5 伤害一滴血都不掉
+```
+
+全量回归：`mathtest 40 / rulestest 62 / combattest 71 / movetest 18 / crowdtest /
+phystest / occltest / dirtest / speedtest / menutest / assettest / inputtest /
+featuretest / harvesttest / maptest / buildingtest / battletest`，`smoke ERRORS 0`。

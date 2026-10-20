@@ -14,11 +14,27 @@
  * parameter so the call sites stay identical to the reference.
  */
 
+/**
+ * All eight neighbours, matching redalert2/src/game/map/TileCollection.ts.
+ *
+ * The reference uses a numeric enum (Top=0 .. BottomRight=7); ours is a string
+ * enum so that a stray direction shows up in a log as `bottomLeft` instead of
+ * `5`. The *ability* is identical — every member has an entry in `DIR_VECTORS`
+ * and `getNeighbourTile` supports all eight.
+ *
+ * Only the four northern directions were needed by pathing, but the damage path
+ * needs the southern three: `AnimTerrainEffect.spawnSmudges` requires all of
+ * Bottom / BottomLeft / BottomRight to exist before it will place a 2x2 crater.
+ */
 export enum TileDirection {
     Left = 'left',
     TopLeft = 'topLeft',
     Top = 'top',
     TopRight = 'topRight',
+    Right = 'right',
+    BottomLeft = 'bottomLeft',
+    Bottom = 'bottom',
+    BottomRight = 'bottomRight',
 }
 
 export const DIR_VECTORS: Record<string, [number, number]> = {
@@ -26,6 +42,10 @@ export const DIR_VECTORS: Record<string, [number, number]> = {
     [TileDirection.TopLeft]: [-1, -1],
     [TileDirection.Top]: [0, -1],
     [TileDirection.TopRight]: [1, -1],
+    [TileDirection.Right]: [1, 0],
+    [TileDirection.BottomLeft]: [-1, 1],
+    [TileDirection.Bottom]: [0, 1],
+    [TileDirection.BottomRight]: [1, 1],
 };
 
 export class Tile {

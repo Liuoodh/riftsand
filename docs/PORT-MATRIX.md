@@ -171,10 +171,11 @@
 | 原版总计 | 1,207 | 125,799 |
 | 豁免（不做 / 原创） | 605 | 74,160 |
 | **应移植** | **602** | **51,639** |
-| 其中已移植 | 96 | 10,147 |
-| **待移植** | **506** | **≈41,500** |
+| 其中已移植 | 129 | 13,405 |
+| **待移植** | **473** | **≈38,200** |
 
-> 已移植的 10,147 行 = B1 数学地基（40 / 1,411）+ B2 规则全表（37 / 2,635）+ 此前 19 / 6,101。
+> 已移植的 13,405 行 = B1 数学地基（40 / 1,411）+ B2 规则全表（37 / 2,635）
+> + B3 战斗数学（33 / 3,258）+ 此前 19 / 6,101。
 > 也就是说：**剩余工作量约为此前全部工作的 4 倍**。
 
 ---
@@ -185,7 +186,7 @@
 |---|---|---:|---:|---|---|
 | **B1 地基** | `util/math`+`geometry`、`game/math/*`、`game/type/*`、`Prng`、`Coords` | 40 | 1,411 | 无 | ✅ `8dd4d08` |
 | **B2 规则全表** | `game/rules/**` 全部 37 文件（含 WarheadRules 的 Verses 表） | 37 | 2,635 | B1 | ✅ |
-| **B3 战斗数学** | `Warhead`、`Weapon`、`WeaponTargeting`、`Target`、`trait/DamageTrait` 族 | 40 | 2,600 | B2 | ⏳ 下一批 |
+| **B3 战斗数学** | `Warhead`、`Weapon`、`WeaponTargeting`、`Target`、`trait/DamageTrait` 族 | 33 | 2,600 | B2 | ✅ 完成 |
 | **B4 地图地形** | `game/map/**` 21 文件（Terrain 重写、Bridges、MapShroud、PathFinder、OreSpread、TileOcclusion） | 21 | 2,863 | B2 | ⏳ |
 | **B5 对象核心** | `gameobject/` 根 17 文件（含 `Projectile` 948）+ `locomotor` 9 + `unit` 14 + `selection` 5 | 45 | 6,200 | B3 B4 | ⏳ |
 | **B6 trait 补齐** | 剩余 44 个 `gameobject/trait/*` | 44 | 3,800 | B5 | ⏳ |
