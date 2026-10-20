@@ -55,6 +55,29 @@ export abstract class Curve<T extends { distanceTo(other: T): number }> {
         return lengths[lengths.length - 1];
     }
 
+    /**
+     * Unit tangent at arc-length fraction `u`. Not in the reference's curve file
+     * (which relied on a three.js build that had it) but required by
+     * `DriveLocomotor`'s steer-curve branch, where the vehicle's facing follows
+     * the curve instead of the straight line to the waypoint.
+     *
+     * Numeric derivative with a fixed delta, exactly like three.js
+     * `Curve.getTangent`: two samples one ten-thousandth of the curve apart,
+     * normalised.
+     */
+    getTangentAt(u: number, optionalTarget?: T): T {
+        const delta = 0.0001;
+        const t1 = Math.max(0, u - delta);
+        const t2 = Math.min(1, u + delta);
+        const point1 = this.getPointAt(t1);
+        const point2 = this.getPointAt(t2);
+        const tangent = (optionalTarget ?? this.getPointAt(u)) as any;
+        tangent.copy(point2);
+        tangent.sub(point1 as any);
+        tangent.normalize();
+        return tangent as T;
+    }
+
     updateArcLengths(): void {
         this.needsUpdate = true;
         this.cacheArcLengths = null;

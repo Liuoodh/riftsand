@@ -1872,3 +1872,407 @@ PASS  occluded 按引用计数：删除一个遮挡者仍遮挡
 | assettest | 20 | | |
 
 `tsc --noEmit` 0 错误，`web-mobile` 构建通过。
+
+---
+
+## 27. v0.25-B5a：对象模型（原版 33 文件 / 3,004 行）
+
+B1–B4 都是**纯函数层**：给定输入必然给定输出，错了单测就红。B5 第一次引入
+**有生命周期的对象**——它们出生、加 trait、跨格、被打、状态迁移、销毁。
+这一层的 bug 有个共性：**测试全绿，游戏是错的**。因为对象之间的时序不是"算错了"，
+而是"少跑了一次"。
+
+所以这一章的重点不是"移植了哪些文件"，而是**四个时序契约**。它们后面每一批
+（B6 trait、B7 task、B10 编排）都要踩在上面。
+
+### 27.1 本轮范围
+
+```
+sim/gameobject/GameObject.ts          220 行   根类：type 谓词、trait 分发、事件出口
+sim/gameobject/Techno.ts               89 行   规则镜像 + 4 个计算 getter
+sim/gameobject/Unit.ts                 21 行   Infantry/Vehicle/Aircraft 的公共基类
+sim/gameobject/Infantry.ts             80 行   SUB_CELLS、派生 stance
+sim/gameobject/Vehicle.ts             104 行   rocking（34 帧）
+sim/gameobject/Aircraft.ts             66 行   yaw / direction 别名
+sim/gameobject/Building.ts            114 行   三态 BuildUp → Ready → BuildDown
+sim/gameobject/Overlay.ts              73 行   矿/墙/桥面；getFoundation 的 1×3 与 3×1
+sim/gameobject/Smudge.ts               26 行   焦痕，纯装饰
+sim/gameobject/Terrain.ts              25 行   树/岩石，可被碾压
+sim/gameobject/Bridge.ts               16 行   桥头接口
+sim/gameobject/Weapon.ts                7 行   纯 re-export
+sim/gameobject/ObjectPosition.ts      305 行   格 / 子格 / 两层高度 / 派生世界坐标
+sim/gameobject/unit/*.ts              696 行   8 文件：碰撞、视线、散位、锚位、老练
+sim/gameobject/selection/*.ts         274 行   5 文件：位集选区
+sim/gameobject/locomotor/*.ts         888 行   7 文件：脚/轮/悬浮/超时空/导弹
+```
+
+外加支撑层 270 行：`sim/Traits.ts`(86)、`sim/theater/rampHeights.ts`(35)、
+`gameobject/trait/interface/*`(7×8=56)、`sim/event/`(3 个事件 / 33)、
+`sim/task/`(2 个 task / 60)。
+
+原版同范围 4,777 行的其余 1,873 行（`Projectile` 948、`ObjectFactory` 266、
+`Winged`/`Jumpjet` locomotor 659）**不在本批**——理由见 §27.10。
+
+### 27.2 身份在 `type` 里，不在类里
+
+`GameObject` 上有 11 个 `isX()` 谓词，但没有一个靠 `instanceof`：
+
+| 谓词 | 谁回答 |
+|---|---|
+| `isSmudge` / `isOverlay` / `isTerrain` / `isProjectile` / `isDebris` | `type === ObjectType.X`（根类） |
+| `isBuilding` / `isInfantry` / `isVehicle` / `isAircraft` / `isUnit` / `isTechno` | 基类返回 `false`，子类覆写成 `true` |
+
+看着像啰嗦，但它是**必须**的：`Overlay` 的 `isTiberium()`/`isWall()` 都在
+`Overlay` 上，而 `GameObject.isSmudge()` 在根类上。如果统一改成 `instanceof`，
+`GameObject` 就得反向 import 全部子类——在 TS 里就是循环依赖，运行时拿到
+`undefined` 的构造器，`instanceof undefined` 抛 TypeError。
+
+`GameObject` 还有一条 `[key: string]: any` 索引签名。这是**故意的**：trait
+句柄按名字挂在对象上（`moveTrait`、`healthTrait`、`warpedOutTrait`…），
+而 `Techno.isWarpedOut()` 在第一次 tick 之前就要读 `warpedOutTrait`。
+用 `traits.get(WarpedOutTrait)` 也能拿，但那会为每种类型名建一份 filter 缓存，
+而这是个每帧每对象都要问的问题。
+
+### 27.3 Traits：两条匹配路径，一份快照
+
+`Traits.filter(type)` 接受两种东西，走两条完全不同的路：
+
+```ts
+typeof type === 'function'   → trait instanceof type          // 按类
+否则                          → traitImplements(trait, type)   // 按 marker 对象
+```
+
+marker 路径是**鸭子类型**：遍历 marker 对象自己的属性名，取到 symbol，
+再看 trait 上有没有这个 symbol。
+
+```
+const NotifyTick = { onTick: Symbol() };
+trait[NotifyTick.onTick] !== undefined  →  "implements NotifyTick"
+```
+
+这就是为什么 `gameobject/trait/interface/*` 里那 12 个文件**全是**
+
+```ts
+export const NotifyTick = { onTick: Symbol() };
+export interface NotifyTick { [onTick](obj: GameObject, dt: number): void; }
+```
+
+而不是一个光秃秃的 `interface`——真正的 `interface` 在编译后什么都不剩，
+没法当值传进 `filter`。同名 `const` + `interface` 声明合并让两边共享同一个名字。
+
+缓存 key 是**类或对象引用本身**，任何 mutation（`add`/`addToFront`/`remove`/`clear`）
+都会 `clear()`。这条必须守住：`MoveTrait` 在运行期增删 trait 的场景不少见，
+缓存不清就是"新加的 trait 不生效"。
+
+**关键契约：`cachedTraits.tick` 是快照，不是视图。**
+
+```
+addTrait(trait)  →  traits.add() + 若含 onTick 则 push 进 cachedTraits.tick
+traits.add()     →  只进 traits，不进 cachedTraits.tick
+```
+
+`ObjectFactory` 在装配末尾一次性 `cachedTraits.tick.push(...traits.filter(NotifyTick))`
+把快照建出来。也就是说：**在 `ObjectFactory` 里用 `traits.add()` 加的 trait 不会 tick**，
+必须等最后那次重建。这不是原版的 bug，是它省掉每帧 filter 的办法——
+`Techno.update` 的 warped-out 分支只需要走一遍短数组。
+
+`dispose()` 里 `cachedTraits.tick.length = 0` 而不是 `= []`，因为别处可能持有
+这个数组的引用。
+
+### 27.4 ObjectPosition：世界坐标是派生值，不是状态
+
+`ObjectPosition` 里有四个"位置"，只有一个能直接读，其余三个都是算出来的：
+
+| 字段 | 性质 |
+|---|---|
+| `tile` | 状态。跨格时才变 |
+| `tileOffset` | 状态。格内偏移，lepton 单位，格 = 256 |
+| `_tileElevation` | 状态。**相对**高度（离地表多高），地面单位用 |
+| `_absoluteElevation` | 状态。**绝对**世界 Y，飞机/坠落残骸用 |
+| `worldPosition` | **派生**。任何 mutator 重算它并派发 `onPositionChange` |
+
+前两个高度**互斥**，setter 里显式清空对方：
+
+```ts
+set tileElevation(e)  { this._absoluteElevation = undefined; this._tileElevation = e; … }
+set absoluteElevation(y) { this._absoluteElevation = y; this._tileElevation = undefined; … }
+```
+
+而 `get tileElevation` 在只有绝对值时会**反算**回来：世界 Y 减掉格高再减掉斜面
+插值，所以一架停在斜坡上的飞机报出来的相对高度≈0。这是斜坡上飞机不"沉进"地面的原因。
+
+`subCell` 是子格编号，0 表示格中心，1–4 是四角：
+
+```
+(signX, signY) = (-1,-1) (1,-1) (-1,1) (1,1)   →   1、2、3、4
+```
+
+它的 **getter 和 setter 不是逆运算**——这点容易看漏：
+
+```ts
+// getter：从实际偏移反推符号，居中时返回 0
+const signX = Math.sign(offset.x / 256 - 0.5);
+const signY = Math.sign(offset.y / 256 - 0.5);
+return signX && signY ? signY + 1 + (signX + 1) / 2 + 1 : 0;
+
+// setter / computeSubCellOffset：从编号正向算偏移
+const signX = ((subCell - 1) % 2) * 2 - 1;
+const signY = 2 * Math.floor((subCell - 1) / 2) - 1;
+```
+
+getter 里那个 `+ 1 + (signX + 1) / 2 + 1` 不是笔误：`signY` 是 ±1，
+`(signX+1)/2` 是 0 或 1，合起来正好落到 1–4。`signX && signY`（不是 `!==`）
+是因为 `Math.sign(0) === 0`，短路成 0——格中心。
+
+**`clone()` 必须一并拷 `desiredSubCell`。** 这是本轮唯一一处原版没有、
+我们自己补的字段：原版走位时靠 `Vehicle.desiredSubCell` 记录"想去哪个角"，
+`ObjectPosition` 自己不留。我们的 `subCell` setter 写了 `desiredSubCell`，
+于是 clone 不拷它就会让克隆出来的对象"忘记"目标子格。
+
+### 27.5 四个具体类，每个只有一行真相
+
+这四个类加起来 364 行，其中约 300 行是注释和字段镜像。真正的逻辑各只有一处，
+而这一处恰好是"看起来能简化、简化就错"的那种：
+
+**`Techno.sight` —— 先乘倍率再夹，精英也不会看穿迷雾**
+
+```ts
+Math.min(TechnoRules.MAX_SIGHT, this.rules.sight * veteranMultiplier)
+```
+
+顺序不能反。写成 `min(sight, MAX) * mult` 之后，一个 sight=10 的精英单位
+会得到 12——超过原版 11 的硬上限，能看见迷雾外一格。原版这个 11 是
+"屏幕能显示的最大视野"，超出部分没有任何渲染，等于白给。
+
+**`Infantry.stance` —— 派生值，不是字段**
+
+```ts
+get stance() {
+    return this._stance === StanceType.None && this.suppressionTrait?.isSuppressed()
+        ? StanceType.Prone      // = 2
+        : this._stance;
+}
+```
+
+被压制（sniper/tesla 的 suppress）时**自动**趴下，而且不写回 `_stance`——
+所以压制解除后它会自己站起来，不需要"恢复原姿态"的逻辑。`Prone` 的枚举值是
+**2** 不是 1（1 是 `Guard`），这个坑在写断言时踩过一次。
+
+`SUB_CELLS = [2, 4, 3]` 对应"一个格里能塞几个步兵"按等级：
+无纪律 / 普通 / 精英。老练步兵站得更开。
+
+**`Vehicle.rocking` —— 二次命中不重置倒计时**
+
+```ts
+this.rocking = { …, ticksLeft: this.rocking?.ticksLeft ?? ROCKING_TICKS };
+```
+
+`??` 不是 `||`，也不是无条件重置。一辆被连续打了 30 帧的车，在 30 个 tick 里
+一直朝同一个方向晃，而不是在第 30 帧突然"重新开始晃"。`consideredAircraft`
+的车（悬浮/飞行模式）不 rock，因为它们的图本来就没有履带。
+
+**`Building.buildStatus` —— 三态 + `lastBuildStatus`**
+
+```
+BuildUp(0) ──盖完──> Ready(1) ──卖/毁──> BuildDown(2)
+```
+
+`lastBuildStatus` 存的永远是**迁移前**的值，所以 `setBuildStatus` 里
+`oldStatus = this.lastBuildStatus` 拿到的是真正的旧状态，而不是这次刚写的。
+派发顺序也固定：先 `NotifyBuildStatus`(旧值, 对象, ctx)，再
+`context.events.dispatch(BuildStatusChangeEvent)`。
+
+`update()` 里有一行容易误读：只在 `buildStatus !== Ready` **或**
+`poweredTrait` 存在但没电 时才禁用 `attackTrait`。也就是"没电的磁暴线圈不能开火，
+但没电的光棱塔也不会变成废墟"——前者是 `poweredTrait` 分支，后者根本不进这个分支。
+
+### 27.6 三个 helper：顺序就是语义
+
+**`CollisionHelper`** 回答"弹丸停在这一格会撞到什么"，是有序级联，顺序承重：
+
+```
+walls → shore → ground → high bridge（比高度）→ cliffs
+```
+
+- 墙排第一：墙会先挡住子弹，墙下面有没有桥根本不查。
+- `shore` 在 `ground` 前：落在桥**下**水面的子弹算 `Shore`，不算 `UnderBridge`。
+- 高架桥最后：`OnBridge` / `UnderBridge` 由 `source`/`target` 的绝对高度比较决定，
+  两者都得先有这个高度。
+
+`source.tileElevation <= 2` 是"够高能打过去"的门槛：站在 3 级台地上的单位
+无视墙。而 `<= 1.1` 是另一条——低于这个高度的单位**肉身**挡弹。
+
+**`LosHelper`** 不是射线，是 Bresenham 逐格 + **三道独立否决**：
+
+| 开关 | 否决条件 |
+|---|---|
+| `subjectToWalls` | 任意 `LandType.Wall` 格 |
+| `subjectToCliffs` | 比射手高的崖；且**越过崖之后**，后面更高的格也否决（`wasCliff` 状态 →"不能从峡谷里往外打"） |
+| `spawner` | 前两格内有高架桥 |
+
+`warhead.wall` 一票短路：能拆墙的弹头，对墙不做 LOS 判定。
+
+**`MovePositionHelper`** 是"锚定最大簇 + 溢出"：
+
+```
+1. 按 8 邻接 flood fill 分簇
+2. 最大簇按质心保形落位（每个单位保留它相对簇心的偏移）
+3. 其余簇 / 放不下的单位径向外推，最多 5 格
+```
+
+第 2 步是框选一队坦克时它们"大致保持原队形"到达的原因。第 3 步的三条可放条件
+缺一不可，其中 `tileHasRoom` 对步兵要求 3 个空子格、对其它只要 1 个——
+所以 20 个步兵能塞进 6 格，20 辆坦克塞不进去。
+
+### 27.7 locomotor：没有基类，只有结构
+
+原版的 `Locomotor.ts` 只有 3 行（空文件）。五种移动方式**不共享基类**，
+它们只是各自实现了若干方法，`MoveTrait` 调哪个存在就调哪个：
+
+```
+selectNextWaypoint(obj, waypoints)
+onNewWaypoint(obj, target, …)
+onWaypointUpdate(obj, target)
+tick(obj, …) → { distance, done }
+tickStationary(obj, game)     仅飞机
+tickCrash(obj, game, state)   仅飞机
+```
+
+我们把它写成一个 `interface`（`readonly` 可选方法），只是为了让契约有个落点，
+不是为了强行收口。五种实现的性格完全不同：
+
+| 实现 | 特色 |
+|---|---|
+| `FootLocomotor` | 三个 gate 的**顺序不可换**：prone → panic → terrain。趴下的步兵先减速，再谈恐慌，最后才看地形 |
+| `DriveLocomotor` | Bézier 惯性过弯（缺 `Curve.getTangentAt`，本轮补上）+ 加速曲线 + 炮塔预瞄；单路点直接 `baseSpeed/2` |
+| `HoverLocomotor` | 刹车距离 `s = v²/2a`，所以气垫船急停会冲过头 |
+| `ChronoLocomotor` | 一次 `tick` 返回整段位移并置 `isTeleport`，因为它不需要中间帧 |
+| `MissileLocomotor` | 三相位 + `lazyCurve`（发射后先直飞一段再拐弯） |
+
+`LocomotorFactory` 遇到 `Aircraft` / `Jumpjet` **抛带名字的错误**，不静默回落
+到 `DriveLocomotor`。理由很实际：飞机拿到轮式 locomotor 会以地面速度"贴地飞"，
+看起来像物理 bug 而不是"这个分支还没写"，排查成本极高。
+
+### 27.8 SelectionModel：位集，和一处故意偏离
+
+```
+Hover    = 1
+Selected = 2
+level = 3  →  既悬停又选中
+```
+
+`maxSelectionLevel` 在**构造时**就定死：墙建筑是 `None`（连高亮都没有），
+`rules.selectable === false` 的是 `Hover`（能高亮、不能选），其余是 `3`。
+`setSelectionLevel` 就是 `Math.min(max, level)`——位集让夹取变成一次比较。
+
+**一处故意偏离原版**：
+
+```ts
+// 原版
+isHovered() { return (this.selectionLevel >> SelectionLevel.Hover) & 1; }
+// 我们
+isHovered() { return (this.selectionLevel & SelectionLevel.Hover) !== 0; }
+```
+
+原版 `>> Hover` 移的是**枚举值** 1，所以它返回的是 `Selected` 位——
+`isHovered()` 和 `isSelected()` 只在"仅悬停"的对象上不一致。
+`setHover` 写的是 bit 0，下游没有任何代码能补偿这个错位，所以这是笔误不是设计。
+我们按意图实现，并在文件头和这里都写明。
+
+`UnitSelection` 采取**读时过滤**：`getSelectedUnits()` 丢掉
+destroyed / crashing / disposed / 未 spawn 的，但集合里**仍然保留**它们，
+直到 `cleanupUnit` 被显式调用。这样"选中的单位正在坠落"不会导致选区在
+一帧内缩水又弹回——掉出列表的时机由调用方决定。
+
+### 27.9 本轮挖出的两个真缺陷
+
+**(1) `NotifyAttack` 有两个不同的 `Symbol()` → trait 静默失效**
+
+B3 时 `sim/trait/interface/NotifyAttack.ts` 自己声明了一份 `Symbol()`，
+B5 新建 `sim/gameobject/trait/interface/NotifyAttack.ts` 时又声明了一份。
+`Traits.filter` 按 **symbol 身份**匹配，两份 symbol 不相等，于是：
+
+```
+实现旧路径的 trait  ←→  GameObject.onAttack  完全互不可见
+```
+
+没有类型错误（两边 `interface` 结构一致），没有运行时报错，
+trait 就是安静地收不到 `onAttack`。这类缺陷只有"数一数订阅者"才能发现。
+修法是把 B3 那份改成纯 re-export，一个 symbol 两路径共用。
+
+**(2) `Curve.getTangentAt` 不存在**
+
+`DriveLocomotor` 的 Bézier 过弯分支需要切线方向。我们的 `curves.ts` 只有
+`getPointAt`。补的是**固定 delta 0.0001 的前向数值导数**，不是中心差分——
+分割点两侧的曲线段是不同实例，中心差分会在段接缝处取到另一个段的点，把弯角切圆。
+
+### 27.10 为什么 `factory()` 延后到 B5b / B6
+
+`Vehicle.factory` / `Infantry.factory` / `Aircraft.factory` / `Building.factory`
+四个静态装配方法，加上 `ObjectFactory`，一共约 700 行，它们只做一件事：
+**按规则名 new 出 30 多个 trait 实例并挂上去**。
+
+```
+CrashableTrait  TransportTrait  GarrisonTrait  DeployerTrait
+SpawnerTrait    DockTrait       AirportTrait   AmmoTrait
+MindControllableTrait  TemporalTrait  WakesTrait  ParasiteTrait …
+```
+
+这 30 多个 trait 全在 B6。所以本批只移植**类本体、不写 `factory`**，
+文件头统一注明 `factory (trait assembly) ships with the trait batch`。
+强行先写会让 B5a 直接 import B6 的 44 个文件，一批变两批，审核也没法切。
+
+同理，`Projectile`(948 行) 的 `Projectile.factory` 依赖 `Warhead`+`Traits` 全套，
+`ObjectFactory` 的装配清单本身就是 trait 目录。于是 B5 拆成：
+
+| | 内容 | 文件 | 行数 | 依赖 |
+|---|---|---:|---:|---|
+| **B5a** | 对象类 + helper + locomotor + selection | 33 | 3,004 | B3 B4 ✅ |
+| **B5b** | `Projectile` + `ObjectFactory` + `Winged`/`Jumpjet` | 4 | 1,873 | B6 |
+
+### 27.11 验收
+
+`objecttest.mjs`（B5a 专项）**88 条**，分十组：
+
+```
+A  type 谓词：11 个 isX() 在根类/子类上的真假矩阵
+B  Traits：class 路径、marker 路径、缓存失效、addToFront 顺序
+C  cachedTraits.tick 是快照：traits.add 不 tick、addTrait 会 tick
+D  ObjectPosition：两套高度互斥、getter 反算、subCell 0/1..4、clone 带 desiredSubCell
+E  tileChanged：同格 false / 跨格 true（对象身份比较）
+F  Techno.sight 双重夹取：精英 10 → 11 不是 12
+G  Infantry.stance 派生：压制 → Prone(2)，解除 → 回原值
+H  Vehicle.rocking：34 帧衰减、二次命中不重置、consideredAircraft 不 rock
+I  Building：三态迁移、lastBuildStatus 语义、事件只派发一次
+J  LosHelper / CollisionHelper / MovePositionHelper / DriveLocomotor 各一条端到端
+```
+
+跑测试时踩到的桩对象坑，记在这里免得下一批再踩：
+
+- `Terrain` 这个名字被 `map/Terrain` 占了，对象类在 `index.ts` 里叫 `TerrainObject`。
+- `tileChanged` 靠 `tile !== this._tile` 比较**对象身份**，桩的
+  `getByMapCoords` 每次 new 一个必然返回 `true`。桩必须缓存 tile 对象。
+- `LosHelper` 用 `hasPosition()` 区分"对象"和"格"，桩不给 `position` 会被当成格子。
+- `TargetUtil.computeInterceptPoint` 会调 `targetVelocity.clone()`，桩必须给真 `Vector3`。
+
+全量回归（18 套件 / **491 条**）：
+
+| 套件 | 结果 | 套件 | 结果 |
+|---|---|---|---|
+| mathtest | 40 | menutest | 11 |
+| rulestest | 63 | assettest | 20 |
+| combattest | 71 | inputtest | 20 |
+| movetest | 18 | featuretest | 14 |
+| crowdtest | 7 | harvesttest | 6 |
+| phystest | 10 | maptest | 21 |
+| occltest | 5 | maptest2 | 63 |
+| dirtest | 9 | buildingtest | 13 |
+| speedtest | 12 | objecttest | 88 |
+
+`battletest`（6 分钟对战，13 杀 14 损，无异常）与 `smoke`（启动到 16 单位 /
+9 建筑 / 60fps）均 `ERRORS 0`。`tsc --noEmit` 0 错误。
+
+**已知风险**：B5a 的类本体目前**没有接线**到现有 `Game.ts`——`World` 生成的实体
+还是旧的自研类。真正切换发生在 B10（编排层）。在那之前，B5a 的正确性只由
+`objecttest` 保证，不受主循环验证。B6 完成后会先做一次"影子接线"：
+让 `ObjectFactory` 造出并行对象但不驱动，逐帧比对位置与血量。

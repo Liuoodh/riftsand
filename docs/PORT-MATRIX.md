@@ -171,15 +171,19 @@
 | 原版总计 | 1,207 | 125,799 |
 | 豁免（不做 / 原创） | 605 | 74,160 |
 | **应移植** | **602** | **51,639** |
-| 其中已移植 | 150 | 17,479 |
-| **待移植** | **452** | **≈34,100** |
+| 其中已移植 | 183 | 20,483 |
+| **待移植** | **419** | **≈31,100** |
 
-> 已移植的 17,479 行 = B1 数学地基（40 / 1,411）+ B2 规则全表（37 / 2,635）
-> + B3 战斗数学（33 / 3,258）+ B4 地图地形（20 / 4,074）+ 此前 19 / 6,101。
+> 已移植的 20,483 行 = B1 数学地基（40 / 1,411）+ B2 规则全表（37 / 2,635）
+> + B3 战斗数学（33 / 3,258）+ B4 地图地形（20 / 4,074）+ B5a 对象模型（33 / 3,004）
+> + 此前 19 / 6,101。
 > B4 多出的 1,200 行是注释与 duck-type 接口，其内容层 `sim/content/`（2 / 273）
 > 是原创代码，不计入移植；同时删掉了 ≈1,000 行自研旧实现（`Tiles` / `Passability`）。
-> 也就是说：**剩余工作量约为此前全部工作的 2 倍**，且集中在 `gameobject/`（B5/B6）
-> 与 `task/`（B7）——这两块是"对象行为"，行数密度和耦合度都高于已完成的四批。
+> B5a 同理多出 ≈550 行注释；它的 `factory()` 装配（约 700 行）随 trait 批次落地，
+> 因此计入 B6 而非本批。
+> 也就是说：**剩余工作量约为此前全部工作的 1.5 倍**，且集中在 `task/`（B7）
+> 与 `Game.ts` 编排层（B10）——"对象行为"与"装配"两块，行数密度和耦合度都高于
+> 已完成的五批。
 
 ---
 
@@ -191,8 +195,9 @@
 | **B2 规则全表** | `game/rules/**` 全部 37 文件（含 WarheadRules 的 Verses 表） | 37 | 2,635 | B1 | ✅ |
 | **B3 战斗数学** | `Warhead`、`Weapon`、`WeaponTargeting`、`Target`、`trait/DamageTrait` 族 | 33 | 2,600 | B2 | ✅ 完成 |
 | **B4 地图地形** | `game/map/**` 21 文件（Terrain 重写、Bridges、MapShroud、PathFinder、OreSpread、TileOcclusion） | 21 | 2,863 | B2 | ✅ 完成 |
-| **B5 对象核心** | `gameobject/` 根 17 文件（含 `Projectile` 948）+ `locomotor` 9 + `unit` 14 + `selection` 5 | 45 | 6,200 | B3 B4 | ⏳ |
-| **B6 trait 补齐** | 剩余 44 个 `gameobject/trait/*` | 44 | 3,800 | B5 | ⏳ |
+| **B5a 对象模型** | `gameobject/` 根 13（`GameObject`/`Techno`/四个兵种/`Overlay`/`Smudge`/`Terrain`/`Bridge`/`Weapon`/`ObjectPosition`）+ `locomotor` 7 + `unit` 8 + `selection` 5 + `Traits` + `rampHeights` | 33 | 3,004 | B3 B4 | ✅ 完成 |
+| **B5b 装配与弹道** | `Projectile`(948) + `ObjectFactory`(266) + `Winged`/`Jumpjet` locomotor(659)。`Projectile.factory` 与 `ObjectFactory` 的装配清单本身就是 trait 目录，故整批后置 | 4 | 1,873 | B5a → **B6** | ⏳ |
+| **B6 trait 补齐** | 剩余 44 个 `gameobject/trait/*` + 四个兵种类与 `ObjectFactory` 的 `factory()` 装配（≈700 行） | 44 | 3,800 | B5a ✅ | ⏳ |
 | **B7 Task 全族** | 40 个 `task/**`（含 `MoveTask` 1,037、`AttackTask` 682） | 40 | 5,700 | B6 | ⏳ |
 | **B8 指令与动作** | `order/**` 19 + `action/**` 34 | 53 | 2,772 | B7 | ⏳ |
 | **B9 玩家与超武** | `player/**` 7 + `superweapon/**` 11 + `ConstructionWorker` + `GameFactory` + `Alliances` + `StartingUnitsGenerator` + `Country` | 28 | 3,700 | B8 | ⏳ |

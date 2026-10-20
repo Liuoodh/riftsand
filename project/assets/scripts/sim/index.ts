@@ -45,6 +45,8 @@ export { ZoneType, getZoneType } from './gameobject/unit/ZoneType';
 export { CollisionType } from './gameobject/unit/CollisionType';
 export { HealthLevel } from './gameobject/unit/HealthLevel';
 export { StanceType } from './gameobject/StanceType';
+export { DeathType } from './gameobject/DeathType';
+export { InfDeathType } from './gameobject/InfDeathType';
 export { FlhCoords } from './art/FlhCoords';
 export { RadialTileFinder } from './map/tileFinder/RadialTileFinder';
 export { BridgeOverlayTypes, OverlayBridgeType } from './map/BridgeOverlayTypes';
@@ -165,3 +167,52 @@ export type { TileSets, TileSetEntry, TileImage } from './theater/TileSets';
 /* content — our generated theater expressed in engine terms */
 export { ProceduralTileSets, buildTileData, TERRAIN_TYPE_OF_KIND } from './content/tileSets';
 export { OreOverlayStub } from './content/oreOverlay';
+
+/* object core — the model that replaces `game/Entities.ts` (B5) */
+export { Traits } from './Traits';
+export { MoveTrait, MoveState, MoveResult, CollisionState } from './MoveTrait';
+export { GameObject } from './gameobject/GameObject';
+export { Techno } from './gameobject/Techno';
+export { Unit } from './gameobject/Unit';
+export { Infantry } from './gameobject/Infantry';
+export { Vehicle, ROCKING_TICKS } from './gameobject/Vehicle';
+export { Aircraft } from './gameobject/Aircraft';
+export { Building, BuildStatus } from './gameobject/Building';
+export { Overlay } from './gameobject/Overlay';
+export { Smudge } from './gameobject/Smudge';
+export { Terrain as TerrainObject } from './gameobject/Terrain';
+export { Weapon as WeaponObject } from './gameobject/Weapon';
+export type { Bridge } from './gameobject/Bridge';
+export { ObjectPosition } from './gameobject/ObjectPosition';
+
+/* object core — per-unit helpers */
+export { CollisionHelper } from './gameobject/unit/CollisionHelper';
+export { CrateBonuses } from './gameobject/unit/CrateBonuses';
+export { LosHelper } from './gameobject/unit/LosHelper';
+export { MovePositionHelper } from './gameobject/unit/MovePositionHelper';
+export { ScatterPositionHelper } from './gameobject/unit/ScatterPositionHelper';
+
+/* object core — selection */
+export { SelectionLevel } from './gameobject/selection/SelectionLevel';
+export { SelectionModel } from './gameobject/selection/SelectionModel';
+export { SelectionList } from './gameobject/selection/SelectionList';
+export { UnitSelection } from './gameobject/selection/UnitSelection';
+export { UnitSelectionLite } from './gameobject/selection/UnitSelectionLite';
+
+/* object core — locomotor */
+export { FootLocomotor } from './gameobject/locomotor/FootLocomotor';
+export { DriveLocomotor } from './gameobject/locomotor/DriveLocomotor';
+export { HoverLocomotor } from './gameobject/locomotor/HoverLocomotor';
+export { ChronoLocomotor } from './gameobject/locomotor/ChronoLocomotor';
+export { MissileLocomotor } from './gameobject/locomotor/MissileLocomotor';
+export { LocomotorFactory } from './gameobject/locomotor/LocomotorFactory';
+
+/* trait interfaces + the two tasks the object core needs */
+export { NotifyDestroy } from './gameobject/trait/interface/NotifyDestroy';
+export { NotifyOwnerChange } from './gameobject/trait/interface/NotifyOwnerChange';
+export { NotifySpawn } from './gameobject/trait/interface/NotifySpawn';
+export { NotifyUnspawn } from './gameobject/trait/interface/NotifyUnspawn';
+export { NotifyTileChange } from './gameobject/trait/interface/NotifyTileChange';
+export { NotifyBuildStatus } from './gameobject/trait/interface/NotifyBuildStatus';
+export { TurnTask } from './task/TurnTask';
+export { WaitForBuildUpTask } from './task/WaitForBuildUpTask';

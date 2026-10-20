@@ -108,6 +108,24 @@ export class WaitMinutesTask extends WaitTicksTask {
     }
 }
 
+/**
+ * Port of redalert2/src/game/gameobject/task/system/TaskGroup.ts.
+ *
+ * Runs its children in order and reports "done" only when all of them are. The
+ * trick is that `onTick` returns `true` immediately: the driver loop drains
+ * `children` first and never reaches the body until the queue is empty.
+ */
+export class TaskGroup extends Task {
+    constructor(...tasks: Task[]) {
+        super();
+        this.children.push(...tasks);
+    }
+
+    onTick(): boolean {
+        return true;
+    }
+}
+
 /** Per-unit task queue (the reference's UnitOrderTrait, trimmed to tasks). */
 export class UnitOrders {
     private tasks: Task[] = [];

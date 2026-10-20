@@ -224,6 +224,9 @@ node tools/battletest.mjs
 | `featuretest` | 玩法特性 | 14 |
 | `harvesttest` | 采矿三件套 | 6 |
 | `buildingtest` | 建筑 trait 族 | 13 |
+| `objecttest` | 对象模型：type 谓词 / Traits 双路径 / tick 快照 / 位置派生 / 三态建筑 / 视线与碰撞 | 88 |
+
+**合计 18 套件 / 491 条。**
 
 另有探针型脚本（输出 JSON 不判定）：`steertest` / `walktest` / `pathsim` / `physshowcase`。
 
